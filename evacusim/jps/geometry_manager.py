@@ -11,8 +11,8 @@ from typing import Any
 import jupedsim as jps
 
 from evacusim.utils.logger import get_logger
-from evacusim.jps.geometry_processor import (
-    GeometryProcessor,
+from evacusim.jps.geometry_processor import GeometryProcessor
+from evacusim.jps.geometry_loader import (
     load_entrance_areas,
     load_escalator_corridors,
     load_obstacles,
