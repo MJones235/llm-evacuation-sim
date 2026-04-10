@@ -30,7 +30,7 @@ class VideoGenerationHelper:
             Dictionary with geometry data or None if loading fails
         """
         try:
-            from evacusim.jps.geometry_processor import (
+            from evacusim.jps.geometry_loader import (
                 load_entrance_areas,
                 load_escalator_corridors,
                 load_obstacles,
