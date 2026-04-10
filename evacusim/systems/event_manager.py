@@ -41,6 +41,7 @@ class EventManager:
         # Event state
         self.event_history: list[dict[str, Any]] = []
         self.blocked_exits: set[str] = set()
+        self.scheduled_events: list[dict[str, Any]] = []  # timed events from config
 
         # Test scenario tracking
         self.test_block_exit_time: float | None = None
@@ -73,13 +74,23 @@ class EventManager:
                     f"exit at t={self.test_block_exit_time}s"
                 )
 
-    def check_and_trigger_events(self, current_sim_time: float) -> None:
+    def check_and_trigger_events(
+        self, current_sim_time: float, agents: dict[str, Any] | None = None
+    ) -> None:
         """
         Check for and trigger simulation events.
 
         Args:
             current_sim_time: Current simulation time in seconds
+            agents: Dictionary of agent_id -> agent entity (required for broadcasts)
         """
+        # Fire any scheduled config events whose time has arrived
+        if agents:
+            for event in self.scheduled_events:
+                if not event.get("_fired") and current_sim_time >= event["time"]:
+                    self.broadcast_event(event["message"], current_sim_time, agents)
+                    event["_fired"] = True
+
         # Phase 4.2: Check for exit blocking test scenario
         if self.test_block_exit_time and not self._test_exit_blocked:
             # Check if we've reached the blocking time (within one timestep)

@@ -344,7 +344,9 @@ class HybridSimulationRunner:
 
                     # Check for events
                     with self.perf_timer.measure("event_checking"):
-                        self.event_manager.check_and_trigger_events(self.current_sim_time)
+                        self.event_manager.check_and_trigger_events(
+                            self.current_sim_time, self.concordia_agents
+                        )
 
                     # Track position history for video generation (every 0.5s)
                     if self.position_tracker and step % 10 == 0:

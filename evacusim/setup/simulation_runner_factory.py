@@ -102,10 +102,11 @@ class SimulationRunnerFactory:
         """
         events_config = config.get("events", [])
         for event in events_config:
-            runner.event_manager.event_history.append(
+            runner.event_manager.scheduled_events.append(
                 {
                     "time": event.get("time", 0.0),
                     "message": event.get("message", ""),
+                    "_fired": False,
                 }
             )
 
