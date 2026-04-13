@@ -33,7 +33,6 @@ class ObservationCoordinator:
         agent_injured: set[str],
         agent_action: dict[str, str],
         agent_last_decision: dict[str, dict],
-        test_scenarios: dict[str, Any],
         jps_sim=None,
     ):
         """
@@ -50,7 +49,6 @@ class ObservationCoordinator:
             agent_injured: Set of injured agent IDs (physical capability dimension)
             agent_action: Dict of agent_id -> action ("moving"|"waiting")
             agent_last_decision: Dict of agent_id -> last translated_action (for memory)
-            test_scenarios: Test scenario configuration for observation radius
             jps_sim: JuPedSim simulation (for multi-level support)
         """
         self.concordia_agents = concordia_agents
@@ -63,7 +61,6 @@ class ObservationCoordinator:
         self.agent_injured = agent_injured
         self.agent_action = agent_action
         self.agent_last_decision = agent_last_decision
-        self.test_scenarios = test_scenarios
         self.jps_sim = jps_sim
 
     def generate_all_observations(self, current_sim_time: float) -> dict[str, str]:
@@ -78,6 +75,18 @@ class ObservationCoordinator:
         """
         observations = {}
 
+        # Pre-compute nearby-agent lists for all active agents in one bulk pass.
+        # This avoids the O(n²) cost of calling get_nearby_agents() per agent,
+        # each of which was iterating the full JuPedSim agent list.
+        observation_radius = 20.0
+        jps_sim_for_bulk = self.jps_sim if self.jps_sim else getattr(
+            self.state_queries, "jps_sim", None
+        )
+        if jps_sim_for_bulk is not None and hasattr(jps_sim_for_bulk, "get_all_nearby_agents_bulk"):
+            bulk_nearby = jps_sim_for_bulk.get_all_nearby_agents_bulk(observation_radius)
+        else:
+            bulk_nearby = None  # Fallback: per-agent queries
+
         for agent_id in self.concordia_agents.keys():
             # Skip exited agents
             if agent_id in self.exited_agents:
@@ -90,12 +99,12 @@ class ObservationCoordinator:
                     # Agent has exited, skip observation
                     continue
 
-                # Get observation radius from config
-                help_config = self.test_scenarios.get("help_behavior", {})
-                observation_radius = help_config.get("observation_radius", 20.0)
-                nearby_agents = self.state_queries.get_nearby_agents(
-                    agent_id, radius=observation_radius
-                )
+                if bulk_nearby is not None:
+                    nearby_agents = bulk_nearby.get(agent_id, [])
+                else:
+                    nearby_agents = self.state_queries.get_nearby_agents(
+                        agent_id, radius=observation_radius
+                    )
 
                 # Enrich nearby_agents with target exit info and follower detection
                 for agent_info in nearby_agents:

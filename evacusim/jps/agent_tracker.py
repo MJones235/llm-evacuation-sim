@@ -158,6 +158,76 @@ class AgentTracker:
 
         return nearby
 
+    def get_all_nearby_agents_bulk(
+        self, radius: float
+    ) -> dict[str, list[dict[str, Any]]]:
+        """
+        Compute nearby agents for ALL agents in a single O(n²/2) pass.
+
+        This is far cheaper than calling get_nearby_agents() N times, because it
+        reads simulation.agents() only once and builds a numpy array of positions
+        for vectorised distance computation.
+
+        Args:
+            radius: Search radius in metres (same for all agents)
+
+        Returns:
+            Mapping agent_id -> list of nearby-agent info dicts (same format as
+            get_nearby_agents).
+        """
+        import numpy as np
+
+        # Snapshot all agents from JuPedSim in one pass.
+        jps_agents = list(self.simulation.agents())
+        if not jps_agents:
+            return {}
+
+        # Build parallel arrays: concordia_ids[i], positions_array[i]
+        concordia_ids: list[str] = []
+        positions: list[tuple[float, float]] = []
+        is_moving_flags: list[bool] = []
+
+        for agent in jps_agents:
+            cid = self.jps_to_concordia.get(agent.id)
+            if cid is None:
+                continue
+            concordia_ids.append(cid)
+            positions.append((float(agent.position[0]), float(agent.position[1])))
+            is_moving_flags.append(
+                hasattr(agent, "orientation") and agent.orientation is not None
+            )
+
+        if not concordia_ids:
+            return {}
+
+        pos_array = np.array(positions, dtype=np.float64)  # shape (n, 2)
+        radius_sq = radius * radius
+
+        result: dict[str, list[dict[str, Any]]] = {cid: [] for cid in concordia_ids}
+
+        n = len(concordia_ids)
+        for i in range(n):
+            xi, yi = pos_array[i]
+            for j in range(n):
+                if i == j:
+                    continue
+                dx = pos_array[j, 0] - xi
+                dy = pos_array[j, 1] - yi
+                dist_sq = dx * dx + dy * dy
+                if dist_sq <= radius_sq:
+                    dist = dist_sq ** 0.5
+                    result[concordia_ids[i]].append(
+                        {
+                            "id": concordia_ids[j],
+                            "distance": dist,
+                            "position": positions[j],
+                            "is_moving": is_moving_flags[j],
+                            "target_exit": None,  # Enriched by ObservationCoordinator
+                        }
+                    )
+
+        return result
+
     def is_agent_active(self, agent_id: str) -> bool:
         """
         Check if agent is still in simulation.

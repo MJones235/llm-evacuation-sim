@@ -695,6 +695,24 @@ class MultiLevelJuPedSimulation:
         level_id = self.agent_levels[agent_id]
         return self.simulations[level_id].get_nearby_agents(agent_id, radius)
 
+    def get_all_nearby_agents_bulk(self, radius: float) -> dict[str, list[dict[str, Any]]]:
+        """
+        Return nearby-agent lists for ALL agents in a single pass per level.
+
+        Agents on different levels cannot see each other, so the bulk computation
+        is run independently per level and results are merged.
+
+        Args:
+            radius: Search radius in metres
+
+        Returns:
+            Mapping agent_id -> list of nearby-agent info dicts
+        """
+        result: dict[str, list[dict[str, Any]]] = {}
+        for sim in self.simulations.values():
+            result.update(sim.get_all_nearby_agents_bulk(radius))
+        return result
+
     def get_simulation_time(self) -> float:
         """Get current simulation time in seconds."""
         return self.current_step * self.dt

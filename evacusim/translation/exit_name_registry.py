@@ -34,6 +34,9 @@ class ExitNameRegistry:
         self._id_to_display: dict[str, str] = {}
         # Map normalized_name -> technical_id (for reverse lookup)
         self._normalized_to_id: dict[str, str] = {}
+        # Resolution cache: raw user input -> resolved technical ID (or None)
+        # This avoids repeated regex/string work for identical LLM outputs.
+        self._resolve_cache: dict[str, str | None] = {}
 
     def register_exit(self, exit_id: str, display_name: str | None = None):
         """
@@ -56,6 +59,9 @@ class ExitNameRegistry:
         # Also store ID normalized (so "blackett_street" matches itself)
         self._normalized_to_id[self._normalize(exit_id)] = exit_id
 
+        # Invalidate resolution cache — new registrations change reachable IDs
+        self._resolve_cache.clear()
+
     def get_display_name(self, exit_id: str) -> str:
         """
         Get display name for a technical ID.
@@ -71,6 +77,24 @@ class ExitNameRegistry:
     def resolve_to_id(self, user_input: str) -> str | None:
         """
         Resolve user input (potentially natural language) to technical ID.
+
+        Results are cached per-instance so repeated identical LLM outputs
+        (which are the common case) pay only a single dict lookup.
+        """
+        cached = self._resolve_cache.get(user_input)
+        if cached is not None:
+            return cached
+        # Sentinel: distinguish "not cached" from "cached as None"
+        if user_input in self._resolve_cache:
+            return None
+
+        result = self._resolve_to_id_uncached(user_input)
+        self._resolve_cache[user_input] = result
+        return result
+
+    def _resolve_to_id_uncached(self, user_input: str) -> str | None:
+        """
+        Internal resolver (no caching layer).
 
         Handles variations like:
         - "Blackett Street" -> "blackett_street"

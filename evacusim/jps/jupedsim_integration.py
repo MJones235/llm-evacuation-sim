@@ -276,6 +276,21 @@ class ConcordiaJuPedSimulation:
         """
         return self.agent_tracker.get_nearby_agents(agent_id, radius)
 
+    def get_all_nearby_agents_bulk(self, radius: float) -> dict[str, list[dict[str, Any]]]:
+        """
+        Return nearby-agent lists for ALL agents in a single O(n) pass.
+
+        Prefer this over calling get_nearby_agents() in a loop to avoid the
+        O(n²) cost of reading simulation.agents() N times.
+
+        Args:
+            radius: Search radius in metres
+
+        Returns:
+            Mapping agent_id -> list of nearby-agent info dicts
+        """
+        return self.agent_tracker.get_all_nearby_agents_bulk(radius)
+
     def get_simulation_time(self) -> float:
         """Get current simulation time in seconds."""
         return self.current_step * self.dt

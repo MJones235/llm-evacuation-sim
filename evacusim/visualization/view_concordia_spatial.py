@@ -255,40 +255,64 @@ class SpatialConcordiaViewer:
             self._set_fixed_limits(ax, min(xs), max(xs), min(ys), max(ys))
 
     def _update_data(self):
-        """Load latest data from output file."""
+        """Load latest data from output file.
+
+        Positions, time, levels and blocked exits are read from the lightweight
+        ``_positions.json`` sidecar (written every 0.5 s) when it exists.
+        Decisions and messages are read from the main output file (written every
+        10 s) so the viewer refreshes smoothly without waiting for heavy I/O.
+        """
         if not self.output_file.exists():
             return False
 
         try:
+            # --- Lightweight sidecar: positions, time, levels, blocked exits ---
+            sidecar = self.output_file.with_name(
+                self.output_file.stem + "_positions.json"
+            )
+            if sidecar.exists():
+                with open(sidecar) as f:
+                    pos_data = json.load(f)
+                if "agent_positions" in pos_data:
+                    self.agent_positions = pos_data["agent_positions"]
+                if "agent_levels" in pos_data:
+                    self.agent_levels = pos_data["agent_levels"]
+                if "blocked_exits" in pos_data:
+                    self.blocked_exits = pos_data["blocked_exits"]
+                if "current_time" in pos_data:
+                    self.current_time = pos_data["current_time"]
+            else:
+                # Sidecar not yet written — fall back to main file for positions.
+                with open(self.output_file) as f:
+                    data = json.load(f)
+                if "agent_positions" in data:
+                    self.agent_positions = data["agent_positions"]
+                if "agent_levels" in data:
+                    self.agent_levels = data["agent_levels"]
+                if "blocked_exits" in data:
+                    self.blocked_exits = data["blocked_exits"]
+                if "current_time" in data:
+                    self.current_time = data["current_time"]
+                elif "final_time" in data:
+                    self.current_time = data["final_time"]
+
+            # --- Main file: decisions, messages (updated less frequently) ---
             with open(self.output_file) as f:
                 data = json.load(f)
 
-            # Update agent positions
-            if "agent_positions" in data:
-                self.agent_positions = data["agent_positions"]
-
-            # Update agent decisions
             if "agent_decisions" in data:
                 self.agent_decisions = data["agent_decisions"]
 
-            # Update agent levels (from multi-level simulation)
-            if "agent_levels" in data:
-                self.agent_levels = data["agent_levels"]
-
-            # Get current simulation time (use current_time from incremental saves, or final_time from final save)
-            if "current_time" in data:
-                self.current_time = data["current_time"]
-            elif "final_time" in data:
+            # Prefer sidecar time if already set above; otherwise use main file.
+            if not sidecar.exists():
+                pass  # already handled in fallback branch above
+            elif "final_time" in data and self.current_time == 0.0:
                 self.current_time = data["final_time"]
 
             # Update title with time
             self.title_text.set_text(
                 f"Concordia Station Evacuation - Real-Time View | Time: {self.current_time:.1f}s"
             )
-
-            # Phase 4.2: Update blocked exits list
-            if "blocked_exits" in data:
-                self.blocked_exits = data["blocked_exits"]
 
             # Store the full data for use in other methods
             self.current_data = data

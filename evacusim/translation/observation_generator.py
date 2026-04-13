@@ -50,6 +50,62 @@ class ObservationGenerator:
         self._last_event_signatures: dict[str, set[str]] = {}
         self._last_message_signatures: dict[str, set[str]] = {}
 
+        # Per-agent persistent exit knowledge.
+        # An agent becomes aware of an exit when they see it (LOS) or hear about it
+        # from another agent.  Knowledge is never forgotten once acquired.
+        # Maps agent_id -> set of canonical exit keys.
+        self.agent_known_exits: dict[str, set[str]] = {}
+
+        # Canonical exit key -> human-readable display name (populated lazily from
+        # get_visible_exits() results and the level-0 exit registry at init).
+        self._canonical_to_display: dict[str, str] = {}
+        # Case-insensitive lookup: any exit name variant -> canonical key.
+        # Used to extract exit references from natural language messages.
+        self._exit_name_to_canonical: dict[str, str] = {}
+        self._build_exit_name_lookups()
+
+    # ------------------------------------------------------------------
+    # Exit knowledge helpers
+    # ------------------------------------------------------------------
+
+    def _build_exit_name_lookups(self) -> None:
+        """Populate case-insensitive exit name → canonical key and reverse lookups.
+
+        Only covers exits in the level-0 station_layout.  Multi-level exits
+        discovered at runtime are added lazily via _update_canonical_display().
+        """
+        for raw_name in self.exits:
+            canonical = self.spatial_analyzer._canonical_visible_exit_key(raw_name)
+            if self.exit_registry:
+                display = self.exit_registry.get_display_name(raw_name)
+            else:
+                display = raw_name
+            self._exit_name_to_canonical[raw_name.lower()] = canonical
+            self._exit_name_to_canonical[display.lower()] = canonical
+            self._update_canonical_display(canonical, display)
+
+    def _update_canonical_display(self, canonical: str, display: str) -> None:
+        """Keep the most descriptive display name for *canonical* in the lookup."""
+        existing = self._canonical_to_display.get(canonical, "")
+        # Prefer names that contain " to " (e.g. "Escalator A (up to concourse)")
+        existing_specific = " to " in existing.lower()
+        candidate_specific = " to " in display.lower()
+        if (
+            canonical not in self._canonical_to_display
+            or (candidate_specific and not existing_specific)
+            or (candidate_specific == existing_specific and len(display) > len(existing))
+        ):
+            self._canonical_to_display[canonical] = display
+
+    def _learn_exits_from_messages(self, agent_id: str, messages: list[dict[str, Any]]) -> None:
+        """Scan received messages for exit name mentions and add them to known exits."""
+        known = self.agent_known_exits.setdefault(agent_id, set())
+        for msg in messages:
+            text_lower = msg.get("text", "").lower()
+            for name_key, canonical in self._exit_name_to_canonical.items():
+                if name_key and name_key in text_lower:
+                    known.add(canonical)
+
     def generate_observation(
         self,
         agent_id: str,
@@ -104,6 +160,13 @@ class ObservationGenerator:
         # Surface only genuinely new information first.
         new_info_lines = self._format_new_information(agent_id, events, received_messages)
         observations.extend(new_info_lines)
+
+        # Always repeat every currently-active event as a persistent reminder.
+        # The novelty filter above only flags events as "new" once; without this
+        # block the alarm (or any other ongoing situation) disappears from all
+        # subsequent observations and fades from the agent's reasoning context.
+        if events:
+            observations.append(f"⚠️ Ongoing situation: {'; '.join(events)}")
 
         # Note: Station layout is now in agent formative memory, not observations
         # This keeps observations stable when nothing changes
@@ -197,15 +260,51 @@ class ObservationGenerator:
         )
         observations.extend(status_lines)
 
-        # Visual discovery of exits (efficient distance-based line of sight)
+        # --- Exit awareness (line-of-sight + persistent memory) ---
+
+        # 1. Discover exits visible right now via LOS geometry.
         visible_exits = self.spatial_analyzer.get_visible_exits(
-            position, agent_level=agent_level, jps_sim=self.jps_sim, visual_range=25.0
+            position, agent_level=agent_level, jps_sim=self.jps_sim
         )
+
+        # 2. Update: learn exits seen this tick.
+        known = self.agent_known_exits.setdefault(agent_id, set())
+        visible_canonical: set[str] = set()
+        for exit_info in visible_exits:
+            canonical = exit_info["id"]
+            visible_canonical.add(canonical)
+            known.add(canonical)
+            # Keep display name lookup up to date (picks up multi-level exits lazily).
+            self._exit_name_to_canonical[exit_info["name"].lower()] = canonical
+            self._update_canonical_display(canonical, exit_info["name"])
+
+        # 3. Update: learn exits mentioned in messages from others.
+        self._learn_exits_from_messages(agent_id, received_messages)
+
+        # 4. Format observation lines.
         if visible_exits:
-            visible_names = [exit_info["name"] for exit_info in visible_exits]
-            observations.append(f"Visible exits right now: {', '.join(visible_names)}.")
+            # Group by distance category for a natural description.
+            by_dist: dict[str, list[str]] = {"very close": [], "nearby": [], "visible in distance": []}
+            for exit_info in visible_exits:
+                cat = exit_info.get("distance", "visible in distance")
+                by_dist.setdefault(cat, []).append(exit_info["name"])
+            parts = []
+            for cat in ("very close", "nearby", "visible in distance"):
+                if by_dist[cat]:
+                    parts.append(f"{', '.join(by_dist[cat])} ({cat})")
+            observations.append(f"Exits visible right now: {'; '.join(parts)}.")
         else:
-            observations.append("Visible exits right now: none.")
+            observations.append("Exits visible right now: none.")
+
+        # 5. Exits the agent knows about from prior observation but cannot see right now.
+        recalled = known - visible_canonical
+        if recalled:
+            recalled_names = sorted(
+                self._canonical_to_display.get(c, c) for c in recalled
+            )
+            observations.append(
+                f"Exits you know about but cannot currently see: {', '.join(recalled_names)}."
+            )
 
         # Crowd density (categorized to prevent constant LLM calls as people move)
         num_nearby = len(nearby_agents)

@@ -26,6 +26,22 @@ from evacusim.decision.prompt_cache import PromptCache
 
 logger = get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Precompiled regex patterns (module-level to avoid per-call recompilation)
+# ---------------------------------------------------------------------------
+_RE_VISUAL_CLOSE = re.compile(r"You can see\s+([^\.]+?)\s+very close to you\.")
+_RE_VISUAL_NEARBY = re.compile(r"You can see\s+([^\.]+?)\s+nearby\.")
+_RE_VISUAL_DISTANCE = re.compile(r"You can see\s+([^\.]+?)\s+in the distance\.")
+_RE_VISUAL_FRAGMENTS = re.compile(r"You can see\s+([^\.]+)\.")
+_RE_VISIBLE_EXITS_LINE = re.compile(r"Visible exits right now:\s*([^\.]+)\.")
+_RE_CIRCULAR_FOLLOW = re.compile(
+    r"You are following (Person (\w+)), and Person \2 is following YOU"
+)
+_RE_FOLLOWER_SINGULAR = re.compile(
+    r"\u26a0\ufe0f (Person (\w+)) is trying to follow YOU"
+)
+_RE_FOLLOWER_PLURAL = re.compile(r"\u26a0\ufe0f (.+?) are trying to follow YOU")
+
 
 class DecisionProcessor:
     """Processes agent decision-making with parallel LLM calls."""
@@ -46,6 +62,8 @@ class DecisionProcessor:
         perf_timer,
         jps_sim=None,
         agent_configs: list[dict] | None = None,
+        enable_group_decisions: bool = False,
+        group_decision_min_size: int = 3,
     ):
         """
         Initialize decision processor.
@@ -79,8 +97,20 @@ class DecisionProcessor:
         self.perf_timer = perf_timer
         self.jps_sim = jps_sim
         self._agent_cfg: dict[str, dict] = {cfg["id"]: cfg for cfg in (agent_configs or [])}
-        # Asyncio lock for shared state modifications during parallel processing
-        self._state_lock = asyncio.Lock()
+        self.enable_group_decisions = enable_group_decisions
+        self.group_decision_min_size = group_decision_min_size
+        # NOTE: _state_lock and _llm_semaphore are NOT created here.
+        # asyncio primitives bind to the event loop that is current at creation
+        # time.  process_all_agents() calls asyncio.run() each decision cycle,
+        # which creates a fresh event loop every time.  Creating these objects in
+        # __init__ would bind them to a loop that is later closed, causing the
+        # "bound to a different event loop" RuntimeError on the second cycle.
+        # Instead they are created lazily at the top of _process_agents_parallel,
+        # which always runs inside the correct (current) loop.
+        self._state_lock: asyncio.Lock | None = None
+        self._llm_semaphore: asyncio.Semaphore | None = None
+        # Configurable concurrency cap — alter before running if needed.
+        self._llm_semaphore_limit: int = 20
 
         # Initialize prompt cache for intelligent LLM call reduction
         self.prompt_cache = PromptCache(enable_detailed_logging=True)
@@ -158,12 +188,12 @@ class DecisionProcessor:
 
         def _extract_visible_distance_ranks(text: str) -> dict[str, int]:
             ranks: dict[str, int] = {}
-            for pattern, rank in [
-                (r"You can see\s+([^\.]+?)\s+very close to you\.", 0),
-                (r"You can see\s+([^\.]+?)\s+nearby\.", 1),
-                (r"You can see\s+([^\.]+?)\s+in the distance\.", 2),
+            for compiled_re, rank in [
+                (_RE_VISUAL_CLOSE, 0),
+                (_RE_VISUAL_NEARBY, 1),
+                (_RE_VISUAL_DISTANCE, 2),
             ]:
-                for m in re.finditer(pattern, text):
+                for m in compiled_re.finditer(text):
                     for raw_name in m.group(1).split(","):
                         name = raw_name.strip()
                         if name and name not in ranks:
@@ -199,8 +229,8 @@ class DecisionProcessor:
 
         # ── Visible exits (both profiles) ────────────────────────────────────
         # Restrict to explicit visual sentences to avoid false positives.
-        visual_fragments = re.findall(r"You can see\s+([^\.]+)\.", observation)
-        visual_fragments += re.findall(r"Visible exits right now:\s*([^\.]+)\.", observation)
+        visual_fragments = _RE_VISUAL_FRAGMENTS.findall(observation)
+        visual_fragments += _RE_VISIBLE_EXITS_LINE.findall(observation)
         visual_text = " ".join(visual_fragments)
 
         all_departure = [
@@ -238,10 +268,7 @@ class DecisionProcessor:
         constraints = []
 
         # Case 1: circular — "You are following Person X, and Person X is following YOU."
-        circular = re.search(
-            r"You are following (Person (\w+)), and Person \2 is following YOU",
-            observation,
-        )
+        circular = _RE_CIRCULAR_FOLLOW.search(observation)
         if circular:
             person_label = circular.group(1)  # e.g. "Person 46"
             agent_id_str = f"agent_{circular.group(2)}"  # e.g. "agent_46"
@@ -256,12 +283,10 @@ class DecisionProcessor:
             )
         else:
             # Case 2: one-way followers — "⚠\ufe0f Person X is trying to follow YOU."
-            followers = re.findall(
-                r"\u26a0\ufe0f (Person (\w+)) is trying to follow YOU", observation
-            )
+            followers = _RE_FOLLOWER_SINGULAR.findall(observation)
             # Also handle plural: "Person X, Person Y are trying to follow YOU"
             if not followers:
-                plural = re.search(r"\u26a0\ufe0f (.+?) are trying to follow YOU", observation)
+                plural = _RE_FOLLOWER_PLURAL.search(observation)
                 if plural:
                     followers = [
                         (f"Person {m}", m) for m in re.findall(r"Person (\w+)", plural.group(1))
@@ -371,6 +396,11 @@ class DecisionProcessor:
         agent_ids: list[str] | None = None,
     ):
         """Process all agents in parallel using async/await."""
+        # Create event-loop-bound primitives here so they are always attached to
+        # the loop that asyncio.run() just started (a new loop each decision cycle).
+        self._state_lock = asyncio.Lock()
+        self._llm_semaphore = asyncio.Semaphore(self._llm_semaphore_limit)
+
         # Filter and create tasks using list comprehension for efficiency
         candidate_agents = (
             agent_ids if agent_ids is not None else list(self.concordia_agents.keys())
@@ -383,6 +413,30 @@ class DecisionProcessor:
             and not self._agent_is_on_escalator(agent_id)
         ]
 
+        # --- Per-cycle zone cache ---
+        # Pre-compute zone_id for every active agent once (avoids N × M Shapely
+        # contains-checks spread across N concurrent coroutines).
+        cycle_zone_cache: dict[str, str | None] = {}
+        zones_polygons = getattr(self.action_translator, "zones_polygons", {})
+        if zones_polygons:
+            from shapely.geometry import Point as _Point
+
+            for agent_id in agents_to_process:
+                pos = self.state_queries.get_agent_position(agent_id)
+                if pos is None:
+                    cycle_zone_cache[agent_id] = None
+                    continue
+                pt = _Point(pos)
+                found: str | None = None
+                for z_id, poly in zones_polygons.items():
+                    try:
+                        if poly.covers(pt) or poly.contains(pt):
+                            found = z_id
+                            break
+                    except Exception:
+                        pass
+                cycle_zone_cache[agent_id] = found
+
         tasks = [
             self._process_single_agent(
                 agent_id,
@@ -390,9 +444,53 @@ class DecisionProcessor:
                 observations,
                 zones,
                 current_sim_time,
+                cycle_zone_cache,
             )
             for agent_id in agents_to_process
         ]
+
+        # --- Group-level LLM decisions (Opt 7c) ---
+        # When enabled, agents sharing the same zone + destination + knowledge profile
+        # are grouped.  Only the first agent ("representative") in each qualifying
+        # group makes a real LLM call; the others get the same decision injected into
+        # their prompt cache so they skip the LLM on this cycle.
+        # This is an approximation: individual memory / injury state are ignored.
+        # Enable via DecisionProcessor(enable_group_decisions=True).
+        if self.enable_group_decisions and len(agents_to_process) >= self.group_decision_min_size:
+            groups: dict[tuple, list[str]] = {}
+            for agent_id in agents_to_process:
+                zone = cycle_zone_cache.get(agent_id)
+                dest = self.agent_destinations.get(agent_id, "")
+                profile = self._agent_cfg.get(agent_id, {}).get("knowledge_profile", "novice")
+                key = (zone, dest, profile)
+                groups.setdefault(key, []).append(agent_id)
+
+            # For each qualifying group, force-cache the representative's decision
+            # into all follower agents' prompt caches *before* tasks run.
+            # The representative's task will call LLM naturally; followers will hit
+            # the cache (because should_call_llm will see their hash unchanged if
+            # they haven't received messages/events).
+            # We don't do anything here that blocks — the actual work happens in tasks.
+            # What we mark here is that non-representative agents in large groups
+            # should be skipped entirely at the top of _process_single_agent.
+            self._group_followers: set[str] = set()
+            for key, members in groups.items():
+                if len(members) >= self.group_decision_min_size:
+                    representative = members[0]
+                    for follower in members[1:]:
+                        # Mark follower to use representative's result.
+                        self._group_followers.add(follower)
+                        # Seed the follower's cache with representative's last decision
+                        # so they short-circuit without needing a fresh LLM call.
+                        cached = self.prompt_cache.get_cached_decision(representative)
+                        if cached:
+                            self.prompt_cache.cache_decision(follower, cached)
+                    logger.debug(
+                        f"Group decision: representative={representative}, "
+                        f"followers={members[1:]} (zone={key[0]}, dest={key[1]})"
+                    )
+        else:
+            self._group_followers = set()
 
         # Process all agents concurrently
         with self.perf_timer.measure("parallel_agent_processing"):
@@ -408,15 +506,32 @@ class DecisionProcessor:
         observations: dict,
         zones: list,
         current_sim_time: float,
+        cycle_zone_cache: dict[str, str | None] | None = None,
     ):
         """Process a single agent's decision (async) with intelligent prompt caching."""
         try:
+            # Group-decision follower short-circuit (Opt 7c).
+            # If this agent has been designated a follower in the current cycle,
+            # skip the full pipeline — the representative's decision is already
+            # seeded into the prompt cache and the short-circuit in the
+            # should_call_llm path will be triggered automatically.
+            if getattr(self, "_group_followers", None) and agent_id in self._group_followers:
+                async with self._state_lock:
+                    self.llm_calls_skipped += 1
+                logger.debug(f"{agent_id}: group follower — skipping this cycle")
+                return
+
             # ── Position & zone (needed for goal status and exit filtering) ──
             position = self.state_queries.get_agent_position(agent_id)
             if position is None:
                 logger.debug(f"{agent_id}: No position found, likely exited")
                 return
-            zone_id = self._identify_zone(position)
+            # Use the pre-computed per-cycle zone cache when available to avoid
+            # repeating O(n_zones) Shapely contains-checks per agent.
+            if cycle_zone_cache is not None:
+                zone_id = cycle_zone_cache.get(agent_id)
+            else:
+                zone_id = self._identify_zone(position)
 
             # ── Persistent goal ──────────────────────────────────────────────
             if agent_id not in self.agent_goals:
@@ -472,7 +587,7 @@ class DecisionProcessor:
             action_spec = entity_lib.ActionSpec(
                 call_to_action=(
                     "Decision task: choose your next action now. Respond with ONLY this JSON:\n"
-                    "{{\n"
+                    "{\n"
                     '  "reasoning": "1-2 sentences grounded in goal + current observations",\n'
                     '  "action_type": "wait" or "move",\n'
                     f"{zone_target_type_line}"
@@ -484,7 +599,7 @@ class DecisionProcessor:
                     '  "message": null (or your spoken words),\n'
                     '  "message_type": null (or "directed", "shout"),\n'
                     '  "goal_update": null (or revised plain-text goal if your fundamental objective has changed),\n'
-                    "}}\n\n"
+                    "}\n\n"
                     "Hard constraints:\n"
                     "- If action_type='wait', target_type MUST be 'current_position'.\n"
                     "- If target_type='exit', exit_name is required and must match an allowed exit name exactly.\n"
@@ -539,14 +654,34 @@ class DecisionProcessor:
                 )
                 async with self._state_lock:
                     self.llm_calls_skipped += 1
+
+                # --- Short-circuit Opt 7b ---
+                # If the agent already has a committed destination and is moving toward
+                # it, there is no need to re-translate or re-execute — JuPedSim is
+                # already routing them correctly.  We only run the full pipeline when
+                # the agent is waiting (needs a fresh waypoint) or has no destination yet.
+                existing_dest = self.agent_destinations.get(agent_id)
+                agent_is_moving = (
+                    self.action_executor.agent_action.get(agent_id) == "moving"
+                    if hasattr(self.action_executor, "agent_action")
+                    else False
+                )
+                if existing_dest and agent_is_moving:
+                    logger.debug(
+                        f"{agent_id}: ✓ Short-circuit — already moving to '{existing_dest}', "
+                        f"skipping translation & execution"
+                    )
+                    return
             else:
                 # Call LLM - significant new information detected
                 with self.perf_timer.measure("agent_observe", is_parallel=True):
                     agent.observe(observation)
 
-                # Run the LLM call in a separate thread to avoid blocking
-                with self.perf_timer.measure("agent_act_llm", is_parallel=True):
-                    action = await asyncio.to_thread(agent.act, action_spec)
+                # Acquire semaphore before the LLM call to prevent burst overload.
+                # At most 20 concurrent requests are sent to Azure at any one time.
+                async with self._llm_semaphore:
+                    with self.perf_timer.measure("agent_act_llm", is_parallel=True):
+                        action = await asyncio.to_thread(agent.act, action_spec)
 
                 # Cache the decision for future reuse
                 self.prompt_cache.cache_decision(agent_id, action)
@@ -647,11 +782,17 @@ class DecisionProcessor:
                             "reason": reasoning.get("reasoning", ""),
                         }
 
-                    # Store decision
+                    # Store decision — cap history to avoid unbounded RAM growth.
+                    # Route-change records are always kept; others are a rolling window.
+                    _MAX_DECISIONS_PER_AGENT = 200
                     if agent_id not in self.agent_decisions:
                         self.agent_decisions[agent_id] = {"decisions": []}
 
-                    self.agent_decisions[agent_id]["decisions"].append(decision_record)
+                    decisions_list = self.agent_decisions[agent_id]["decisions"]
+                    decisions_list.append(decision_record)
+                    if len(decisions_list) > _MAX_DECISIONS_PER_AGENT:
+                        # Evict oldest entry; this keeps the list O(1) amortised.
+                        decisions_list.pop(0)
 
             # Apply to JuPedSim
             with self.perf_timer.measure("apply_to_jupedsim", is_parallel=True):

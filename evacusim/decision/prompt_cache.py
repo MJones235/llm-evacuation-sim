@@ -16,9 +16,51 @@ Author: Developed to reduce Agent 12-style flip-flopping by ~60-70%
 import hashlib
 import json
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Precompiled regex patterns used in _filter_observation (hot path)
+# ---------------------------------------------------------------------------
+_RE_PREV_DECISION = re.compile(
+    r"(?:\[Your previous decision[^\]]+\].*?"
+    r"|At t=\d+(?:\.\d+)?s, your previous decision was to .*?)"
+    r"(?=You are in|You can see|The area|Nearby:|Nearby people:|Recent events:|$)",
+    re.DOTALL | re.IGNORECASE,
+)
+_RE_YOU_REASONED = re.compile(
+    r"You reasoned:\s.*?(?=You are in|You can see|The area|Nearby:|Nearby people:|Recent events:|$)",
+    re.DOTALL | re.IGNORECASE,
+)
+_RE_YOU_ARE_IN = re.compile(r"You are in (the )?[\w\s]+\.", re.IGNORECASE)
+_RE_ESC_DIRECTION = re.compile(r"(Escalator [A-Z])\s*\(going (?:up|down)\)")
+_RE_EXIT_QUALIFIER = re.compile(
+    r"(Escalator [A-Z]|[A-Z][a-z]+(?: [A-Z][a-z]+)* Street|Eldon Square)"
+    r"(?:\s+(?:is|visible|nearby|to you|in the distance|very close|close|at a distance|"
+    r"some distance away|quite close))+",
+    re.IGNORECASE,
+)
+_RE_YOU_CAN_SEE_EXIT = re.compile(
+    r"(?:You can see|You visible)\s+(Escalator [A-Z]|[A-Z][a-z]+(?: [A-Z][a-z]+)* Street)",
+    re.IGNORECASE,
+)
+_RE_PROXIMITY_ADVERBS = re.compile(
+    r"\b(very close|quite close|close by|close|nearby|near|in the distance|"
+    r"at a distance|some distance away|a short distance|visible)\b",
+    re.IGNORECASE,
+)
+_RE_AGENT_IDS = re.compile(r"\bagent_\d+\b(?:[,\s]+agent_\d+\b)*", re.IGNORECASE)
+_RE_NEARBY_EMPTY = re.compile(r"\bNearby:\s*(?:[,\s]*)(\n|$)")
+_RE_NEARBY_PEOPLE = re.compile(r"\bNearby people:\s*(?:[^\n]*)(\n|$)")
+_RE_CROWD_COUNT = re.compile(r"\b\d+\s+(?:people|agents?)\b", re.IGNORECASE)
+_RE_TIMESTAMP = re.compile(r"\bat t=[\d.]+s\b")
+_RE_MOVEMENT_ADVERBS = re.compile(
+    r"\b(purposefully|quickly|slowly|calmly|briskly)\b", re.IGNORECASE
+)
+_RE_MULTI_SPACE = re.compile(r"[ \t]+")
+_RE_MULTI_NEWLINE = re.compile(r"\n\s*\n")
 
 
 class PromptCache:
@@ -30,17 +72,25 @@ class PromptCache:
     (minor position changes, nearby agent proximity fluctuations).
     """
 
-    def __init__(self, enable_detailed_logging: bool = False):
+    def __init__(self, enable_detailed_logging: bool = False, stable_skip_threshold: int = 5):
         """
         Initialize prompt cache.
 
         Args:
             enable_detailed_logging: If True, logs detailed change information
+            stable_skip_threshold: After this many consecutive cache hits with no new
+                messages/events, treat the agent as "stable" and apply an even more
+                aggressive observation filter (ignores crowd-level fluctuations).
+                Set to 0 to disable.  Default 5 (≈ 25 s at a 5 s decision interval).
         """
         self.agent_prompts: dict[str, dict[str, Any]] = {}  # agent_id -> {hash, content, timestamp}
         self.agent_decisions: dict[str, str] = {}  # agent_id -> cached decision JSON
         self.agent_change_history: dict[str, list[dict]] = {}  # agent_id -> list of changes
         self.enable_logging = enable_detailed_logging
+        self.stable_skip_threshold = stable_skip_threshold
+        # Per-agent count of consecutive decision cycles where the cache was hit
+        # without any new messages/events ("stable" streak counter).
+        self._consecutive_hits: dict[str, int] = {}
 
     def should_call_llm(
         self,
@@ -84,6 +134,15 @@ class PromptCache:
             events=recent_events,
         )
 
+        # Stable-agent optimisation (Opt 7a): when an agent has had N consecutive
+        # cache hits with no external triggers (messages / events / blocked exits),
+        # apply an extra level of filtering that strips crowd-level fluctuations too.
+        # This prevents gradual crowd-count drift from re-triggering the LLM.
+        hits = self._consecutive_hits.get(agent_id, 0)
+        has_external_trigger = bool(received_messages or blocked_exits or recent_events)
+        if self.stable_skip_threshold > 0 and hits >= self.stable_skip_threshold and not has_external_trigger:
+            significant_content = self._filter_stable_agent_content(significant_content)
+
         # Create hash of significant content + prompt
         content_hash = self._compute_content_hash(action_spec_text, significant_content)
 
@@ -92,6 +151,7 @@ class PromptCache:
             if self.enable_logging:
                 logger.info(f"{agent_id}: First decision, calling LLM")
             self._record_cache(agent_id, content_hash, action_spec_text, significant_content)
+            self._consecutive_hits[agent_id] = 0
             return (True, None)
 
         # Compare with last decision
@@ -99,13 +159,16 @@ class PromptCache:
         last_content = self.agent_prompts[agent_id].get("significant_content", "")
 
         if content_hash == last_hash:
-            # Prompt hasn't changed significantly
+            # Prompt hasn't changed significantly — increment stability streak.
+            if not has_external_trigger:
+                self._consecutive_hits[agent_id] = hits + 1
             if self.enable_logging:
                 logger.debug(f"{agent_id}: Prompt unchanged (hash match), reusing decision")
             cached = self.agent_decisions.get(agent_id)
             return (False, cached)
 
-        # Significant change detected
+        # Significant change detected — reset stability streak.
+        self._consecutive_hits[agent_id] = 0
         if self.enable_logging:
             change_info = self._describe_change_detailed(
                 agent_id, last_hash, content_hash, last_content, significant_content
@@ -149,6 +212,7 @@ class PromptCache:
         """
         self.agent_prompts.pop(agent_id, None)
         self.agent_decisions.pop(agent_id, None)
+        self._consecutive_hits.pop(agent_id, None)
         if self.enable_logging:
             logger.debug(f"{agent_id}: Cache cleared")
 
@@ -168,6 +232,31 @@ class PromptCache:
         }
 
     # ==================== PRIVATE METHODS ====================
+
+    def _filter_stable_agent_content(self, significant_content: str) -> str:
+        """
+        Apply extra normalisation for stable agents (those with a long hit streak).
+
+        Removes "several" crowd descriptors added by _filter_observation, since even
+        normalised crowd counts can fluctuate slightly as agents flow through zones.
+        After this filter, only exit visibility / blocked exits / events cause a change.
+        """
+        # Strip lines that are observation-only (start with "OBS:") and replace
+        # with a fixed placeholder so the hash cannot be affected by crowd churn.
+        lines = significant_content.split("\n")
+        cleaned = []
+        for line in lines:
+            if line.startswith("OBS:"):
+                # Keep only exit-visibility fragments; drop crowd sentences.
+                obs = line[4:]
+                obs = _RE_CROWD_COUNT.sub("", obs)
+                # Also strip any remaining "several" tokens left over from prior pass.
+                obs = obs.replace("several", "")
+                obs = _RE_MULTI_SPACE.sub(" ", obs).strip()
+                cleaned.append(f"OBS:{obs}")
+            else:
+                cleaned.append(line)
+        return "\n".join(cleaned)
 
     def _extract_significant_content(
         self,
@@ -226,91 +315,45 @@ class PromptCache:
         - Whether agent is waiting or moving
         - Injured agents nearby
         """
-        import re
-
         filtered = observation
 
-        # 1. Remove the previous-decision memory block
-        # Supports both old and new wording styles.
-        filtered = re.sub(
-            r"(?:\[Your previous decision[^\]]+\].*?|At t=\d+(?:\.\d+)?s, your previous decision was to .*?)(?=You are in|You can see|The area|Nearby:|Nearby people:|Recent events:|$)",
-            "",
-            filtered,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
+        # 1. Remove the previous-decision memory block (both wording styles).
+        filtered = _RE_PREV_DECISION.sub("", filtered)
 
         # Remove explicit reasoning lines tied to previous-decision memory.
-        filtered = re.sub(
-            r"You reasoned:\s.*?(?=You are in|You can see|The area|Nearby:|Nearby people:|Recent events:|$)",
-            "",
-            filtered,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
+        filtered = _RE_YOU_REASONED.sub("", filtered)
 
-        # 2. Remove current location sentence entirely
-        # "You are in the unknown area." / "You are in the concourse." / "You are in the platform area."
-        # The agent actively chose their current trajectory; location alone isn't new information.
-        filtered = re.sub(r"You are in (the )?[\w\s]+\.", "", filtered, flags=re.IGNORECASE)
+        # 2. Remove current location sentence entirely.
+        filtered = _RE_YOU_ARE_IN.sub("", filtered)
 
-        # 3. Normalise exit visibility: strip direction/distance qualifiers, collapse to exit name only
-        # Before: "Escalator B (going up) visible in the distance"
-        #         "Escalator B (going up) nearby to you"
-        #         "You can see Escalator B (going up) in the distance"
-        # After:  "Escalator B visible"
-        def normalise_exit_refs(text):
-            # Replace parenthetical direction tags on escalators
-            text = re.sub(r"(Escalator [A-Z])\s*\(going (?:up|down)\)", r"\1", text)
-            # Collapse any distance/proximity qualifier after an exit name
-            text = re.sub(
-                r"(Escalator [A-Z]|[A-Z][a-z]+(?: [A-Z][a-z]+)* Street|Eldon Square)"
-                r"(?:\s+(?:is|visible|nearby|to you|in the distance|very close|close|at a distance|"
-                r"some distance away|quite close))+",
-                r"\1 visible",
-                text,
-                flags=re.IGNORECASE,
-            )
-            # "You can see / You visible Escalator B" → "Escalator B visible"
-            text = re.sub(
-                r"(?:You can see|You visible)\s+(Escalator [A-Z]|[A-Z][a-z]+(?: [A-Z][a-z]+)* Street)",
-                r"\1 visible",
-                text,
-                flags=re.IGNORECASE,
-            )
-            return text
+        # 3. Normalise exit visibility: strip direction/distance qualifiers.
+        # Replace parenthetical direction tags on escalators.
+        filtered = _RE_ESC_DIRECTION.sub(r"\1", filtered)
+        # Collapse any distance/proximity qualifier after an exit name.
+        filtered = _RE_EXIT_QUALIFIER.sub(r"\1 visible", filtered)
+        # "You can see / You visible Escalator B" → "Escalator B visible"
+        filtered = _RE_YOU_CAN_SEE_EXIT.sub(r"\1 visible", filtered)
 
-        filtered = normalise_exit_refs(filtered)
+        # 4. Remove all remaining distance/proximity adverbs.
+        filtered = _RE_PROXIMITY_ADVERBS.sub("", filtered)
 
-        # 4. Remove all remaining distance/proximity adverbs to avoid hash differences
-        # "nearby", "in the distance", "visible in the distance", etc.
-        filtered = re.sub(
-            r"\b(very close|quite close|close by|close|nearby|near|in the distance|"
-            r"at a distance|some distance away|a short distance|visible)\b",
-            "",
-            filtered,
-            flags=re.IGNORECASE,
-        )
+        # 5. Remove specific agent IDs; keep crowd-level descriptions.
+        filtered = _RE_AGENT_IDS.sub("", filtered)
+        filtered = _RE_NEARBY_EMPTY.sub("", filtered)
+        filtered = _RE_NEARBY_PEOPLE.sub("", filtered)
 
-        # 5. Remove specific agent IDs; keep crowd-level descriptions
-        # "agent_5, agent_12" → "" (crowd level line stays)
-        filtered = re.sub(r"\bagent_\d+\b(?:[,\s]+agent_\d+\b)*", "", filtered, flags=re.IGNORECASE)
-        filtered = re.sub(r"\bNearby:\s*(?:[,\s]*)(\n|$)", "", filtered)
-        filtered = re.sub(r"\bNearby people:\s*(?:[^\n]*)(\n|$)", "", filtered)
+        # 6. Normalise exact crowd counts to bands ("5 people" → "several").
+        filtered = _RE_CROWD_COUNT.sub("several", filtered)
 
-        # 6. Normalise exact crowd counts to bands
-        # "5 people" / "3 agents" → "several"
-        filtered = re.sub(r"\b\d+\s+(?:people|agents?)\b", "several", filtered, flags=re.IGNORECASE)
+        # 7. Remove bare timestamps.
+        filtered = _RE_TIMESTAMP.sub("", filtered)
 
-        # 7. Remove any remaining bare timestamps ("at t=30s", "recently at t=30s")
-        filtered = re.sub(r"\bat t=[\d.]+s\b", "", filtered)
+        # 8. Normalise movement adverbs.
+        filtered = _RE_MOVEMENT_ADVERBS.sub("", filtered)
 
-        # 8. Normalise movement adverbs (not decision-relevant)
-        filtered = re.sub(
-            r"\b(purposefully|quickly|slowly|calmly|briskly)\b", "", filtered, flags=re.IGNORECASE
-        )
-
-        # 9. Collapse whitespace left by removals
-        filtered = re.sub(r"[ \t]+", " ", filtered)
-        filtered = re.sub(r"\n\s*\n", "\n", filtered)
+        # 9. Collapse whitespace left by removals.
+        filtered = _RE_MULTI_SPACE.sub(" ", filtered)
+        filtered = _RE_MULTI_NEWLINE.sub("\n", filtered)
         filtered = filtered.strip()
 
         return filtered

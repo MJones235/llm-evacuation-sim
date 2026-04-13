@@ -62,7 +62,7 @@ class AgentFactory:
     @staticmethod
     def _determine_injured_agents(num_agents: int, config: dict) -> set[int]:
         """
-        Determine which agents should be injured based on test scenario config.
+        Determine which agents should be injured.
 
         Args:
             num_agents: Total number of agents
@@ -71,16 +71,7 @@ class AgentFactory:
         Returns:
             Set of agent indices that should be injured
         """
-        help_config = config.get("test_scenarios", {}).get("help_behavior", {})
-        injured_agents = set()
-
-        if help_config.get("enabled", False):
-            injured_percentage = help_config.get("injured_agent_percentage", 0.2)
-            num_injured = max(1, int(num_agents * injured_percentage))
-            injured_agents = set(random.sample(range(num_agents), num_injured))
-            logger.info(f"Phase 4.1: {num_injured} agents will be injured/slow-moving")
-
-        return injured_agents
+        return set()
 
     @staticmethod
     def _create_single_agent(

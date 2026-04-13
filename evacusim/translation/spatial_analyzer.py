@@ -224,22 +224,22 @@ class SpatialAnalyzer:
         position: tuple[float, float],
         agent_level: str | None = None,
         jps_sim=None,
-        visual_range: float = 25.0,
     ) -> list[dict[str, str]]:
         """
         Get all exits visible from the agent's position.
 
-        Uses simple distance-based visibility (no raycasting for performance).
-        Only returns exits on the agent's current level.
+        An exit is visible if it has an unobstructed line of sight from the
+        agent's position.  Agents are assumed to have unlimited visual range,
+        so only the geometry (obstacles) gates visibility.
 
         Args:
             position: Agent's (x, y) position
             agent_level: Current level ID (e.g., "0", "-1")
             jps_sim: JuPedSim simulation (for multi-level exit access)
-            visual_range: Maximum distance for visual observation (meters)
 
         Returns:
-            List of visible exits with name and distance_category
+            List of dicts with keys ``id`` (canonical exit key), ``name``
+            (display name) and ``distance`` (category string)
         """
         visible_by_key: dict[str, dict[str, Any]] = {}
 
@@ -298,8 +298,8 @@ class SpatialAnalyzer:
                     existing["name"] = self._prefer_exit_label(existing["name"], display_name)
 
         visible_exits = []
-        for exit_info in sorted(
-            visible_by_key.values(), key=lambda e: (e["distance_m"], e["name"].lower())
+        for canonical_key, exit_info in sorted(
+            visible_by_key.items(), key=lambda kv: (kv[1]["distance_m"], kv[1]["name"].lower())
         ):
             distance = exit_info["distance_m"]
             if distance < 10:
@@ -309,7 +309,7 @@ class SpatialAnalyzer:
             else:
                 dist_cat = "visible in distance"
 
-            visible_exits.append({"name": exit_info["name"], "distance": dist_cat})
+            visible_exits.append({"id": canonical_key, "name": exit_info["name"], "distance": dist_cat})
 
         return visible_exits
 
@@ -374,15 +374,14 @@ class SpatialAnalyzer:
         return current_label
 
     def get_visible_blocked_exits(
-        self, position: tuple[float, float], blocked_exits: set[str], visual_range: float = 20.0
+        self, position: tuple[float, float], blocked_exits: set[str]
     ) -> list[dict[str, Any]]:
         """
-        Get blocked exits within visual range.
+        Get blocked exits that have line-of-sight from the agent's position.
 
         Args:
             position: Agent's (x, y) position
             blocked_exits: Set of blocked exit names
-            visual_range: Maximum distance for visual observation (meters)
 
         Returns:
             List of visible blocked exits with name and distance category
@@ -396,7 +395,7 @@ class SpatialAnalyzer:
                     (position[0] - exit_pos[0]) ** 2 + (position[1] - exit_pos[1]) ** 2
                 ) ** 0.5
 
-                if distance < visual_range:
+                if self._has_line_of_sight(position, exit_pos):
                     if distance >= 50:
                         dist_cat = "50-100m"
                     elif distance >= 10:

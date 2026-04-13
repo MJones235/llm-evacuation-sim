@@ -85,8 +85,6 @@ class AgentManager:
             injured_agents: Set of injured agent indices
             config: Configuration dictionary
         """
-        help_config = config.get("test_scenarios", {}).get("help_behavior", {})
-
         for i, agent_cfg in enumerate(agents_config):
             agent_id = agent_cfg["id"]
             spawn_data = spawn_positions[i]
@@ -148,11 +146,7 @@ class AgentManager:
             agent_cfg["initial_goal"] = agent_cfg["goal_state"]
 
             is_injured = i in injured_agents
-
-            if is_injured:
-                walking_speed = help_config.get("injured_walking_speed", 0.5)
-            else:
-                walking_speed = sample_walking_speed()
+            walking_speed = sample_walking_speed() if not is_injured else 0.5
 
             # Add agent with level_id for multi-level simulations
             if hasattr(jps_sim, "simulations"):

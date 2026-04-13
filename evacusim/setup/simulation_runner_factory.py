@@ -50,7 +50,6 @@ class SimulationRunnerFactory:
         sim_config = config.get("simulation", {})
         max_steps = sim_config.get("max_iterations", 200)
         decision_interval = sim_config.get("decision_interval", 5.0)
-        test_scenarios_config = config.get("test_scenarios", {})
 
         # Video generation settings
         video_config = config.get("video", {})
@@ -71,7 +70,6 @@ class SimulationRunnerFactory:
                 decision_interval=decision_interval,
                 max_steps=max_steps,
                 output_file=decisions_file,
-                test_scenarios=test_scenarios_config,
                 enable_video=enable_video,
                 monitoring_config=monitoring_config,
             )
@@ -85,9 +83,6 @@ class SimulationRunnerFactory:
 
         # Configure events
         SimulationRunnerFactory._load_events(runner, config)
-
-        # Configure test scenarios
-        SimulationRunnerFactory._configure_test_scenarios(runner, config)
 
         return runner
 
@@ -114,26 +109,3 @@ class SimulationRunnerFactory:
             logger.info(f"Loaded {len(events_config)} events from configuration")
         else:
             logger.warning("No events defined in configuration")
-
-    @staticmethod
-    def _configure_test_scenarios(runner: HybridSimulationRunner, config: dict) -> None:
-        """
-        Configure test scenarios on the runner.
-
-        Args:
-            runner: Simulation runner instance
-            config: Configuration dictionary
-        """
-        test_scenarios = config.get("test_scenarios", {})
-        blocked_exit_config = test_scenarios.get("blocked_exit", {})
-
-        if blocked_exit_config.get("enabled", False):
-            block_time = blocked_exit_config.get("block_time", 30.0)
-            blocked_exit = blocked_exit_config.get("blocked_exit", "north_exit")
-            logger.info(f"⚠️  Test scenario: {blocked_exit} will be blocked at t={block_time}s")
-
-            runner.test_block_exit_time = block_time
-            runner.test_block_exit_name = blocked_exit
-        else:
-            runner.test_block_exit_time = None
-            runner.test_block_exit_name = None

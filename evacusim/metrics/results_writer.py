@@ -85,6 +85,52 @@ class ResultsWriter:
             logger.warning(f"Failed to save incremental results: {e}")
 
     @staticmethod
+    def save_positions_only(
+        output_file: Path,
+        agent_positions: dict[str, tuple[float, float]],
+        current_sim_time: float,
+        agent_levels: dict[str, str] | None = None,
+        blocked_exits: set[str] | None = None,
+    ) -> None:
+        """
+        Write a lightweight positions sidecar file for the live viewer.
+
+        Only serialises positions, levels, time and blocked exits — far smaller
+        than the full incremental write — so it can be called every 0.5 s without
+        meaningful I/O cost.  The file is named ``<stem>_positions.json`` alongside
+        the main output file.
+
+        Args:
+            output_file: Path to the main output JSON file (used to derive the
+                sidecar path).
+            agent_positions: Current agent positions.
+            current_sim_time: Current simulation time.
+            agent_levels: Per-agent level (multi-level simulations).
+            blocked_exits: Currently blocked exits.
+        """
+        if not output_file:
+            return
+
+        sidecar = output_file.with_name(output_file.stem + "_positions.json")
+        payload: dict[str, Any] = {
+            "agent_positions": agent_positions,
+            "current_time": current_sim_time,
+        }
+        if agent_levels:
+            payload["agent_levels"] = agent_levels
+        if blocked_exits is not None:
+            payload["blocked_exits"] = list(blocked_exits)
+
+        try:
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp_file = sidecar.with_suffix(sidecar.suffix + ".tmp")
+            with open(tmp_file, "w") as f:
+                json.dump(payload, f)
+            tmp_file.replace(sidecar)
+        except Exception as e:
+            logger.warning(f"Failed to save position sidecar: {e}")
+
+    @staticmethod
     def save_final_results(
         output_path: Path,
         agent_decisions: dict[str, Any],

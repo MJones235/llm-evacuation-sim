@@ -13,6 +13,7 @@ Key features:
 """
 
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -69,7 +70,6 @@ class HybridSimulationRunner:
         decision_interval: float = 5.0,
         max_steps: int = 3600,
         output_file: Path | None = None,
-        test_scenarios: dict[str, Any] | None = None,
         enable_video: bool = False,
         monitoring_config: dict[str, Any] | None = None,
     ):
@@ -85,7 +85,6 @@ class HybridSimulationRunner:
             decision_interval: Time between Concordia decisions (seconds)
             max_steps: Maximum simulation steps
             output_file: Path to output file for saving results
-            test_scenarios: Test scenario configuration
             enable_video: Whether to track position history for video generation
             monitoring_config: Optional monitoring configuration dict with keys
                 ``interval_seconds`` and ``zones`` (list of zone spec dicts).
@@ -98,7 +97,6 @@ class HybridSimulationRunner:
         self.decision_interval = decision_interval
         self.max_steps = max_steps
         self.output_file = output_file
-        self.test_scenarios = test_scenarios or {}
         self.enable_video = enable_video
 
         # Simulation state queries
@@ -159,7 +157,6 @@ class HybridSimulationRunner:
 
         # Event management
         self.event_manager = EventManager(station_layout, jupedsim_simulation)
-        self.event_manager.setup_test_scenario(test_scenarios)
 
         # Exit tracking with validation
         self.exit_tracker = ExitTracker(
@@ -193,7 +190,6 @@ class HybridSimulationRunner:
             agent_destinations=self.agent_destinations,
             wait_events=self.wait_events,
             agent_configs=agents_config,
-            test_scenarios=test_scenarios or {},
         )
 
         # Decision processing
@@ -226,14 +222,20 @@ class HybridSimulationRunner:
             agent_injured=self.agent_injured,
             agent_action=self.agent_action,
             agent_last_decision=self.agent_last_decision,
-            test_scenarios=test_scenarios or {},
             jps_sim=self.jps_sim,
         )
 
         # Position history tracker for video generation
         self.position_tracker = None
         if self.enable_video:
-            self.position_tracker = PositionHistoryTracker(save_interval=0.5)
+            # Use streaming mode when an output file is configured so that
+            # frames are written immediately instead of accumulating in memory.
+            streaming_path = None
+            if output_file is not None:
+                streaming_path = output_file.parent / f"{output_file.stem}_history.jsonl"
+            self.position_tracker = PositionHistoryTracker(
+                save_interval=0.5, streaming_path=streaming_path
+            )
             logger.info("Position history tracking enabled for video generation")
 
         # Population monitor — records zone occupancy at configured intervals
@@ -244,17 +246,49 @@ class HybridSimulationRunner:
             interval_seconds=monitoring_config.get("interval_seconds", 60.0),
         )
 
+        # Background thread pool for non-blocking incremental file writes.
+        # A single worker is enough — we only ever have one pending write at a time.
+        self._io_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="results_io")
+        self._pending_write: Future | None = None
+
+        # Write every 200 steps (10 s at dt=0.05 s) instead of every 10 steps (0.5 s).
+        # This reduces I/O traffic by 20× while keeping the live viewer reasonably fresh.
+        self._write_interval_steps: int = 200
+
+        # Staggered decision groups (Opt 9c).
+        # Agents are divided into N_GROUPS groups; only one group is processed each
+        # decision cycle.  This spreads LLM requests evenly across time, reducing
+        # peak concurrency and preventing Azure rate-limit bursts.
+        # Set _decision_groups = 1 to restore the original all-at-once behaviour.
+        self._decision_groups: int = 3
+        agent_ids_sorted = sorted(self.concordia_agents.keys())
+        n = len(agent_ids_sorted)
+        self._agent_groups: list[list[str]] = [
+            agent_ids_sorted[i::self._decision_groups]
+            for i in range(self._decision_groups)
+        ]
+        self._current_group_index: int = 0
+        logger.info(
+            f"Staggered decision groups: {self._decision_groups} groups "
+            f"of ~{n // self._decision_groups} agents each"
+        )
+
         # Bootstrap decisions at t=0 so agents choose initial journeys before first sim step
         self._bootstrap_initial_decisions()
 
     def _bootstrap_initial_decisions(self) -> None:
-        """Run one decision cycle at t=0 before the first JuPedSim step."""
+        """Run one decision cycle at t=0 before the first JuPedSim step.
+
+        At bootstrap we process ALL agents regardless of group so every agent
+        has an initial journey before physics starts.
+        """
         try:
             logger.info("Bootstrapping initial agent decisions at t=0.0s")
             initial_time = 0.0
             observations = self.observation_coordinator.generate_all_observations(initial_time)
             self.last_decision_time = self.decision_processor.process_all_agents(
                 observations, initial_time
+                # agent_ids=None → processes all agents
             )
         except Exception as e:
             logger.error(f"Failed to bootstrap initial decisions: {e}", exc_info=True)
@@ -324,29 +358,67 @@ class HybridSimulationRunner:
                                 f"{transferred_agents}"
                             )
 
-                    # Check if it's time for Concordia decisions
-                    if self._should_make_decisions():
+                    # Check for events BEFORE decisions so that an event firing
+                    # at the same timestep as a decision cycle is visible in the
+                    # observations generated below (previously events fired after
+                    # decisions, meaning the alarm was missed for the entire
+                    # decision cycle that coincided with the alarm time).
+                    with self.perf_timer.measure("event_checking"):
+                        new_event_fired = self.event_manager.check_and_trigger_events(
+                            self.current_sim_time, self.concordia_agents
+                        )
+
+                    # Check if it's time for Concordia decisions (normal schedule) or
+                    # if a critical event just fired (immediate all-agent override).
+                    should_decide = self._should_make_decisions()
+                    if new_event_fired or should_decide:
                         with self.perf_timer.measure("agent_decisions_total"):
-                            # Generate observations for all agents
+                            if new_event_fired:
+                                # Critical event: bypass group scheduling so every
+                                # agent hears about the event without delay.
+                                current_group = None  # None → process all agents
+                                logger.info(
+                                    "🚨 Critical event fired — triggering "
+                                    "immediate all-agent decision cycle"
+                                )
+                            else:
+                                # Normal scheduled cycle: rotate through groups.
+                                current_group = (
+                                    self._agent_groups[self._current_group_index]
+                                    if self._decision_groups > 1
+                                    else None
+                                )
+
+                            # Advance the group index only on normally-scheduled
+                            # cycles so the regular staggered cadence is preserved.
+                            if should_decide:
+                                self._current_group_index = (
+                                    self._current_group_index + 1
+                                ) % self._decision_groups
+
+                            # Remove agents who have since exited from the group list.
+                            if current_group is not None:
+                                current_group = [
+                                    a for a in current_group if a not in self.exited_agents
+                                ]
+
+                            # Generate observations for all agents (even those not
+                            # deciding this cycle — their state may be read by others).
                             with self.perf_timer.measure("generate_observations"):
                                 observations = (
                                     self.observation_coordinator.generate_all_observations(
                                         self.current_sim_time
                                     )
                                 )
-                            # Process all agent decisions in parallel
+                            # Process the current group's decisions in parallel
                             with self.perf_timer.measure("decision_processing"):
                                 self.last_decision_time = (
                                     self.decision_processor.process_all_agents(
-                                        observations, self.current_sim_time
+                                        observations,
+                                        self.current_sim_time,
+                                        agent_ids=current_group,
                                     )
                                 )
-
-                    # Check for events
-                    with self.perf_timer.measure("event_checking"):
-                        self.event_manager.check_and_trigger_events(
-                            self.current_sim_time, self.concordia_agents
-                        )
 
                     # Track position history for video generation (every 0.5s)
                     if self.position_tracker and step % 10 == 0:
@@ -357,23 +429,60 @@ class HybridSimulationRunner:
                             self.event_manager.blocked_exits,
                         )
 
-                    # Save positions every 10 steps (0.5s) for smooth visualization
-                    # Writing every single step (0.05s) is too slow for file I/O
+                    # Lightweight positions sidecar — every 10 steps (0.5 s).
+                    # Updates agent_positions and current_time for the live viewer
+                    # without the cost of serialising the full decisions/messages dict.
                     if self.output_file and step % 10 == 0:
                         with self.perf_timer.measure("file_io"):
-                            # Get agent levels for multi-level simulations
-                            agent_levels = None
-                            if hasattr(self.jps_sim, "agent_levels"):
-                                agent_levels = self.jps_sim.agent_levels
-
-                            ResultsWriter.save_incremental(
+                            _pos_levels = (
+                                dict(self.jps_sim.agent_levels)
+                                if hasattr(self.jps_sim, "agent_levels")
+                                else None
+                            )
+                            ResultsWriter.save_positions_only(
                                 self.output_file,
-                                self.agent_decisions,
                                 self.jps_sim.get_all_agent_positions(),
                                 self.current_sim_time,
-                                self.event_manager.event_history,
-                                self.event_manager.blocked_exits,
-                                self.message_system.message_history,
+                                agent_levels=_pos_levels,
+                                blocked_exits=self.event_manager.blocked_exits,
+                            )
+
+                    # Incremental results write — every _write_interval_steps steps (10s
+                    # at dt=0.05s).  The write runs in a background thread so the main loop
+                    # is not blocked by disk I/O.  We wait for the previous write to finish
+                    # before submitting a new one to avoid concurrent writes to the same file.
+                    if self.output_file and step % self._write_interval_steps == 0:
+                        # Block only if the previous background write is still running
+                        # (this should be negligible given the 10s gap between writes).
+                        if self._pending_write is not None and not self._pending_write.done():
+                            self._pending_write.result()
+
+                        agent_levels = (
+                            dict(self.jps_sim.agent_levels)
+                            if hasattr(self.jps_sim, "agent_levels")
+                            else None
+                        )
+                        # Snapshot mutable state that could change while the write runs.
+                        snapshot_decisions = {
+                            k: {"decisions": list(v["decisions"])}
+                            for k, v in self.agent_decisions.items()
+                        }
+                        snapshot_positions = dict(self.jps_sim.get_all_agent_positions())
+                        snapshot_events = list(self.event_manager.event_history)
+                        snapshot_blocked = set(self.event_manager.blocked_exits)
+                        snapshot_messages = list(self.message_system.message_history)
+                        snapshot_time = self.current_sim_time
+
+                        with self.perf_timer.measure("file_io"):
+                            self._pending_write = self._io_executor.submit(
+                                ResultsWriter.save_incremental,
+                                self.output_file,
+                                snapshot_decisions,
+                                snapshot_positions,
+                                snapshot_time,
+                                snapshot_events,
+                                snapshot_blocked,
+                                snapshot_messages,
                                 self.decision_interval,
                                 self.max_steps,
                                 len(self.concordia_agents),
@@ -397,6 +506,14 @@ class HybridSimulationRunner:
             logger.info("Simulation interrupted by user")
         except Exception as e:
             logger.error(f"Simulation error: {e}", exc_info=True)
+        finally:
+            # Drain any in-flight background write so results aren't truncated.
+            if self._pending_write is not None:
+                try:
+                    self._pending_write.result(timeout=30)
+                except Exception:
+                    pass
+            self._io_executor.shutdown(wait=False)
 
         # Compute final statistics
         elapsed_time = time.time() - start_time
@@ -427,7 +544,9 @@ class HybridSimulationRunner:
 
         # Save position history if video generation is enabled
         if self.position_tracker and self.output_file:
-            history_file = self.output_file.parent / f"{self.output_file.stem}_history.json"
+            # Use .jsonl extension for the streaming format; viewers that expect
+            # the legacy .json wrapper can still read via save_to_file().
+            history_file = self.output_file.parent / f"{self.output_file.stem}_history.jsonl"
             self.position_tracker.save_to_file(history_file)
             results["position_history_file"] = str(history_file)
 
@@ -439,7 +558,7 @@ class HybridSimulationRunner:
 
         # Save position history if available
         if self.position_tracker and self.output_file:
-            history_file = self.output_file.parent / f"{self.output_file.stem}_history.json"
+            history_file = self.output_file.parent / f"{self.output_file.stem}_history.jsonl"
             self.position_tracker.save_to_file(history_file)
             logger.info(f"Position history saved to {history_file}")
 

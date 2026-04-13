@@ -33,7 +33,6 @@ class ActionExecutor:
         agent_destinations: dict[str, str],
         wait_events: list[dict[str, Any]],
         agent_configs: list[dict[str, Any]],
-        test_scenarios: dict[str, Any],
     ):
         """
         Initialize action executor.
@@ -49,7 +48,6 @@ class ActionExecutor:
             agent_destinations: agent_id -> current exit name
             wait_events: List tracking all wait decisions with reasons
             agent_configs: List of agent configuration dictionaries
-            test_scenarios: Test scenario configuration
         """
         self.jps_sim = jps_sim
         self.state_queries = state_queries
@@ -61,7 +59,6 @@ class ActionExecutor:
         self.agent_destinations = agent_destinations
         self.wait_events = wait_events
         self.agent_configs = agent_configs
-        self.test_scenarios = test_scenarios
 
     def execute_action(
         self, agent_id: str, translated_action: dict[str, Any], current_sim_time: float

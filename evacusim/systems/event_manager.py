@@ -43,61 +43,28 @@ class EventManager:
         self.blocked_exits: set[str] = set()
         self.scheduled_events: list[dict[str, Any]] = []  # timed events from config
 
-        # Test scenario tracking
-        self.test_block_exit_time: float | None = None
-        self.test_block_exit_name: str | None = None
-        self._test_exit_blocked: bool = False
-
-    def setup_test_scenario(self, test_scenarios: dict[str, Any] | None) -> None:
-        """
-        Setup test scenarios for event triggering.
-
-        Args:
-            test_scenarios: Dictionary with test scenario configuration
-                e.g., {"block_exit": {"exit_name": "north", "time": 30.0}}
-        """
-        if not test_scenarios:
-            return
-
-        # Phase 4.2: Exit blocking test
-        if "blocked_exit" in test_scenarios:
-            block_config = test_scenarios["blocked_exit"]
-            # Check if scenario is enabled
-            if not block_config.get("enabled", False):
-                return
-
-            self.test_block_exit_name = block_config.get("blocked_exit")
-            self.test_block_exit_time = block_config.get("block_time")
-            if self.test_block_exit_name and self.test_block_exit_time:
-                logger.info(
-                    f"Test scenario configured: Block '{self.test_block_exit_name}' "
-                    f"exit at t={self.test_block_exit_time}s"
-                )
-
     def check_and_trigger_events(
         self, current_sim_time: float, agents: dict[str, Any] | None = None
-    ) -> None:
+    ) -> bool:
         """
         Check for and trigger simulation events.
 
         Args:
             current_sim_time: Current simulation time in seconds
             agents: Dictionary of agent_id -> agent entity (required for broadcasts)
+
+        Returns:
+            True if one or more new events were fired this step, False otherwise.
         """
+        fired = False
         # Fire any scheduled config events whose time has arrived
         if agents:
             for event in self.scheduled_events:
                 if not event.get("_fired") and current_sim_time >= event["time"]:
                     self.broadcast_event(event["message"], current_sim_time, agents)
                     event["_fired"] = True
-
-        # Phase 4.2: Check for exit blocking test scenario
-        if self.test_block_exit_time and not self._test_exit_blocked:
-            # Check if we've reached the blocking time (within one timestep)
-            if current_sim_time >= self.test_block_exit_time:
-                # Trigger the blocking
-                self.block_exit(self.test_block_exit_name)
-                self._test_exit_blocked = True  # Flag to prevent repeated blocking
+                    fired = True
+        return fired
 
     def block_exit(self, exit_name: str) -> None:
         """
