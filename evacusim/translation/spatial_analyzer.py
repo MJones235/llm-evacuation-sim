@@ -227,6 +227,7 @@ class SpatialAnalyzer:
         position: tuple[float, float],
         agent_level: str | None = None,
         jps_sim=None,
+        inactive_exits: set[str] | None = None,
     ) -> list[dict[str, str]]:
         """
         Get all exits visible from the agent's position.
@@ -239,6 +240,8 @@ class SpatialAnalyzer:
             position: Agent's (x, y) position
             agent_level: Current level ID (e.g., "0", "-1")
             jps_sim: JuPedSim simulation (for multi-level exit access)
+            inactive_exits: Set of canonical exit keys to exclude from visibility
+                (used to hide train exits before the train arrives).
 
         Returns:
             List of dicts with keys ``id`` (canonical exit key), ``name``
@@ -265,6 +268,13 @@ class SpatialAnalyzer:
         else:
             # Single-level or no level info: use all exits
             exits_to_check = self.exits
+
+        # Filter out exits that are not yet active (e.g. train exits before train arrives).
+        if inactive_exits:
+            exits_to_check = {
+                name: pos for name, pos in exits_to_check.items()
+                if self._canonical_visible_exit_key(name) not in inactive_exits
+            }
 
         # Prefer level-specific obstacles for line-of-sight checks.
         level_obstacles = None

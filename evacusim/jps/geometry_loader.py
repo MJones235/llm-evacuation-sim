@@ -137,6 +137,38 @@ def load_obstacles(xml_path: str) -> list[Polygon]:
     return obstacles
 
 
+def load_train_entrance_areas(xml_path: str) -> dict[str, Polygon]:
+    """
+    Load train entrance areas from a level geometry XML file.
+
+    Train entrance areas (type ``jupedsim.train_entrance``) are small polygons
+    placed at the track end of each platform, representing the position where
+    agents board an evacuation train.  They are registered as JuPedSim exit
+    stages at initialisation time but are hidden from agent observations until
+    the corresponding ``train_arrival`` event fires.
+
+    Args:
+        xml_path: Path to the level geometry XML file.
+
+    Returns:
+        Dictionary mapping entrance names (e.g. ``train_platform_1``) to
+        Shapely Polygon objects.
+    """
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+
+    areas: dict[str, Polygon] = {}
+    for poly in root.findall('.//poly[@type="jupedsim.train_entrance"]'):
+        poly_id = poly.get("id")
+        name = poly.get("name", poly_id)
+        shape_str = poly.get("shape")
+        if shape_str and name is not None:
+            coords = parse_shape_string(shape_str)
+            areas[name] = Polygon(coords)
+
+    return areas
+
+
 def load_exit_thresholds(xml_path: str) -> dict[str, Polygon]:
     """
     Load exit threshold markers from a level geometry file.

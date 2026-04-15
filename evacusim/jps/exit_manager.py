@@ -34,6 +34,7 @@ class ExitManager:
         walkable_areas: dict[str, Any] | None = None,
         level_id: str | int = "0",
         exit_thresholds: dict[str, Any] | None = None,
+        train_entrance_areas: dict[str, Any] | None = None,
     ):
         """
         Initialize exit manager and create evacuation exits.
@@ -54,6 +55,12 @@ class ExitManager:
         self.walkable_areas = walkable_areas or {}
         self.level_id = str(level_id)
         self.exit_thresholds = exit_thresholds or {}
+        self.train_entrance_areas = train_entrance_areas or {}
+
+        # Names of exits that represent train boarding points.  They are
+        # registered in JuPedSim at init time but hidden from agent observations
+        # until the corresponding train_arrival event fires in EventManager.
+        self.train_exits: set[str] = set()
 
         # Setup evacuation exits and routes
         escalable_zones = [z for z in (walkable_areas or {}).keys() if f"L{self.level_id}_esc" in z]
@@ -74,6 +81,7 @@ class ExitManager:
         # Also store exit coordinates for translation layer
         self.exit_coordinates = {}  # exit_name -> (x, y)
         self._populate_exit_coordinates()
+        self._populate_train_exit_coordinates()
 
         logger.info(
             f"Created {len(self.evacuation_exits)} exits: {list(self.evacuation_exits.keys())}"
@@ -108,6 +116,13 @@ class ExitManager:
                 logger.info(
                     f"Created {len(escalator_exits)} escalator exits on this level: {list(escalator_exits.keys())}"
                 )
+
+            # Also register train boarding exits (empty dict if none defined).
+            train_exits, train_journeys = self._create_train_exits()
+            escalator_exits.update(train_exits)
+            escalator_journeys.update(train_journeys)
+
+            if escalator_exits:
                 return escalator_exits, escalator_journeys
             else:
                 logger.warning("No escalators found in walkable_areas")
@@ -265,6 +280,47 @@ class ExitManager:
 
         return evacuation_exits, evacuation_journeys
 
+    def _create_train_exits(self) -> tuple[dict[str, int], dict[str, int]]:
+        """
+        Create JuPedSim exit stages for train boarding areas.
+
+        Train exits are registered in JuPedSim at simulation start so that
+        pathfinding can route agents to them, but they are hidden from agent
+        observations until the corresponding ``train_arrival`` event fires.
+        Their names are stored in ``self.train_exits`` for the observation
+        layer to use when filtering.
+
+        Returns:
+            Tuple of (evacuation_exits dict, evacuation_journeys dict)
+        """
+        evacuation_exits: dict[str, int] = {}
+        evacuation_journeys: dict[str, int] = {}
+
+        for exit_name, polygon in self.train_entrance_areas.items():
+            coords = list(polygon.exterior.coords)[:-1]
+            if len(coords) < 3:
+                logger.warning(f"Train entrance '{exit_name}' has invalid polygon (<3 points), skipping.")
+                continue
+            try:
+                exit_id = self.stage_manager.create_exit_at_coordinates(
+                    exit_name=exit_name, coords=coords
+                )
+                journey_id = self.stage_manager.create_simple_exit_journey(
+                    journey_name=f"journey_to_{exit_name}", exit_id=exit_id
+                )
+                evacuation_exits[exit_name] = exit_id
+                evacuation_journeys[exit_name] = journey_id
+                self.train_exits.add(exit_name)
+                centroid = polygon.centroid
+                logger.info(
+                    f"Created train exit '{exit_name}' at ({centroid.x:.2f}, {centroid.y:.2f}) "
+                    f"(exit={exit_id}, journey={journey_id})"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to create train exit '{exit_name}': {e}")
+
+        return evacuation_exits, evacuation_journeys
+
     def _populate_exit_coordinates(self):
         """Populate exit_coordinates dict with exit center positions.
 
@@ -326,6 +382,17 @@ class ExitManager:
         logger.info(
             f"Populated {len(self.exit_coordinates)} exit coordinates for level {self.level_id}: {list(self.exit_coordinates.keys())}"
         )
+
+    def _populate_train_exit_coordinates(self) -> None:
+        """Add centroid coordinates for train boarding exits to exit_coordinates."""
+        for exit_name, polygon in self.train_entrance_areas.items():
+            if exit_name in self.evacuation_exits:
+                centroid = polygon.centroid
+                self.exit_coordinates[exit_name] = (centroid.x, centroid.y)
+                logger.debug(
+                    f"Added train exit coordinate for '{exit_name}': "
+                    f"({centroid.x:.2f}, {centroid.y:.2f})"
+                )
 
     def _create_convex_exit_from_polygon(
         self,

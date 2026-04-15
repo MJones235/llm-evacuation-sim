@@ -777,6 +777,78 @@ class MultiLevelJuPedSimulation:
             all_geometry[f"level_{lid}"] = sim.get_geometry()
         return all_geometry
 
+    def board_agents_on_platform(
+        self,
+        exit_name: str,
+        agent_destinations: dict[str, str] | None = None,
+    ) -> list[str]:
+        """
+        Board agents that have committed to boarding this train.
+
+        Only agents whose ``agent_destinations`` entry matches *exit_name* are
+        boarded — agents merely crossing the platform toward an escalator are
+        left alone.  If *agent_destinations* is not provided every agent inside
+        the platform polygon is boarded (legacy fallback).
+
+        Uses Shapely containment against the full platform walkable area so that
+        agents board from any point on the platform, not just from the small
+        train-entrance marker at one end.
+
+        Args:
+            exit_name: Canonical exit name, e.g. ``"train_platform_3"``.
+            agent_destinations: Live dict of agent_id -> current exit name.
+
+        Returns:
+            List of Concordia IDs marked for removal this step.
+        """
+        platform_name = "platform_" + exit_name.rsplit("_", 1)[-1]
+        level_sim = self.simulations.get("-1")
+        if level_sim is None:
+            return []
+
+        platform_poly = level_sim.geometry_manager.walkable_areas.get(platform_name)
+        if platform_poly is None:
+            logger.debug(
+                f"board_agents_on_platform: no walkable area '{platform_name}' "
+                f"found for exit '{exit_name}'."
+            )
+            return []
+
+        boarded: list[str] = []
+
+        # JuPedSim's agents_in_polygon requires a convex polygon, which the
+        # platform walkable areas are not (they can be L-shaped etc.).  Instead,
+        # use Shapely containment directly on all agent positions tracked by
+        # this level's agent_tracker.
+        from shapely.geometry import Point
+
+        current_positions = level_sim.agent_tracker.get_all_positions()
+        for concordia_id, pos in current_positions.items():
+            # Board agents on this platform unless they are actively routing
+            # away via an escalator or street exit.  Agents who are waiting
+            # (no destination) or who have already committed to a train exit
+            # are boarded automatically — this mirrors real-world behaviour
+            # where a train on your platform boards you if you don't leave.
+            if agent_destinations is not None:
+                dest = agent_destinations.get(concordia_id, "")
+                # Skip agents heading to a non-train destination (escalator/street).
+                if dest and not dest.startswith("train_platform_"):
+                    continue
+            if not platform_poly.contains(Point(pos)):
+                continue
+            jps_id = level_sim.agent_tracker.agent_ids.get(concordia_id)
+            if jps_id is None:
+                continue
+            level_sim.agent_assigned_exits[concordia_id] = exit_name
+            level_sim.simulation.mark_agent_for_removal(jps_id)
+            boarded.append(concordia_id)
+
+        if boarded:
+            logger.info(
+                f"🚂 {len(boarded)} agent(s) boarding '{exit_name}': {boarded}"
+            )
+        return boarded
+
     def generate_spawn_positions(
         self, num_agents: int, seed: int = 42
     ) -> list[tuple[float, float, str]]:

@@ -84,6 +84,13 @@ class VideoGenerationHelper:
         """
         Load station geometry from SUMO network files.
 
+        Supports multi-level stations: if level_0.xml and level_-1.xml both
+        exist the returned dict uses the ``{"levels": {"level_0": ...,
+        "level_-1": ...}}`` format expected by VideoGenerator.  Train entrance
+        areas (jupedsim.train_entrance polygons) are loaded from level_-1.xml
+        and stored under the key ``"train_entrance_areas"`` so the video
+        renderer can draw them as boarding zones.
+
         Args:
             network_path: Path to station network directory
 
@@ -96,55 +103,62 @@ class VideoGenerationHelper:
                 load_escalator_corridors,
                 load_obstacles,
                 load_platform_areas,
+                load_train_entrance_areas,
                 load_walkable_areas,
             )
 
+            def poly_to_coords(poly):
+                return list(poly.exterior.coords)
+
+            def _load_level(xml_path: Path) -> dict:
+                walkable_areas = load_walkable_areas(str(xml_path))
+                entrance_areas = load_entrance_areas(str(xml_path))
+                platform_areas = load_platform_areas(str(xml_path))
+                obstacles = load_obstacles(str(xml_path))
+                escalator_corridors = load_escalator_corridors(str(xml_path))
+                train_entrance_areas = load_train_entrance_areas(str(xml_path))
+                logger.info(
+                    f"Loaded geometry from {xml_path.name}: "
+                    f"{len(walkable_areas)} walkable, {len(entrance_areas)} entrances, "
+                    f"{len(platform_areas)} platforms, {len(obstacles)} obstacles, "
+                    f"{len(escalator_corridors)} escalator corridors, "
+                    f"{len(train_entrance_areas)} train boarding zones"
+                )
+                return {
+                    "walkable_areas": {n: poly_to_coords(p) for n, p in walkable_areas.items()},
+                    "entrance_areas": {n: poly_to_coords(p) for n, p in entrance_areas.items()},
+                    "platform_areas": {n: poly_to_coords(p) for n, p in platform_areas.items()},
+                    "obstacles": [poly_to_coords(p) for p in obstacles],
+                    "escalator_corridors": {
+                        n: poly_to_coords(p) for n, p in escalator_corridors.items()
+                    },
+                    "train_entrance_areas": {
+                        n: poly_to_coords(p) for n, p in train_entrance_areas.items()
+                    },
+                }
+
+            level0_file = network_path / "level_0.xml"
+            level_m1_file = network_path / "level_-1.xml"
             walking_areas_file = network_path / "walking_areas.add.xml"
-            level_file = network_path / "level_0.xml"
-            if level_file.exists():
-                geom_file = level_file
+
+            if level0_file.exists() and level_m1_file.exists():
+                # Multi-level station: return nested levels dict
+                return {
+                    "levels": {
+                        "level_0": _load_level(level0_file),
+                        "level_-1": _load_level(level_m1_file),
+                    }
+                }
+            elif level0_file.exists():
+                return _load_level(level0_file)
             elif walking_areas_file.exists():
-                geom_file = walking_areas_file
+                return _load_level(walking_areas_file)
             else:
                 logger.warning(
                     "Geometry file not found: expected level_0.xml or walking_areas.add.xml "
                     f"in {network_path}"
                 )
                 return None
-
-            walkable_areas = load_walkable_areas(str(geom_file))
-            entrance_areas = load_entrance_areas(str(geom_file))
-            platform_areas = load_platform_areas(str(geom_file))
-            obstacles = load_obstacles(str(geom_file))
-            escalator_corridors = load_escalator_corridors(str(geom_file))
-
-            def poly_to_coords(poly):
-                return list(poly.exterior.coords)
-
-            geometry = {
-                "walkable_areas": {
-                    name: poly_to_coords(poly) for name, poly in walkable_areas.items()
-                },
-                "entrance_areas": {
-                    name: poly_to_coords(poly) for name, poly in entrance_areas.items()
-                },
-                "platform_areas": {
-                    name: poly_to_coords(poly) for name, poly in platform_areas.items()
-                },
-                "obstacles": [poly_to_coords(poly) for poly in obstacles],
-                "escalator_corridors": {
-                    name: poly_to_coords(poly) for name, poly in escalator_corridors.items()
-                },
-            }
-
-            logger.info(
-                f"Loaded geometry from {geom_file}: "
-                f"{len(walkable_areas)} walkable areas, "
-                f"{len(entrance_areas)} entrances, {len(platform_areas)} platforms, "
-                f"{len(obstacles)} obstacles, {len(escalator_corridors)} escalator corridors"
-            )
-
-            return geometry
 
         except Exception as e:
             logger.error(f"Failed to load geometry: {e}")
@@ -155,32 +169,44 @@ class VideoGenerationHelper:
         """
         Merge position history with decisions data.
 
+        Supports both the legacy ``.json`` (wrapped) format and the streaming
+        ``.jsonl`` format (one JSON object per line) produced by the position
+        history tracker's streaming mode.
+
         Args:
             decisions_file: Path to agent decisions JSON
-            history_file: Path to position history JSON
+            history_file: Path to position history file (.json or .jsonl)
 
         Returns:
             Path to merged temporary file or None if merging fails
         """
         try:
-            with open(history_file) as f:
-                history_data = json.load(f)
+            # Handle streaming .jsonl format (one frame per line)
+            if history_file.suffix == ".jsonl":
+                frames = []
+                with open(history_file) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            frames.append(json.loads(line))
+                position_history = frames
+            else:
+                with open(history_file) as f:
+                    history_data = json.load(f)
+                position_history = history_data.get("position_history", [])
+
             with open(decisions_file) as f:
                 decisions_data = json.load(f)
 
             # Merge position history into decisions data
-            decisions_data["position_history"] = history_data.get("position_history", [])
+            decisions_data["position_history"] = position_history
 
             # Save merged data temporarily
             merged_file = decisions_file.parent / f"{decisions_file.stem}_merged.json"
             with open(merged_file, "w") as f:
                 json.dump(decisions_data, f)
 
-            logger.info(
-                f"Merged {len(history_data.get('position_history', []))} "
-                f"position frames with decisions"
-            )
-
+            logger.info(f"Merged {len(position_history)} position frames with decisions")
             return merged_file
 
         except Exception as e:
@@ -219,8 +245,11 @@ class VideoGenerationHelper:
         # Load geometry
         geometry = VideoGenerationHelper.load_geometry_from_network(network_path)
 
-        # Check for position history
-        history_file = decisions_file.parent / f"{decisions_file.stem}_history.json"
+        # Check for position history — prefer the streaming .jsonl format produced
+        # by the position tracker, fall back to the legacy .json wrapper.
+        history_file = decisions_file.parent / f"{decisions_file.stem}_history.jsonl"
+        if not history_file.exists():
+            history_file = decisions_file.parent / f"{decisions_file.stem}_history.json"
         if not history_file.exists():
             logger.warning(
                 "No position history found. Enable video generation in config "

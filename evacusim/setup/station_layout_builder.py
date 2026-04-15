@@ -162,8 +162,13 @@ class StationLayoutBuilder:
             "obstacles": jps_sim.geometry_manager.obstacles,
             # Concourse-level escalator zones leading to platforms (zone_name -> centroid)
             "down_access_exits": down_access_exits,
-            # Custom display names for exits needing non-default labels
-            "custom_exit_display_names": custom_exit_display_names,
+            # Custom display names for exits needing non-default labels.
+            # YAML config entries (e.g. train platform names) take the base, then
+            # code-generated escalator labels (more specific) override on top.
+            "custom_exit_display_names": {
+                **config.get("station", {}).get("custom_exit_display_names", {}),
+                **custom_exit_display_names,
+            },
         }
 
         logger.info(

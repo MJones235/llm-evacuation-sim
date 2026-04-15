@@ -18,6 +18,7 @@ from evacusim.jps.geometry_loader import (
     load_exit_thresholds,
     load_obstacles,
     load_platform_areas,
+    load_train_entrance_areas,
     load_walkable_areas,
 )
 
@@ -63,6 +64,7 @@ class GeometryManager:
             self.obstacles,
             self.escalator_corridors,
             self.exit_thresholds,
+            self.train_entrance_areas,
         ) = self._load_geometry()
 
         # Create JuPedSim simulation
@@ -114,8 +116,11 @@ class GeometryManager:
         obstacles = load_obstacles(str(geom_file))
         escalator_corridors = load_escalator_corridors(str(geom_file))
         exit_thresholds = load_exit_thresholds(str(geom_file))
+        train_entrance_areas = load_train_entrance_areas(str(geom_file))
         if exit_thresholds:
             logger.info(f"  Loaded {len(exit_thresholds)} exit thresholds: {list(exit_thresholds.keys())}")
+        if train_entrance_areas:
+            logger.info(f"  Loaded {len(train_entrance_areas)} train entrance areas: {list(train_entrance_areas.keys())}")
 
         # Integrate obstacles into walkable areas as polygon holes
         walkable_areas_with_obstacles, fixed_obstacles = GeometryProcessor.integrate_obstacles(
@@ -137,6 +142,7 @@ class GeometryManager:
             fixed_obstacles,
             escalator_corridors,
             exit_thresholds,
+            train_entrance_areas,
         )
 
     def _create_simulation(self) -> jps.Simulation:

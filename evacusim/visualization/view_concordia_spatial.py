@@ -54,6 +54,13 @@ class SpatialConcordiaViewer:
         self._colour_map: RoleColourMap = RoleColourMap()
         self.last_update = 0
         self.blocked_exits = []  # Phase 4.2: Track blocked exits for visualization
+        # Train boarding tracking: count agents who disappeared while their
+        # last destination was a train_platform_* exit.
+        self._initial_agents: set[str] = set()
+        self._last_known_level: dict[str, str] = {}
+        self._boarded_agents: set[str] = set()
+        self._status_text = None       # single compact status badge on platform panel
+        self.active_train_exits: list[str] = []  # populated from sidecar
 
         # Load geometry for both levels
         self.geometry_level_0 = None
@@ -97,6 +104,7 @@ class SpatialConcordiaViewer:
                 load_escalator_corridors,
                 load_obstacles,
                 load_platform_areas,
+                load_train_entrance_areas,
                 load_walkable_areas,
             )
 
@@ -119,6 +127,7 @@ class SpatialConcordiaViewer:
             platform_areas = load_platform_areas(str(geom_file))
             obstacles = load_obstacles(str(geom_file))
             escalator_corridors = load_escalator_corridors(str(geom_file))
+            train_entrance_areas = load_train_entrance_areas(str(geom_file))
 
             def poly_to_coords(poly):
                 return list(poly.exterior.coords)
@@ -137,6 +146,9 @@ class SpatialConcordiaViewer:
                 "escalator_corridors": {
                     name: poly_to_coords(poly) for name, poly in escalator_corridors.items()
                 },
+                "train_entrance_areas": {
+                    name: poly_to_coords(poly) for name, poly in train_entrance_areas.items()
+                },
             }
 
             print(
@@ -145,7 +157,8 @@ class SpatialConcordiaViewer:
                 f"{len(entrance_areas)} entrances, "
                 f"{len(platform_areas)} platforms, "
                 f"{len(obstacles)} obstacles, "
-                f"{len(escalator_corridors)} escalator corridors"
+                f"{len(escalator_corridors)} escalator corridors, "
+                f"{len(train_entrance_areas)} train boarding zones"
             )
 
             return geometry
@@ -232,6 +245,52 @@ class SpatialConcordiaViewer:
                     )
                     ax.add_patch(polygon)
 
+        # Draw train boarding zones (jupedsim.train_entrance polygons on level -1).
+        # These are small markers at the end of each platform; draw them as
+        # solid green rectangles without a text label — the platform number is
+        # instead shown on the much larger platform walkable area below.
+        if "train_entrance_areas" in geometry:
+            for name, coords in geometry["train_entrance_areas"].items():
+                if coords:
+                    polygon = MPLPolygon(
+                        coords,
+                        fill=True,
+                        alpha=0.8,
+                        facecolor="#00CC44",
+                        edgecolor="white",
+                        linewidth=1.5,
+                        label="Train",
+                        zorder=5,
+                    )
+                    ax.add_patch(polygon)
+
+        # Label each named platform walkable area (platform_1, platform_2, …)
+        # with a large number so it is easy to read on the map at any zoom level.
+        if "walkable_areas" in geometry:
+            for name, coords in geometry["walkable_areas"].items():
+                if not name.startswith("platform_") or not coords:
+                    continue
+                platform_num = name.rsplit("_", 1)[-1]
+                outline = MPLPolygon(
+                    coords,
+                    fill=False,
+                    edgecolor="#CC6600",
+                    linewidth=1.5,
+                    linestyle="--",
+                    zorder=4,
+                )
+                ax.add_patch(outline)
+                xs = [c[0] for c in coords]
+                ys = [c[1] for c in coords]
+                cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+                ax.text(
+                    cx, cy, f"P{platform_num}",
+                    ha="center", va="center",
+                    fontsize=11, color="#994400", fontweight="bold",
+                    clip_on=True,
+                    zorder=6,
+                )
+
     def _set_fixed_limits(self, ax, x_min: float, x_max: float, y_min: float, y_max: float):
         """Set fixed axis limits with small padding."""
         pad_x = (x_max - x_min) * 0.05 if x_max > x_min else 5.0
@@ -288,6 +347,8 @@ class SpatialConcordiaViewer:
                 if "agent_roles" in pos_data:
                     self.agent_roles = pos_data["agent_roles"]
                     self._colour_map = RoleColourMap.from_roles(self.agent_roles)
+                if "active_train_exits" in pos_data:
+                    self.active_train_exits = pos_data["active_train_exits"]
             else:
                 # Sidecar not yet written — fall back to main file for positions.
                 with open(self.output_file) as f:
@@ -414,12 +475,19 @@ class SpatialConcordiaViewer:
         if not self.agent_positions:
             return  # No positions yet
 
+        # Seed initial agent set on first populated frame
+        if not self._initial_agents and self.agent_positions:
+            self._initial_agents = set(self.agent_positions.keys())
+
+        current_agents = set(self.agent_positions.keys())
+
         for agent_id, pos in self.agent_positions.items():
             if pos and len(pos) >= 2:
                 x, y = pos[0], pos[1]  # Handle both list and tuple from JSON
 
                 # Determine which level this agent is on
                 agent_level = self.agent_levels.get(agent_id, "0")  # Default to level 0
+                self._last_known_level[agent_id] = agent_level
                 ax = self.ax_level_0 if agent_level == "0" else self.ax_level_m1
 
                 face, edge = self._agent_colour(agent_id)
@@ -436,6 +504,46 @@ class SpatialConcordiaViewer:
 
                 self.agent_dots[agent_id] = dot
                 self.agent_labels[agent_id] = label
+
+        # Detect newly-boarded agents: vanished from positions while on level -1
+        # (i.e. they walked into a train exit polygon and were removed by JuPedSim).
+        for agent_id in self._initial_agents - current_agents - self._boarded_agents:
+            if self._last_known_level.get(agent_id) == "-1":
+                self._boarded_agents.add(agent_id)
+
+        # Update compact train/boarding status badge on the platform panel.
+        boarded = len(self._boarded_agents)
+        if self.active_train_exits:
+            platforms = " ".join(
+                f"P{n.rsplit('_',1)[-1]}"
+                for n in sorted(self.active_train_exits)
+            )
+            status_str = f"🚂 Boarding: {platforms}   Boarded: {boarded}"
+            status_color = "#006600"
+            face_color = "#CCFFCC"
+        elif boarded > 0:
+            status_str = f"🚫 Train departed   Boarded: {boarded}"
+            status_color = "#555555"
+            face_color = "#F0F0F0"
+        else:
+            status_str = "Train not yet arrived"
+            status_color = "#555555"
+            face_color = "#F8F8F8"
+
+        if self._status_text is not None:
+            self._status_text.set_text(status_str)
+            self._status_text.set_color(status_color)
+            self._status_text.get_bbox_patch().set_facecolor(face_color)
+        else:
+            self._status_text = self.ax_level_m1.text(
+                0.02, 0.97,
+                status_str,
+                transform=self.ax_level_m1.transAxes,
+                ha="left", va="top",
+                fontsize=8, color=status_color,
+                bbox=dict(boxstyle="round,pad=0.25", facecolor=face_color, alpha=0.85),
+                zorder=5,
+            )
 
     def run(self):
         """Run the viewer with animation."""

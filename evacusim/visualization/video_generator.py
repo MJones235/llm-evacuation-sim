@@ -69,6 +69,18 @@ class VideoGenerator:
         if not self.time_series:
             raise ValueError("No position data found in output file")
 
+        # Derive the initial agent set and track train-boarded agents across frames.
+        # An agent is considered to have boarded a train when they vanish from the
+        # positions dict while their last recorded destination was a train_platform_*.
+        self._initial_agents: set[str] = (
+            set(self.time_series[0]["positions"].keys()) if self.time_series else set()
+        )
+        # Cumulative map: agent_id -> last known destination (updated each frame)
+        self._last_known_destination: dict[str, str] = {}
+        # Running count of agents confirmed to have boarded trains
+        self._boarded_count: int = 0
+        self._boarded_agents: set[str] = set()
+
         logger.info(
             f"Loaded {len(self.time_series)} time steps "
             f"from {self.data.get('current_time', 0):.1f}s simulation"
@@ -298,6 +310,50 @@ class VideoGenerator:
                     polygon = MPLPolygon(coords, fill=True, alpha=0.4, color="black")
                     ax.add_patch(polygon)
 
+        # Draw train boarding zones (jupedsim.train_entrance polygons on level -1).
+        # Draw as solid green markers only — the platform number label lives on the
+        # larger platform walkable area drawn below.
+        if "train_entrance_areas" in geom:
+            for name, coords in geom["train_entrance_areas"].items():
+                if coords:
+                    polygon = MPLPolygon(
+                        coords,
+                        fill=True,
+                        alpha=0.85,
+                        facecolor="#00CC44",
+                        edgecolor="white",
+                        linewidth=1.5,
+                        zorder=5,
+                    )
+                    ax.add_patch(polygon)
+
+        # Label each named platform walkable area (platform_1, platform_2, …)
+        # with a prominent number so the platform is easy to identify.
+        if "walkable_areas" in geom:
+            for name, coords in geom["walkable_areas"].items():
+                if not name.startswith("platform_") or not coords:
+                    continue
+                platform_num = name.rsplit("_", 1)[-1]
+                outline = MPLPolygon(
+                    coords,
+                    fill=False,
+                    edgecolor="#CC6600",
+                    linewidth=1.5,
+                    linestyle="--",
+                    zorder=4,
+                )
+                ax.add_patch(outline)
+                xs = [c[0] for c in coords]
+                ys = [c[1] for c in coords]
+                cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+                ax.text(
+                    cx, cy, f"P{platform_num}",
+                    ha="center", va="center",
+                    fontsize=11, color="#994400", fontweight="bold",
+                    clip_on=True,
+                    zorder=6,
+                )
+
     def _set_limits_from_geometry(self, ax, level_name: str = None):
         """Set axis limits from geometry for a specific level."""
         if not self.geometry:
@@ -342,6 +398,16 @@ class VideoGenerator:
 
             ax.set_xlim(x_min - pad_x, x_max + pad_x)
             ax.set_ylim(y_min - pad_y, y_max + pad_y)
+
+    def _get_train_entrance_areas(self) -> dict[str, list]:
+        """Return train_entrance_areas coord dict from geometry (level -1 only)."""
+        if not self.geometry:
+            return {}
+        if "levels" in self.geometry:
+            geom = self.geometry["levels"].get("level_-1", {})
+        else:
+            geom = self.geometry
+        return geom.get("train_entrance_areas", {})
 
     def _draw_frame(self, axes_dict, frame_data, title_text):
         """
@@ -439,6 +505,53 @@ class VideoGenerator:
                     label="_agent",
                 )
                 ax.text(x, y + 1, agent_id, ha="center", fontsize=8, label="_agent")
+
+        # Update last-known destination from this frame's agent_states.
+        # Also detect agents who have just boarded a train (disappeared while
+        # their last destination pointed at a train_platform_*).
+        agent_states = frame_data.get("agent_states", {})
+        for agent_id, state in agent_states.items():
+            dest = (state.get("destination") or "")
+            if dest:
+                self._last_known_destination[agent_id] = dest
+
+        current_agents = set(positions.keys())
+        for agent_id in self._initial_agents - current_agents - self._boarded_agents:
+            dest = self._last_known_destination.get(agent_id, "")
+            if dest.startswith("train_platform_"):
+                self._boarded_agents.add(agent_id)
+
+        self._boarded_count = len(self._boarded_agents)
+
+        # Compact train/boarding status badge on the platform panel (level -1).
+        if "-1" in axes_dict:
+            ax_plat = axes_dict["-1"]
+            active_exits = set(frame_data.get("active_train_exits", []))
+            boarded = self._boarded_count
+            if active_exits:
+                platforms = " ".join(
+                    f"P{n.rsplit('_',1)[-1]}" for n in sorted(active_exits)
+                )
+                status_str = f"\U0001f682 Boarding: {platforms}   Boarded: {boarded}"
+                status_color = "#006600"
+                face_color = "#CCFFCC"
+            elif boarded > 0:
+                status_str = f"\U0001f6ab Train departed   Boarded: {boarded}"
+                status_color = "#555555"
+                face_color = "#F0F0F0"
+            else:
+                status_str = "Train not yet arrived"
+                status_color = "#555555"
+                face_color = "#F8F8F8"
+            ax_plat.text(
+                0.02, 0.97,
+                status_str,
+                transform=ax_plat.transAxes,
+                ha="left", va="top",
+                fontsize=8, color=status_color,
+                bbox=dict(boxstyle="round,pad=0.25", facecolor=face_color, alpha=0.85),
+                label="_agent",
+            )
 
     def generate(self, output_path: Path, dpi: int = 100) -> bool:
         """

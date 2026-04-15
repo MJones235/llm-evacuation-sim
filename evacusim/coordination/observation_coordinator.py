@@ -79,6 +79,16 @@ class ObservationCoordinator:
         """
         observations = {}
 
+        # Compute inactive train exits (registered in JuPedSim but train not yet arrived).
+        # Any train exit not in event_manager.active_train_exits is excluded from agent
+        # observations so agents cannot see or select train boarding points prematurely.
+        all_train_exits: set[str] = set()
+        if self.jps_sim and hasattr(self.jps_sim, "simulations"):
+            for sim in self.jps_sim.simulations.values():
+                all_train_exits.update(getattr(sim.exit_manager, "train_exits", set()))
+        active_train_exits: set[str] = getattr(self.event_manager, "active_train_exits", set())
+        inactive_exits: set[str] | None = (all_train_exits - active_train_exits) or None
+
         # Pre-compute nearby-agent lists for all active agents in one bulk pass.
         # This avoids the O(n²) cost of calling get_nearby_agents() per agent,
         # each of which was iterating the full JuPedSim agent list.
@@ -166,6 +176,7 @@ class ObservationCoordinator:
                     state_queries=self.state_queries,
                     received_messages=received_messages,
                     conversation_history=conversation_history,
+                    inactive_exits=inactive_exits,
                 )
 
                 observations[agent_id] = obs

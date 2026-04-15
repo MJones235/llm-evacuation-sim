@@ -92,6 +92,7 @@ class ResultsWriter:
         agent_levels: dict[str, str] | None = None,
         blocked_exits: set[str] | None = None,
         agent_roles: dict[str, str] | None = None,
+        active_train_exits: set[str] | None = None,
     ) -> None:
         """
         Write a lightweight positions sidecar file for the live viewer.
@@ -124,6 +125,8 @@ class ResultsWriter:
             payload["blocked_exits"] = list(blocked_exits)
         if agent_roles:
             payload["agent_roles"] = agent_roles
+        if active_train_exits is not None:
+            payload["active_train_exits"] = list(active_train_exits)
 
         try:
             output_file.parent.mkdir(parents=True, exist_ok=True)

@@ -410,6 +410,26 @@ class HybridSimulationRunner:
                     # Check for agents who have exited and remove them
                     self.exit_tracker.check_exited_agents(self.current_sim_time, self.current_step)
 
+                    # Board agents on any platform that currently has a train present.
+                    # Any agent standing anywhere in the platform polygon is removed —
+                    # they do not need to walk to the small train-entrance marker at
+                    # the end of the platform.  We add them to exited_agents here so
+                    # that if exit_tracker also sees them disappear next step it won't
+                    # double-count them.
+                    if (
+                        hasattr(self.jps_sim, "board_agents_on_platform")
+                        and self.event_manager.active_train_exits
+                    ):
+                        for _exit_name in list(self.event_manager.active_train_exits):
+                            for _cid in self.jps_sim.board_agents_on_platform(
+                                _exit_name,
+                                agent_destinations=self.agent_destinations,
+                            ):
+                                if _cid not in self.exited_agents:
+                                    self.exited_agents.add(_cid)
+                                    self.agent_destinations[_cid] = _exit_name
+                                    self.decision_processor.agent_goals.pop(_cid, None)
+
                     # Record population snapshot every simulation minute
                     self.population_monitor.record_snapshot(
                         self.current_sim_time, self.exited_agents
@@ -447,6 +467,27 @@ class HybridSimulationRunner:
                             message_system=self.message_system,
                             exited_agents=self.exited_agents,
                             zone_id_for_agent_fn=self._get_zone_id_for_agent,
+                        )
+
+                    # When a train departs its exits are removed from active_train_exits.
+                    # Clear any agent destination commitments that now point at a
+                    # closed train exit so those agents make a fresh decision.
+                    active_train_exits = self.event_manager.active_train_exits
+                    stranded = [
+                        aid for aid, dest in self.agent_destinations.items()
+                        if dest.startswith("train_platform_")
+                        and dest not in active_train_exits
+                        and aid not in self.exited_agents
+                    ]
+                    if stranded:
+                        for aid in stranded:
+                            self.agent_destinations.pop(aid, None)
+                            self.decision_processor.agent_goals.pop(aid, None)
+                            self.decision_processor.prompt_cache.clear_agent(aid)
+                        new_event_fired = True
+                        logger.info(
+                            f"Train departed — cleared stale destinations for "
+                            f"{len(stranded)} stranded agent(s); forced decision cycle."
                         )
 
                     # Notify director systems when any event fires so that
@@ -514,6 +555,7 @@ class HybridSimulationRunner:
                             self.jps_sim.get_all_agent_positions(),
                             self.agent_decisions,
                             self.event_manager.blocked_exits,
+                            active_train_exits=self.event_manager.active_train_exits,
                         )
 
                     # Lightweight positions sidecar — every 10 steps (0.5 s).
@@ -533,6 +575,7 @@ class HybridSimulationRunner:
                                 agent_levels=_pos_levels,
                                 blocked_exits=self.event_manager.blocked_exits,
                                 agent_roles=self.agent_roles if self.agent_roles else None,
+                                active_train_exits=self.event_manager.active_train_exits,
                             )
 
                     # Incremental results write — every _write_interval_steps steps (10s
@@ -623,8 +666,11 @@ class HybridSimulationRunner:
         # Print financial report
         print(FinancialReporter.generate_report(self.llm_provider, len(self.concordia_agents)))
 
-        # Display and save population time series
-        self.population_monitor.record_snapshot(self.current_sim_time, self.exited_agents)
+        # Display and save population time series.
+        # force=True ensures the final state is always recorded even when the
+        # last periodic interval (e.g. t=300 s) falls just past the actual end
+        # time (e.g. t=299.95 s) and the normal guard would skip it.
+        self.population_monitor.record_snapshot(self.current_sim_time, self.exited_agents, force=True)
         self.population_monitor.display_summary()
         if self.output_file:
             self.population_monitor.save(self.output_file.parent)

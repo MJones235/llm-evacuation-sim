@@ -157,7 +157,7 @@ class PopulationMonitor:
     # Public API
     # ------------------------------------------------------------------
 
-    def record_snapshot(self, sim_time: float, exited_agents: set[str]) -> None:
+    def record_snapshot(self, sim_time: float, exited_agents: set[str], force: bool = False) -> None:
         """
         Record a snapshot if the simulation has reached the next interval.
 
@@ -166,8 +166,12 @@ class PopulationMonitor:
         Args:
             sim_time: Current simulation time in seconds.
             exited_agents: Set of agent IDs that have fully evacuated.
+            force: If True, record regardless of the interval timer.  Use this
+                for the mandatory end-of-simulation snapshot so the final state
+                is always captured even when the last scheduled interval falls
+                slightly past the simulation end time.
         """
-        if sim_time < self._next_record_time:
+        if not force and sim_time < self._next_record_time:
             return
 
         positions = self.jps_sim.get_all_agent_positions()

@@ -74,6 +74,7 @@ class ConcordiaJuPedSimulation:
             self.geometry_manager.walkable_areas,
             level_id=self.level_id,
             exit_thresholds=self.geometry_manager.exit_thresholds,
+            train_entrance_areas=self.geometry_manager.train_entrance_areas,
         )
 
         self.agent_tracker = AgentTracker(self.simulation)

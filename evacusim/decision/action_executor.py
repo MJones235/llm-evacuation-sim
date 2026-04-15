@@ -366,9 +366,19 @@ class ActionExecutor:
                 f"({distance:.1f}m away)"
             )
         else:
-            # All other wait types: stand still at current position
-            logger.debug(f"[WAIT] {agent_id} at {current_position} staying still")
-            self.jps_sim.set_agent_target(agent_id, current_position)
+            # If the agent is already committed to boarding a train, preserve that
+            # routing rather than switching to a stand-still waypoint.  The "wait"
+            # semantically means the agent is heading to the platform doors and
+            # waiting for the train — they should keep walking there.
+            current_dest = self.agent_destinations.get(agent_id, "")
+            if current_dest.startswith("train_platform_"):
+                logger.debug(
+                    f"[WAIT] {agent_id} routed to '{current_dest}' — preserving train boarding route"
+                )
+            else:
+                # All other wait types: stand still at current position
+                logger.debug(f"[WAIT] {agent_id} at {current_position} staying still")
+                self.jps_sim.set_agent_target(agent_id, current_position)
 
         # Record wait event
         agent_config = next((c for c in self.agent_configs if c["id"] == agent_id), {})

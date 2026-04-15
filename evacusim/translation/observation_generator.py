@@ -121,6 +121,7 @@ class ObservationGenerator:
         state_queries=None,
         received_messages: list[dict[str, Any]] | None = None,
         conversation_history: dict[str, list[dict]] | None = None,
+        inactive_exits: set[str] | None = None,
     ) -> str:
         """
         Generate a natural language observation for an agent.
@@ -273,7 +274,8 @@ class ObservationGenerator:
 
         # 1. Discover exits visible right now via LOS geometry.
         visible_exits = self.spatial_analyzer.get_visible_exits(
-            position, agent_level=agent_level, jps_sim=self.jps_sim
+            position, agent_level=agent_level, jps_sim=self.jps_sim,
+            inactive_exits=inactive_exits,
         )
 
         # 2. Update: learn exits seen this tick.
@@ -307,6 +309,9 @@ class ObservationGenerator:
 
         # 5. Exits the agent knows about from prior observation but cannot see right now.
         recalled = known - visible_canonical
+        # Suppress inactive exits (e.g. trains not yet arrived) from recalled list too.
+        if inactive_exits:
+            recalled = {c for c in recalled if c not in inactive_exits}
         if recalled:
             recalled_names = sorted(
                 self._canonical_to_display.get(c, c) for c in recalled
