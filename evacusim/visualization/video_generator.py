@@ -15,6 +15,7 @@ from matplotlib.animation import FFMpegWriter
 from matplotlib.patches import Polygon as MPLPolygon
 
 from evacusim.utils.logger import get_logger
+from evacusim.visualization.video_generation_helper import RoleColourMap
 
 logger = get_logger(__name__)
 
@@ -53,6 +54,12 @@ class VideoGenerator:
         # Extract agent levels mapping
         self.agent_levels = self.data.get("agent_levels", {})
         logger.info(f"Loaded agent levels for {len(self.agent_levels)} agents")
+
+        # Extract agent roles (director agents have a non-empty role label)
+        self.agent_roles: dict[str, str] = self.data.get("agent_roles", {})
+        if self.agent_roles:
+            logger.info(f"Loaded roles for {len(self.agent_roles)} director agent(s)")
+        self._colour_map = RoleColourMap.from_roles(self.agent_roles)
 
         # Build level bounds from geometry for coordinate-based inference
         self.level_bounds = self._build_level_bounds()
@@ -402,6 +409,8 @@ class VideoGenerator:
 
         # Draw agent positions on appropriate level
         positions = frame_data.get("positions", {})
+        # Per-frame roles override (future support); fall back to self.agent_roles
+        frame_roles = frame_data.get("agent_roles", self.agent_roles)
         for agent_id, pos in positions.items():
             if pos and len(pos) >= 2:
                 x, y = pos[0], pos[1]
@@ -417,7 +426,18 @@ class VideoGenerator:
 
                 ax = axes_dict[level_key]
 
-                ax.plot(x, y, "o", color="red", markersize=8, label="_agent")
+                role = frame_roles.get(agent_id, "")
+                face, edge = self._colour_map.get(agent_id, frame_roles)
+                size = 10 if role else 8
+
+                ax.plot(
+                    x, y, "o",
+                    color=face,
+                    markeredgecolor=edge,
+                    markeredgewidth=1.5,
+                    markersize=size,
+                    label="_agent",
+                )
                 ax.text(x, y + 1, agent_id, ha="center", fontsize=8, label="_agent")
 
     def generate(self, output_path: Path, dpi: int = 100) -> bool:

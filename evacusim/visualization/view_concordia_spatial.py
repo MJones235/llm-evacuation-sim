@@ -31,6 +31,8 @@ except ImportError:
     MATPLOTLIB_AVAILABLE = False
     print("Warning: matplotlib not available. Install with: pip install matplotlib")
 
+from evacusim.visualization.video_generation_helper import RoleColourMap
+
 
 class SpatialConcordiaViewer:
     """Real-time spatial viewer for Concordia simulation."""
@@ -48,6 +50,8 @@ class SpatialConcordiaViewer:
         self.agent_positions = {}
         self.agent_decisions = {}
         self.agent_levels = {}  # Track which level each agent is on
+        self.agent_roles: dict[str, str] = {}  # agent_id -> role label for director agents
+        self._colour_map: RoleColourMap = RoleColourMap()
         self.last_update = 0
         self.blocked_exits = []  # Phase 4.2: Track blocked exits for visualization
 
@@ -281,6 +285,9 @@ class SpatialConcordiaViewer:
                     self.blocked_exits = pos_data["blocked_exits"]
                 if "current_time" in pos_data:
                     self.current_time = pos_data["current_time"]
+                if "agent_roles" in pos_data:
+                    self.agent_roles = pos_data["agent_roles"]
+                    self._colour_map = RoleColourMap.from_roles(self.agent_roles)
             else:
                 # Sidecar not yet written — fall back to main file for positions.
                 with open(self.output_file) as f:
@@ -293,6 +300,9 @@ class SpatialConcordiaViewer:
                     self.blocked_exits = data["blocked_exits"]
                 if "current_time" in data:
                     self.current_time = data["current_time"]
+                if "agent_roles" in data:
+                    self.agent_roles = data["agent_roles"]
+                    self._colour_map = RoleColourMap.from_roles(self.agent_roles)
                 elif "final_time" in data:
                     self.current_time = data["final_time"]
 
@@ -385,6 +395,10 @@ class SpatialConcordiaViewer:
 
                     self.blocked_exit_markers.extend([marker1, marker2, label])
 
+    def _agent_colour(self, agent_id: str) -> tuple[str, str]:
+        """Return (face_colour, edge_colour) for *agent_id* via the shared palette map."""
+        return self._colour_map.get(agent_id, self.agent_roles)
+
     def _update_agent_positions(self):
         """Update agent position markers on both levels."""
         # Remove old dots
@@ -408,7 +422,16 @@ class SpatialConcordiaViewer:
                 agent_level = self.agent_levels.get(agent_id, "0")  # Default to level 0
                 ax = self.ax_level_0 if agent_level == "0" else self.ax_level_m1
 
-                dot = ax.plot(x, y, "o", color="red", markersize=8)[0]
+                face, edge = self._agent_colour(agent_id)
+                is_director = bool(self.agent_roles.get(agent_id))
+                size = 10 if is_director else 8
+                dot = ax.plot(
+                    x, y, "o",
+                    color=face,
+                    markeredgecolor=edge,
+                    markeredgewidth=1.5,
+                    markersize=size,
+                )[0]
                 label = ax.text(x, y + 1, agent_id, ha="center", fontsize=8)
 
                 self.agent_dots[agent_id] = dot

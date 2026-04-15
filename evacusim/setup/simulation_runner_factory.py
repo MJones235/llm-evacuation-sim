@@ -58,6 +58,9 @@ class SimulationRunnerFactory:
         # Monitoring settings
         monitoring_config = config.get("monitoring", {})
 
+        # Rule-based director systems (staff, firefighters, etc.)
+        systems_config = config.get("systems", {})
+
         logger.info("Creating HybridSimulationRunner...")
 
         try:
@@ -72,6 +75,7 @@ class SimulationRunnerFactory:
                 output_file=decisions_file,
                 enable_video=enable_video,
                 monitoring_config=monitoring_config,
+                systems_config=systems_config,
             )
             logger.info("HybridSimulationRunner initialized")
         except Exception as e:
@@ -97,13 +101,11 @@ class SimulationRunnerFactory:
         """
         events_config = config.get("events", [])
         for event in events_config:
-            runner.event_manager.scheduled_events.append(
-                {
-                    "time": event.get("time", 0.0),
-                    "message": event.get("message", ""),
-                    "_fired": False,
-                }
-            )
+            # Preserve all event fields (type, pa_announcement, zone_messages, etc.)
+            # so that the EventManager can handle PA announcements, zone routing, etc.
+            record = {k: v for k, v in event.items() if k != "_fired"}
+            record.setdefault("_fired", False)
+            runner.event_manager.scheduled_events.append(record)
 
         if events_config:
             logger.info(f"Loaded {len(events_config)} events from configuration")

@@ -33,6 +33,7 @@ class ExitManager:
         walkable_areas_with_obstacles: dict[str, Any],
         walkable_areas: dict[str, Any] | None = None,
         level_id: str | int = "0",
+        exit_thresholds: dict[str, Any] | None = None,
     ):
         """
         Initialize exit manager and create evacuation exits.
@@ -52,6 +53,7 @@ class ExitManager:
         self.walkable_areas_with_obstacles = walkable_areas_with_obstacles
         self.walkable_areas = walkable_areas or {}
         self.level_id = str(level_id)
+        self.exit_thresholds = exit_thresholds or {}
 
         # Setup evacuation exits and routes
         escalable_zones = [z for z in (walkable_areas or {}).keys() if f"L{self.level_id}_esc" in z]
@@ -264,15 +266,30 @@ class ExitManager:
         return evacuation_exits, evacuation_journeys
 
     def _populate_exit_coordinates(self):
-        """Populate exit_coordinates dict with exit center positions."""
+        """Populate exit_coordinates dict with exit center positions.
+
+        For street exits that have a threshold polygon (corridor-mouth marker),
+        the threshold centroid is used instead of the entrance polygon centroid.
+        This makes distance and line-of-sight calculations reflect the point
+        where the corridor meets the open concourse rather than the far end of
+        the corridor, which is often occluded from most vantage points.
+        """
         # Add entrance area coordinates (street exits)
         for entrance_name, entrance_polygon in self.entrance_areas.items():
             if entrance_name in self.evacuation_exits:
-                centroid = entrance_polygon.centroid
+                if entrance_name in self.exit_thresholds:
+                    ref_poly = self.exit_thresholds[entrance_name]
+                    centroid = ref_poly.centroid
+                    logger.info(
+                        f"Using threshold for {entrance_name} at ({centroid.x:.2f}, {centroid.y:.2f})"
+                        f" (entrance centroid was ({entrance_polygon.centroid.x:.2f}, {entrance_polygon.centroid.y:.2f}))"
+                    )
+                else:
+                    centroid = entrance_polygon.centroid
+                    logger.debug(
+                        f"Added street exit {entrance_name} at {centroid.x:.2f}, {centroid.y:.2f}"
+                    )
                 self.exit_coordinates[entrance_name] = (centroid.x, centroid.y)
-                logger.debug(
-                    f"Added street exit {entrance_name} at {centroid.x:.2f}, {centroid.y:.2f}"
-                )
 
         # Add escalator coordinates (escalator zone centers) - ONLY for current level
         escalator_pattern = re.compile(r"^L([^_]+)_esc_([a-f])_(up|down)$")

@@ -157,6 +157,15 @@ class ObservationGenerator:
         if conversation_history is None:
             conversation_history = {}
 
+        # Attach sender_role to received messages so ObservationFormatter can label them.
+        # The role is carried in nearby_agents[*]["role"] which ObservationCoordinator
+        # populates from the shared agent_roles dict.
+        _role_by_id = {a["id"]: a["role"] for a in nearby_agents if a.get("role") and a.get("id")}
+        for msg in received_messages:
+            sender = msg.get("from", "")
+            if sender in _role_by_id and "sender_role" not in msg:
+                msg["sender_role"] = _role_by_id[sender]
+
         # Surface only genuinely new information first.
         new_info_lines = self._format_new_information(agent_id, events, received_messages)
         observations.extend(new_info_lines)
@@ -369,12 +378,28 @@ class ObservationGenerator:
         events: list[str],
         received_messages: list[dict[str, Any]],
     ) -> list[str]:
-        """Format only new information since this agent's previous observation."""
+        """Format only new information since this agent's previous observation.
+
+        Directive and PA messages are always treated as new — they are repeated
+        intentionally and must not be silently dropped by the novelty filter.
+        """
         event_sigs = {" ".join(str(event).split()) for event in events[-3:]}
+
+        # Split messages: authority broadcasts (always fresh) vs regular chat
+        _authority_types = {"directive", "pa"}
+        authority_msgs = [
+            m for m in (received_messages or [])
+            if m.get("message_type") in _authority_types and m.get("text", "").strip()
+        ]
+        regular_msgs = [
+            m for m in (received_messages or [])
+            if m.get("message_type") not in _authority_types and m.get("text", "").strip()
+        ]
+
+        # Novelty filter applies only to regular chat messages.
         msg_sigs = {
             f"{msg.get('from', 'unknown')}::{msg.get('text', '').strip()}"
-            for msg in (received_messages or [])
-            if msg.get("text", "").strip()
+            for msg in regular_msgs
         }
 
         prev_events = self._last_event_signatures.get(agent_id, set())
@@ -387,13 +412,22 @@ class ObservationGenerator:
         self._last_message_signatures[agent_id] = msg_sigs
 
         lines = ["What is NEW since your last decision:"]
-        if not new_events and not new_msgs:
+        if not new_events and not new_msgs and not authority_msgs:
             lines.append("No significant new information.")
             return lines
 
         updates: list[str] = []
         updates.extend(new_events)
 
+        # Authority broadcasts: shown every cycle, sender name uses their role
+        for msg in authority_msgs[-2:]:
+            sender = msg.get("from", "unknown")
+            text = msg.get("text", "").strip()
+            role = msg.get("sender_role")
+            sender_name = role if role else sender.replace("agent_", "Person ")
+            updates.append(f'{sender_name} (directing you) said: "{text}"')
+
+        # Regular new chat messages
         for msg_sig in new_msgs[-3:]:
             sender, text = msg_sig.split("::", 1)
             sender_name = sender.replace("agent_", "Person ")

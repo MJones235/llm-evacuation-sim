@@ -46,6 +46,7 @@ class StationLayoutBuilder:
             all_exit_polygons = {}
             all_zones = {}
             all_zone_polygons = {}
+            zone_labels_cfg: dict[str, str] = config.get("station", {}).get("zone_labels", {})
 
             # Collect exits from each level
             for level_id in sorted(jps_sim.simulations.keys()):
@@ -68,8 +69,12 @@ class StationLayoutBuilder:
                 # Also harvest platform zones from walkable areas whose names start
                 # with "platform_" (the monument geometry uses jupedsim.walkable_area
                 # type for these polys, so they are not detected by platform_areas).
+                # Additionally, harvest any named walkable area referenced in zone_labels
+                # (e.g. "concourse") so that configs can use those names in patrol_zones.
                 for wa_name, wa_poly in gm.walkable_areas_with_obstacles.items():
-                    if wa_name.startswith("platform_") and wa_name not in all_zone_polygons:
+                    if wa_name not in all_zone_polygons and (
+                        wa_name.startswith("platform_") or wa_name in zone_labels_cfg
+                    ):
                         all_zones[wa_name] = StationLayoutBuilder._polygon_bounds(wa_poly)
                         all_zone_polygons[wa_name] = wa_poly
 
@@ -109,8 +114,6 @@ class StationLayoutBuilder:
         platform_down_cfg: dict[str, list[str]] = config.get("station", {}).get(
             "platform_down_exits", {}
         )
-        zone_labels_cfg: dict[str, str] = config.get("station", {}).get("zone_labels", {})
-
         if platform_down_cfg and hasattr(jps_sim, "simulations"):
             # Invert config: esc_zone_name -> [platform names it serves]
             esc_to_platforms: dict[str, list[str]] = {}
@@ -127,10 +130,14 @@ class StationLayoutBuilder:
                     m = _re.match(r"L[^_]+_esc_([a-f])_down", esc_zone)
                     if m:
                         letter = m.group(1).upper()
-                        # Only include specific-numbered platforms (platform_N) in the label
+                        # Only include specific-numbered platforms (platform_N) in the label.
+                        # Strip any parenthetical suffix from the zone label so we get a
+                        # short name like "Platform 3" rather than the full
+                        # "Platform 3 (Escalators B and C go up to the concourse)" label,
+                        # which would produce a confusingly nested display string.
                         plat_labels = sorted(
                             {
-                                zone_labels_cfg.get(p, p.replace("_", " ").title())
+                                zone_labels_cfg.get(p, p.replace("_", " ").title()).split("(")[0].strip()
                                 for p in platforms
                                 if _re.match(r"^platform_\d+$", p)
                             }

@@ -40,7 +40,7 @@ PERSONALITY_TYPES = {
 def generate_random_demographics() -> dict:
     """Generate random age, gender, and personality type for an agent."""
     age = random.randint(18, 75)
-    gender = random.choice(["male", "female"])
+    gender = random.choice(["man", "woman"])
     personality_type = random.choice(list(PERSONALITY_TYPES.keys()))
     return {
         "age": age,

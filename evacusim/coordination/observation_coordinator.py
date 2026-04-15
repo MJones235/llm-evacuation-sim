@@ -34,6 +34,7 @@ class ObservationCoordinator:
         agent_action: dict[str, str],
         agent_last_decision: dict[str, dict],
         jps_sim=None,
+        agent_roles: dict[str, str] | None = None,
     ):
         """
         Initialize observation coordinator.
@@ -50,6 +51,8 @@ class ObservationCoordinator:
             agent_action: Dict of agent_id -> action ("moving"|"waiting")
             agent_last_decision: Dict of agent_id -> last translated_action (for memory)
             jps_sim: JuPedSim simulation (for multi-level support)
+            agent_roles: Optional dict of agent_id -> role label (e.g. "staff member").
+                Used to surface non-LLM director agents in observations.
         """
         self.concordia_agents = concordia_agents
         self.exited_agents = exited_agents
@@ -62,6 +65,7 @@ class ObservationCoordinator:
         self.agent_action = agent_action
         self.agent_last_decision = agent_last_decision
         self.jps_sim = jps_sim
+        self.agent_roles: dict[str, str] = agent_roles or {}
 
     def generate_all_observations(self, current_sim_time: float) -> dict[str, str]:
         """
@@ -111,6 +115,7 @@ class ObservationCoordinator:
                     other_id = agent_info.get("id")
                     if other_id:
                         agent_info["target_exit"] = self.agent_destinations.get(other_id)
+                        agent_info["role"] = self.agent_roles.get(other_id)
 
                         # Detect if this nearby agent is following the current agent
                         is_following_me = False
@@ -130,6 +135,13 @@ class ObservationCoordinator:
 
                 # Get messages received by this agent
                 received_messages = self.message_system.get_received_messages(agent_id)
+
+                # Attach sender_role for director agents (not in nearby_agents)
+                # so the observation formatter can display their role label.
+                for msg in received_messages:
+                    sender = msg.get("from", "")
+                    if "sender_role" not in msg and sender in self.agent_roles:
+                        msg["sender_role"] = self.agent_roles[sender]
 
                 # Get conversation history for this agent
                 conversation_history = self.message_system.get_conversation_history(agent_id)

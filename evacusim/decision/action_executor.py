@@ -286,9 +286,17 @@ class ActionExecutor:
                 self.jps_sim.set_agent_evacuation_exit(agent_id, new_exit_name)
                 logger.debug(f"Switched {agent_id} to journey for {new_exit_name}")
         else:
-            # Not moving to an exit, just a waypoint
-            logger.debug(f"[MOVE] {agent_id} set_agent_target({agent_id}, {target}) - waypoint")
-            self.jps_sim.set_agent_target(agent_id, target)
+            # Not moving to an exit, just a waypoint — snap to walkable area first so
+            # that zone centroids landing on obstacles or outside the geometry don't
+            # cause "WayPoint not inside walkable area" errors.
+            snapped = self._safe_follow_target(agent_id, agent_pos, target)
+            if snapped != target:
+                logger.debug(
+                    f"[MOVE] {agent_id} zone target {target} outside walkable area; "
+                    f"snapped to {snapped}"
+                )
+            logger.debug(f"[MOVE] {agent_id} set_agent_target({agent_id}, {snapped}) - waypoint")
+            self.jps_sim.set_agent_target(agent_id, snapped)
 
     def _handle_wait_action(
         self, agent_id: str, translated_action: dict[str, Any], current_sim_time: float

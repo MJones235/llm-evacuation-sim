@@ -49,12 +49,24 @@ class ObservationFormatter:
 
         lines = ["What people just said to you:"]
         for msg in reversed(unique_messages):
-            sender_name = msg["from"].replace("agent_", "Person ")
+            sender_id = msg["from"]
+            role = msg.get("sender_role")
+            # For concordia agents (agent_N) show "Person N (role)".
+            # For director agents (rci_*, pa_*, etc.) use the role as the full
+            # display name — the technical ID is meaningless to passengers.
+            if role and not sender_id.startswith("agent_"):
+                sender_name = role
+            elif role:
+                sender_name = f"{sender_id.replace('agent_', 'Person ')} ({role})"
+            else:
+                sender_name = sender_id.replace("agent_", "Person ")
             msg_type = msg.get("message_type", "")
             type_indicator = {
                 "directed": " (to you)",
                 "quiet": " (quietly)",
                 "shout": " (shouting)",
+                "directive": " (directing you)",
+                "pa": "",
             }.get(msg_type, "")
             lines.append(f'{sender_name}{type_indicator} said: "{msg["text"]}"')
 
@@ -114,6 +126,7 @@ class ObservationFormatter:
     def format_nearby_agent_ids(nearby_agents: list[dict[str, Any]]) -> list[str]:
         """
         Format nearby agent IDs for targeting messages.
+        Includes role label when present (e.g. director agents).
 
         Args:
             nearby_agents: List of nearby agent info
@@ -128,7 +141,11 @@ class ObservationFormatter:
                 aid = agent.get("id")
                 if aid:
                     person_name = aid.replace("agent_", "Person ")
-                    nearby_people.append(f"{person_name} ({aid})")
+                    role = agent.get("role")
+                    if role:
+                        nearby_people.append(f"{person_name} ({role}, {aid})")
+                    else:
+                        nearby_people.append(f"{person_name} ({aid})")
 
             if nearby_people:
                 return [f"Nearby people: {', '.join(nearby_people)}."]

@@ -137,6 +137,36 @@ def load_obstacles(xml_path: str) -> list[Polygon]:
     return obstacles
 
 
+def load_exit_thresholds(xml_path: str) -> dict[str, Polygon]:
+    """
+    Load exit threshold markers from a level geometry file.
+
+    Thresholds (type ``jupedsim.exit_threshold``) are small polygons placed at
+    the mouth of each street-exit corridor, where it opens into the main
+    concourse floor.  Their centroids are used for distance and line-of-sight
+    calculations instead of the far entrance polygon centroid, making exit
+    visibility robust from any open-concourse position.
+
+    Args:
+        xml_path: Path to a level_*.xml geometry file
+
+    Returns:
+        Dictionary mapping exit names to Shapely Polygon objects
+    """
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+
+    thresholds: dict[str, Polygon] = {}
+    for poly in root.findall('.//poly[@type="jupedsim.exit_threshold"]'):
+        name = poly.get("name", poly.get("id"))
+        shape_str = poly.get("shape")
+        if name and shape_str:
+            coords = parse_shape_string(shape_str)
+            thresholds[name] = Polygon(coords)
+
+    return thresholds
+
+
 def load_escalator_corridors(xml_path: str) -> dict[str, Polygon]:
     """
     Load escalator corridor zones from a SUMO geometry file.

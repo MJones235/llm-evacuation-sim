@@ -96,8 +96,11 @@ class AgentFactory:
 
         # Randomize agent attributes
         personality_type = random.choice(list(PERSONALITY_TYPES.keys()))
-        age = random.randint(16, 90)
-        gender = random.choice(["male", "female"])
+        age_cfg = agents_section.get("age", {})
+        age_min = max(18, int(age_cfg.get("min", 18)))
+        age_max = int(age_cfg.get("max", 75))
+        age = random.randint(age_min, age_max)
+        gender = random.choice(["man", "woman"])
         risk_tolerance = random.choice(["low", "moderate", "high"])
 
         # Sample purpose from config; sample target from all role target options

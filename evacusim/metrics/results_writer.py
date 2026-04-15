@@ -91,6 +91,7 @@ class ResultsWriter:
         current_sim_time: float,
         agent_levels: dict[str, str] | None = None,
         blocked_exits: set[str] | None = None,
+        agent_roles: dict[str, str] | None = None,
     ) -> None:
         """
         Write a lightweight positions sidecar file for the live viewer.
@@ -107,6 +108,7 @@ class ResultsWriter:
             current_sim_time: Current simulation time.
             agent_levels: Per-agent level (multi-level simulations).
             blocked_exits: Currently blocked exits.
+            agent_roles: Optional dict of agent_id → role label for director agents.
         """
         if not output_file:
             return
@@ -120,6 +122,8 @@ class ResultsWriter:
             payload["agent_levels"] = agent_levels
         if blocked_exits is not None:
             payload["blocked_exits"] = list(blocked_exits)
+        if agent_roles:
+            payload["agent_roles"] = agent_roles
 
         try:
             output_file.parent.mkdir(parents=True, exist_ok=True)

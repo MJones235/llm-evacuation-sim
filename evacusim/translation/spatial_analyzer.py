@@ -42,6 +42,9 @@ class SpatialAnalyzer:
         self.down_access_exits: dict[str, tuple[float, float]] = station_layout.get(
             "down_access_exits", {}
         )
+        # Cache of per-level walkable-area unions for boundary-aware LOS checks.
+        # Keyed by level_id string; populated lazily on first use.
+        self._walkable_union_cache: dict[str, Any] = {}
 
     def identify_zone(self, position: tuple[float, float]) -> str:
         """
@@ -265,16 +268,33 @@ class SpatialAnalyzer:
 
         # Prefer level-specific obstacles for line-of-sight checks.
         level_obstacles = None
+        level_walkable_geom = None
         if agent_level and jps_sim and hasattr(jps_sim, "simulations"):
             level_sim = jps_sim.simulations.get(agent_level)
             if level_sim and hasattr(level_sim, "geometry_manager"):
                 level_obstacles = getattr(level_sim.geometry_manager, "obstacles", None)
+                # Build (and cache) the union of all walkable areas for this level.
+                # Used to reject sight lines that pass through a wall formed by
+                # the concourse boundary itself (i.e. the concave gap between the
+                # ABC escalator bank and the Eldon Square corridor).
+                if agent_level not in self._walkable_union_cache:
+                    try:
+                        from shapely.ops import unary_union
+                        polys = list(
+                            level_sim.geometry_manager.walkable_areas.values()
+                        )
+                        self._walkable_union_cache[agent_level] = (
+                            unary_union(polys) if polys else None
+                        )
+                    except Exception:
+                        self._walkable_union_cache[agent_level] = None
+                level_walkable_geom = self._walkable_union_cache.get(agent_level)
 
         # Check each exit for visibility
         for exit_name, exit_pos in exits_to_check.items():
             distance = ((position[0] - exit_pos[0]) ** 2 + (position[1] - exit_pos[1]) ** 2) ** 0.5
 
-            if self._has_line_of_sight(position, exit_pos, level_obstacles):
+            if self._has_line_of_sight(position, exit_pos, level_obstacles, level_walkable_geom):
                 # Use display name if registry available
                 display_name = (
                     self.exit_registry.get_display_name(exit_name)
@@ -318,29 +338,47 @@ class SpatialAnalyzer:
         start: tuple[float, float],
         end: tuple[float, float],
         obstacles: dict[str, Any] | None = None,
+        walkable_geom: Any | None = None,
     ) -> bool:
-        """Return True if the segment from start to end is not blocked by an obstacle."""
+        """Return True if the segment from start to end is not blocked.
+
+        Two checks are applied:
+        1. No explicit obstacle polygon crosses the sight line.
+        2. The sight line lies entirely within the walkable area (prevents
+           false-positive visibility across concave concourse boundaries, e.g.
+           the gap between the ABC escalator bank and the Eldon Square corridor).
+        """
         obstacles_to_check = obstacles if obstacles is not None else self.obstacles
-        if not obstacles_to_check:
-            return True
 
         try:
             from shapely.geometry import LineString
 
             sight_line = LineString([start, end])
-            for poly in obstacles_to_check.values():
-                if poly is None:
-                    continue
-                # Treat any interior intersection as blocked. Endpoint touching is fine.
-                if sight_line.crosses(poly) or sight_line.within(poly):
-                    return False
 
-                if sight_line.intersects(poly):
-                    inter = sight_line.intersection(poly)
-                    if not inter.is_empty and not inter.touches(sight_line.boundary):
+            # Check 1: walkable boundary. If the sight line exits the passable
+            # footprint at any point the two positions cannot see each other.
+            if walkable_geom is not None:
+                try:
+                    if not walkable_geom.covers(sight_line):
                         return False
+                except Exception:
+                    pass  # geometry error; fall through to obstacle check
+
+            # Check 2: explicit obstacle polygons.
+            if obstacles_to_check:
+                for poly in obstacles_to_check.values():
+                    if poly is None:
+                        continue
+                    # Treat any interior intersection as blocked. Endpoint touching is fine.
+                    if sight_line.crosses(poly) or sight_line.within(poly):
+                        return False
+
+                    if sight_line.intersects(poly):
+                        inter = sight_line.intersection(poly)
+                        if not inter.is_empty and not inter.touches(sight_line.boundary):
+                            return False
         except Exception:
-            # Fallback to distance-only visibility if geometry checks fail.
+            # Fallback: allow visibility if geometry checks fail outright.
             return True
 
         return True

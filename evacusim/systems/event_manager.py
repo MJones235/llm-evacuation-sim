@@ -44,26 +44,79 @@ class EventManager:
         self.scheduled_events: list[dict[str, Any]] = []  # timed events from config
 
     def check_and_trigger_events(
-        self, current_sim_time: float, agents: dict[str, Any] | None = None
+        self,
+        current_sim_time: float,
+        agents: dict[str, Any] | None = None,
+        message_system: Any | None = None,
+        exited_agents: set[str] | None = None,
+        zone_id_for_agent_fn: Any | None = None,
     ) -> bool:
         """
         Check for and trigger simulation events.
 
+        Supports two event types in the config:
+
+        Standard event (broadcast to Concordia memory)::
+
+            - time: 15.0
+              message: "The fire alarm is sounding."
+
+        PA announcement with optional per-zone messages (via MessageSystem)::
+
+            - time: 20.0
+              pa_announcement: true
+              sender_label: "Station PA"      # optional, default "PA system"
+              message: "Please evacuate."     # default text for unmatched zones
+              zone_messages:                  # optional per-zone overrides
+                platform_abc: "Board the train now."
+                concourse: "Leave via the nearest exit."
+
         Args:
-            current_sim_time: Current simulation time in seconds
-            agents: Dictionary of agent_id -> agent entity (required for broadcasts)
+            current_sim_time: Current simulation time in seconds.
+            agents: Dictionary of agent_id -> agent entity (required for standard broadcasts).
+            message_system: MessageSystem instance (required for PA announcements).
+            exited_agents: Set of agent IDs that have already evacuated (for PA filtering).
+            zone_id_for_agent_fn: Callable(agent_id) -> zone_id | None (for PA zone routing).
 
         Returns:
             True if one or more new events were fired this step, False otherwise.
         """
         fired = False
-        # Fire any scheduled config events whose time has arrived
-        if agents:
-            for event in self.scheduled_events:
-                if not event.get("_fired") and current_sim_time >= event["time"]:
-                    self.broadcast_event(event["message"], current_sim_time, agents)
-                    event["_fired"] = True
-                    fired = True
+        for event in self.scheduled_events:
+            if event.get("_fired") or current_sim_time < event["time"]:
+                continue
+
+            is_pa = event.get("pa_announcement") or event.get("type") == "pa_announcement"
+            if is_pa and message_system is not None:
+                # Zone-routed PA announcement via MessageSystem
+                sender_label = event.get("sender_label", "PA system")
+                default_msg = event.get("message", "")
+                zone_messages = event.get("zone_messages", None)
+                all_ids = list(agents.keys()) if agents else []
+                message_system.deliver_pa(
+                    sender_label=sender_label,
+                    message_text=default_msg,
+                    current_sim_time=current_sim_time,
+                    all_agent_ids=all_ids,
+                    exited_agents=exited_agents or set(),
+                    messages_by_zone=zone_messages,
+                    zone_id_for_agent_fn=zone_id_for_agent_fn,
+                )
+                # Also record in event_history so observations include it
+                if default_msg or zone_messages:
+                    display_msg = default_msg or next(iter(zone_messages.values()), "PA announcement")
+                    self.event_history.append(
+                        {"time": current_sim_time, "message": f"[{sender_label}] {display_msg}"}
+                    )
+                    if agents:
+                        for agent in agents.values():
+                            agent.observe(f"[{sender_label}] {display_msg}")
+            elif agents and event.get("message"):
+                self.broadcast_event(event["message"], current_sim_time, agents)
+
+            event["_fired"] = True
+            fired = True
+
         return fired
 
     def block_exit(self, exit_name: str) -> None:

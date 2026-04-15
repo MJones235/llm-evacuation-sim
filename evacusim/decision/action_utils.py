@@ -28,6 +28,16 @@ def extract_exit_name(
     if not target_coords:
         return None
 
+    # When the translator already resolved an exit (e.g. escalator exits whose
+    # coordinates are NOT in station_layout["exits"]), trust its resolved ID
+    # directly.  This prevents escalator exits from falling through to the
+    # waypoint path in _handle_move_action, which caused agents to congregate
+    # at the escalator centroid and never exit the level.
+    if translated_action.get("target_type") == "exit":
+        resolved = translated_action.get("resolved_exit_id")
+        if resolved:
+            return resolved
+
     # Match coordinates to exit name
     for exit_name, exit_coords in station_layout["exits"].items():
         # Check if coordinates match (within 1m tolerance)

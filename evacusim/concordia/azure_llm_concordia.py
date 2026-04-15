@@ -8,6 +8,7 @@ Separate from scenarios.common.llm.azure_provider which is designed for
 structured evacuation decision responses.
 """
 
+import contextvars
 import json
 import os
 from datetime import datetime
@@ -16,6 +17,16 @@ from pathlib import Path
 import requests
 
 from evacusim.utils.logger import get_logger
+
+# Context variables set by the decision processor before each agent.act() call.
+# asyncio.to_thread copies the active context, so these propagate correctly into
+# the thread-pool workers that execute LLM requests.
+llm_current_agent_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "llm_current_agent_id", default=None
+)
+llm_current_sim_time: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "llm_current_sim_time", default=None
+)
 
 logger = get_logger(__name__)
 
@@ -132,7 +143,7 @@ class AzureLLMConcordia:
             "You are a simulation engine for everyday station scenarios. "
             "Generate realistic behavioral responses for simulated agents based on their personality profiles, "
             "situational context, and normal station routines. "
-            "When a fire alarm is sounding with no clear visible fire, use this empirical prior for initial behavior: "
+            "When a fire alarm is sounding with no clear visible fire or additional instructions from authorities, use this empirical prior for initial behavior: "
             "about 10% evacuate immediately, about 15% decide to leave but delay, and about 75% initially hesitate, "
             "wait for others, or ignore at first. "
             "Use this as a population-level prior while still adapting each individual response to local observations, "
@@ -287,6 +298,8 @@ class AzureLLMConcordia:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "timestamp": datetime.utcnow().isoformat() + "Z",
+                "agent_id": llm_current_agent_id.get(),
+                "sim_time": llm_current_sim_time.get(),
                 "model": self.model,
                 "prompt": prompt,
                 "response": response,

@@ -42,6 +42,7 @@ from evacusim.metrics.results_writer import ResultsWriter
 from evacusim.systems.event_manager import EventManager
 from evacusim.systems.messaging import MessageSystem
 from evacusim.translation import ActionTranslator, ObservationGenerator
+from evacusim.systems.director_system import DirectorSystem
 from evacusim.utils.performance_monitor import PerformanceTimer
 from evacusim.visualization.position_history import PositionHistoryTracker
 
@@ -72,6 +73,7 @@ class HybridSimulationRunner:
         output_file: Path | None = None,
         enable_video: bool = False,
         monitoring_config: dict[str, Any] | None = None,
+        systems_config: dict[str, Any] | None = None,
     ):
         """
         Initialize the hybrid simulation runner.
@@ -89,6 +91,10 @@ class HybridSimulationRunner:
             monitoring_config: Optional monitoring configuration dict with keys
                 ``interval_seconds`` and ``zones`` (list of zone spec dicts).
                 If ``None``, PopulationMonitor defaults are used.
+            systems_config: Optional ``systems`` block from the scenario config.
+                Each key is a system name (e.g. ``"staff"``); the value is the
+                system configuration dict.  Systems with ``enabled: true`` are
+                initialised and stepped each simulation cycle.
         """
         self.jps_sim = jupedsim_simulation
         self.station_layout = station_layout
@@ -98,6 +104,17 @@ class HybridSimulationRunner:
         self.max_steps = max_steps
         self.output_file = output_file
         self.enable_video = enable_video
+
+        # Roles map: agent_id → human-readable role label.
+        # Populated during setup (e.g. by StaffSystem) before the simulation loop.
+        # The label appears in other agents' observations and message attributions.
+        self.agent_roles: dict[str, str] = {}
+
+        # Initialise and setup any configured rule-based systems (e.g. staff)
+        # BEFORE Concordia agents are built so that system agents are already in
+        # JuPedSim and registered in agent_roles when the first observations fire.
+        self._staff_systems: list[StaffSystem] = []
+        self._init_systems(systems_config or {}, jupedsim_simulation, station_layout)
 
         # Simulation state queries
         self.state_queries = SimulationStateQueries(jupedsim_simulation)
@@ -223,6 +240,7 @@ class HybridSimulationRunner:
             agent_action=self.agent_action,
             agent_last_decision=self.agent_last_decision,
             jps_sim=self.jps_sim,
+            agent_roles=self.agent_roles,
         )
 
         # Position history tracker for video generation
@@ -275,6 +293,55 @@ class HybridSimulationRunner:
 
         # Bootstrap decisions at t=0 so agents choose initial journeys before first sim step
         self._bootstrap_initial_decisions()
+
+    # ------------------------------------------------------------------
+    # System management
+    # ------------------------------------------------------------------
+
+    def _init_systems(
+        self,
+        systems_config: dict[str, Any],
+        jps_sim: Any,
+        station_layout: dict[str, Any],
+    ) -> None:
+        """Initialise and setup all enabled rule-based systems from config."""
+        for name, cfg in systems_config.items():
+            if not cfg.get("enabled", False):
+                continue
+            system = DirectorSystem(name, cfg)
+            system.setup(jps_sim, station_layout, self.agent_roles)
+            self._staff_systems.append(system)
+            logger.info(f"System '{name}' initialised ({len(system.agent_ids)} director agent(s))")
+
+    def _step_systems(self, current_sim_time: float) -> None:
+        """Call step() on all active rule-based systems."""
+        for system in self._staff_systems:
+            system.step(
+                current_sim_time=current_sim_time,
+                jps_sim=self.jps_sim,
+                message_system=self.message_system,
+                state_queries=self.state_queries,
+                exited_agents=self.exited_agents,
+                zone_id_for_agent_fn=self._get_zone_id_for_agent,
+            )
+
+    def _get_zone_id_for_agent(self, agent_id: str) -> str | None:
+        """Return the zone_id the given agent is currently in, or None."""
+        pos = self.state_queries.get_agent_position(agent_id)
+        if pos is None:
+            return None
+        zones_polygons = getattr(self.action_translator, "zones_polygons", {})
+        if not zones_polygons:
+            return None
+        from shapely.geometry import Point as _Point
+        pt = _Point(pos)
+        for z_id, poly in zones_polygons.items():
+            try:
+                if poly.covers(pt) or poly.contains(pt):
+                    return z_id
+            except Exception:
+                pass
+        return None
 
     def _bootstrap_initial_decisions(self) -> None:
         """Run one decision cycle at t=0 before the first JuPedSim step.
@@ -349,7 +416,9 @@ class HybridSimulationRunner:
                     )
 
                     # Drain the recently-transferred set.  Transferred agents are
-                    # given a temporary destination so they keep moving
+                    # given a temporary destination so they keep moving.
+                    # Clear all stale route commitments so each agent makes a
+                    # fresh, level-informed decision when they next get a turn.
                     if hasattr(self.jps_sim, "consume_recently_transferred_agents"):
                         transferred_agents = self.jps_sim.consume_recently_transferred_agents()
                         if transferred_agents:
@@ -357,6 +426,14 @@ class HybridSimulationRunner:
                                 f"Transferred agents will decide at next decision cycle: "
                                 f"{transferred_agents}"
                             )
+                            for _tid in transferred_agents:
+                                self.agent_destinations.pop(_tid, None)
+                                self.decision_processor.agent_goals.pop(_tid, None)
+                                self.decision_processor.prompt_cache.clear_agent(_tid)
+
+                    # Step rule-based systems (e.g. staff directives).
+                    # Done every physics tick so directive timing is accurate.
+                    self._step_systems(self.current_sim_time)
 
                     # Check for events BEFORE decisions so that an event firing
                     # at the same timestep as a decision cycle is visible in the
@@ -365,8 +442,18 @@ class HybridSimulationRunner:
                     # decision cycle that coincided with the alarm time).
                     with self.perf_timer.measure("event_checking"):
                         new_event_fired = self.event_manager.check_and_trigger_events(
-                            self.current_sim_time, self.concordia_agents
+                            self.current_sim_time,
+                            self.concordia_agents,
+                            message_system=self.message_system,
+                            exited_agents=self.exited_agents,
+                            zone_id_for_agent_fn=self._get_zone_id_for_agent,
                         )
+
+                    # Notify director systems when any event fires so that
+                    # activate_on_event systems begin acting.
+                    if new_event_fired:
+                        for system in self._staff_systems:
+                            system.notify_event_fired()
 
                     # Check if it's time for Concordia decisions (normal schedule) or
                     # if a critical event just fired (immediate all-agent override).
@@ -445,6 +532,7 @@ class HybridSimulationRunner:
                                 self.current_sim_time,
                                 agent_levels=_pos_levels,
                                 blocked_exits=self.event_manager.blocked_exits,
+                                agent_roles=self.agent_roles if self.agent_roles else None,
                             )
 
                     # Incremental results write — every _write_interval_steps steps (10s

@@ -42,6 +42,7 @@ class MultiLevelJuPedSimulation:
         exit_radius: float = 10.0,
         levels: list[str] | None = None,
         escalator_belt_speed: float = 0.5,
+        level_arrival_waypoints: dict[str, tuple[float, float]] | None = None,
     ):
         """
         Initialize multi-level simulation.
@@ -64,6 +65,13 @@ class MultiLevelJuPedSimulation:
         self.current_step = 0
         self.is_complete = False
         self.escalator_belt_speed = escalator_belt_speed
+        # Keyed by level_id string; values are (x, y) waypoints assigned to
+        # agents immediately after a level transfer, keeping them moving until
+        # the next LLM decision cycle.
+        self.level_arrival_waypoints: dict[str, tuple[float, float]] = {
+            str(k): (float(v[0]), float(v[1]))
+            for k, v in (level_arrival_waypoints or {}).items()
+        }
 
         if levels is None:
             levels = ["0", "-1"]
@@ -110,6 +118,12 @@ class MultiLevelJuPedSimulation:
         # Used to avoid redundant journey switches every step — only re-route when
         # the agent first enters the corridor or their assigned exit changes.
         self._corridor_routed_exit: dict[str, str] = {}  # agent_id -> exit_name
+
+        # Agent IDs that should never be routed to evacuation exits by the
+        # escalator-zone handler.  Register director / staff agents here so that
+        # accidental entry into an arrival-only escalator zone does not redirect
+        # them to a down/up exit and override their patrol or hold targets.
+        self.non_evacuating_agents: set[str] = set()
 
         logger.info(
             f"Multi-level simulation initialized with {len(self.simulations)} levels: "
@@ -204,11 +218,14 @@ class MultiLevelJuPedSimulation:
                     is_departure = self._zone_is_departure.get(zone_name, False)
                     if not is_departure:
                         # Arrival-only zone.  Only redirect if the agent was NOT
-                        # recently transferred here.
+                        # recently transferred here, AND is not a non-evacuating
+                        # agent (e.g. a director / staff agent on patrol).
+                        if agent_id in self.non_evacuating_agents:
+                            break  # let them pass through without redirection
                         steps_since = self.current_step - self._last_transfer_step.get(
                             agent_id, -(self._transfer_cooldown_steps + 1)
                         )
-                        if steps_since > self._transfer_cooldown_steps // 5:
+                        if steps_since > self._transfer_cooldown_steps:
                             nearest_exit = self._find_nearest_valid_exit_for_level(pos, level_id)
                             if nearest_exit:
                                 logger.warning(
@@ -260,6 +277,7 @@ class MultiLevelJuPedSimulation:
                         if (
                             departure_exit
                             and self._corridor_routed_exit.get(agent_id) != departure_exit
+                            and agent_id not in self.non_evacuating_agents
                         ):
                             logger.debug(
                                 f"[ESCALATOR CORRIDOR] {agent_id} in '{corridor_name}' "
@@ -280,6 +298,10 @@ class MultiLevelJuPedSimulation:
         """
         Return the name of the nearest registered exit on *level_id* to *pos*.
 
+        Street exits (non-escalator) are preferred so that an agent ejected from
+        an arrival-only escalator zone is never redirected straight back down
+        (or up) via another escalator.
+
         Returns None if no exits are available.
         """
         level_sim = self.simulations.get(level_id)
@@ -288,9 +310,14 @@ class MultiLevelJuPedSimulation:
         exits = level_sim.exit_manager.exit_coordinates
         if not exits:
             return None
+        # Prefer street exits (no "escalator_" prefix) so arriving agents are
+        # not bounced back through a different escalator.
+        street_exits = {name: coords for name, coords in exits.items()
+                        if not name.startswith("escalator_")}
+        exits_to_search = street_exits if street_exits else exits
         nearest_name = min(
-            exits,
-            key=lambda name: math.hypot(pos[0] - exits[name][0], pos[1] - exits[name][1]),
+            exits_to_search,
+            key=lambda name: math.hypot(pos[0] - exits_to_search[name][0], pos[1] - exits_to_search[name][1]),
         )
         return nearest_name
 
@@ -561,19 +588,20 @@ class MultiLevelJuPedSimulation:
             # leave the building.
             level_sim = self.simulations[target_level]
             try:
-                walkable = level_sim.geometry_manager.walkable_areas_with_obstacles
-                # Use the largest walkable polygon as the roaming area
-                main_poly = max(walkable.values(), key=lambda p: p.area)
-                safe_main = main_poly.buffer(-0.3)
-                if safe_main.is_empty:
-                    safe_main = main_poly
-                # representative_point() is always inside the polygon (unlike centroid
-                # which may lie outside concave shapes like the Monument concourse).
-                anchor = safe_main.representative_point()
-                # Use representative_point directly — it is guaranteed inside the
-                # polygon and well away from the corridor exit boxes, so the agent
-                # walks out of the escalator corridor before the next LLM decision.
-                temp_pos = (anchor.x, anchor.y)
+                # For level 0 (concourse), use a fixed waypoint in the open
+                # concourse floor — near the Blackett Street corridor mouth
+                # and clear of all escalator exits, so agents walk into the
+                # visible area before their next LLM decision fires.
+                if str(target_level) in self.level_arrival_waypoints:
+                    temp_pos = self.level_arrival_waypoints[str(target_level)]
+                else:
+                    walkable = level_sim.geometry_manager.walkable_areas_with_obstacles
+                    main_poly = max(walkable.values(), key=lambda p: p.area)
+                    safe_main = main_poly.buffer(-0.3)
+                    if safe_main.is_empty:
+                        safe_main = main_poly
+                    anchor = safe_main.representative_point()
+                    temp_pos = (anchor.x, anchor.y)
                 level_sim.set_agent_target(agent_id, temp_pos)
                 logger.debug(
                     f"Assigned temporary waypoint {temp_pos} to "

@@ -289,10 +289,19 @@ def build_registry_from_station_layout(
     for exit_id in station_layout.get("exits", {}).keys():
         registry.register_exit(exit_id, custom_names.get(exit_id))
 
-    # Register down-access exits (concourse escalators leading to platforms)
-    for exit_id in station_layout.get("down_access_exits", {}).keys():
-        if exit_id not in registry._id_to_display:
-            registry.register_exit(exit_id, custom_names.get(exit_id))
+    # Register down-access exits (concourse escalators leading to platforms).
+    # Keys are geometry zone names like "L0_esc_a_down"; normalise them to the
+    # canonical exit ID form ("escalator_a_down") so that display names like
+    # "Escalator A (down to Platform 3 & Platform 4)" resolve to the exit name
+    # that JuPedSim actually has registered, preventing routing failures.
+    _esc_zone_re = re.compile(r"^L[^_]+_esc_([a-f])_(up|down)$")
+    for zone_key in station_layout.get("down_access_exits", {}).keys():
+        m = _esc_zone_re.match(zone_key)
+        canonical_id = f"escalator_{m.group(1)}_{m.group(2)}" if m else zone_key
+        if canonical_id not in registry._id_to_display:
+            # Prefer the custom display name keyed by zone_key, then by canonical_id.
+            display = custom_names.get(zone_key) or custom_names.get(canonical_id)
+            registry.register_exit(canonical_id, display)
 
     # Register multi-level exits (escalators)
     if jps_sim and hasattr(jps_sim, "simulations"):

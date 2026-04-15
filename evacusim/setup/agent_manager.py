@@ -145,6 +145,12 @@ class AgentManager:
             agent_cfg["purpose_memories"] = [t.format(**subs) for t in role_cfg.get("memories", [])]
             agent_cfg["initial_goal"] = agent_cfg["goal_state"]
 
+            # Optional per-role decision prompt extra — injected verbatim into the
+            # LLM call-to-action so consumers can customise agent reasoning without
+            # changing framework code.  Supports {target} / {purpose} substitution.
+            raw_extra = role_cfg.get("decision_prompt_extra", "")
+            agent_cfg["decision_prompt_extra"] = raw_extra.format(**subs) if raw_extra else ""
+
             is_injured = i in injured_agents
             walking_speed = sample_walking_speed() if not is_injured else 0.5
 

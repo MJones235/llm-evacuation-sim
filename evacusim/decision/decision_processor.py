@@ -23,6 +23,7 @@ from shapely.geometry import Point
 from evacusim.utils.logger import get_logger
 from evacusim.decision.action_utils import extract_exit_name
 from evacusim.decision.prompt_cache import PromptCache
+from evacusim.concordia.azure_llm_concordia import llm_current_agent_id, llm_current_sim_time
 
 logger = get_logger(__name__)
 
@@ -33,7 +34,10 @@ _RE_VISUAL_CLOSE = re.compile(r"You can see\s+([^\.]+?)\s+very close to you\.")
 _RE_VISUAL_NEARBY = re.compile(r"You can see\s+([^\.]+?)\s+nearby\.")
 _RE_VISUAL_DISTANCE = re.compile(r"You can see\s+([^\.]+?)\s+in the distance\.")
 _RE_VISUAL_FRAGMENTS = re.compile(r"You can see\s+([^\.]+)\.")
-_RE_VISIBLE_EXITS_LINE = re.compile(r"Visible exits right now:\s*([^\.]+)\.")
+# Matches the observation format: "Exits visible right now: Name (cat); ...."
+_RE_VISIBLE_EXITS_LINE = re.compile(r"Exits visible right now:\s*([^\.]+)\.")
+# Parses each semicolon-delimited entry: "Exit Name (going up) (nearby)"
+_RE_EXITS_LINE_ENTRY = re.compile(r"(.+?)\s+\((very close|nearby|visible in distance)\)") 
 _RE_CIRCULAR_FOLLOW = re.compile(
     r"You are following (Person (\w+)), and Person \2 is following YOU"
 )
@@ -188,16 +192,14 @@ class DecisionProcessor:
 
         def _extract_visible_distance_ranks(text: str) -> dict[str, int]:
             ranks: dict[str, int] = {}
-            for compiled_re, rank in [
-                (_RE_VISUAL_CLOSE, 0),
-                (_RE_VISUAL_NEARBY, 1),
-                (_RE_VISUAL_DISTANCE, 2),
-            ]:
-                for m in compiled_re.finditer(text):
-                    for raw_name in m.group(1).split(","):
-                        name = raw_name.strip()
-                        if name and name not in ranks:
-                            ranks[name] = rank
+            _cat_rank = {"very close": 0, "nearby": 1, "visible in distance": 2}
+            line_match = _RE_VISIBLE_EXITS_LINE.search(text)
+            if line_match:
+                for m in _RE_EXITS_LINE_ENTRY.finditer(line_match.group(1)):
+                    name = m.group(1).strip()
+                    rank = _cat_rank.get(m.group(2), 99)
+                    if name and name not in ranks:
+                        ranks[name] = rank
             return ranks
 
         visible_distance_rank = _extract_visible_distance_ranks(observation)
@@ -584,8 +586,15 @@ class DecisionProcessor:
             )
 
             # Build the action spec with prompt text
+            # Per-role extra text injected verbatim before the JSON schema.
+            # Configured via agents.roles.<role>.decision_prompt_extra in the scenario YAML.
+            cfg = self._agent_cfg.get(agent_id, {})
+            role_prompt_extra = cfg.get("decision_prompt_extra", "")
+            role_prefix = (f"{role_prompt_extra}\n\n") if role_prompt_extra else ""
+
             action_spec = entity_lib.ActionSpec(
                 call_to_action=(
+                    f"{role_prefix}"
                     "Decision task: choose your next action now. Respond with ONLY this JSON:\n"
                     "{\n"
                     '  "reasoning": "1-2 sentences grounded in goal + current observations",\n'
@@ -681,6 +690,8 @@ class DecisionProcessor:
                 # At most 20 concurrent requests are sent to Azure at any one time.
                 async with self._llm_semaphore:
                     with self.perf_timer.measure("agent_act_llm", is_parallel=True):
+                        llm_current_agent_id.set(agent_id)
+                        llm_current_sim_time.set(current_sim_time)
                         action = await asyncio.to_thread(agent.act, action_spec)
 
                 # Cache the decision for future reuse

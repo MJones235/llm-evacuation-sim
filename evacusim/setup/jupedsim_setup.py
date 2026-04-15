@@ -52,12 +52,14 @@ class JuPedSimSetup:
                 f"(levels: {', '.join(levels)})..."
             )
             escalator_belt_speed = sim_config.get("escalator_belt_speed", 0.5)
+            level_arrival_waypoints = sim_config.get("level_arrival_waypoints", {})
             jps_sim = MultiLevelJuPedSimulation(
                 network_path=network_path,
                 dt=dt,
                 exit_radius=10.0,
                 levels=levels,
                 escalator_belt_speed=escalator_belt_speed,
+                level_arrival_waypoints=level_arrival_waypoints,
             )
             logger.info("Multi-level JuPedSim simulation created successfully")
         else:

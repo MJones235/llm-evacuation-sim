@@ -8,6 +8,8 @@ Examples:
 """
 
 import json
+import math
+import re
 from typing import Any
 
 from concordia.language_model import language_model
@@ -18,6 +20,11 @@ from evacusim.translation.exit_name_registry import (
 )
 
 logger = get_logger(__name__)
+
+
+# Precompiled regex to normalise geometry zone names (e.g. "L0_esc_a_down") to
+# canonical escalator exit IDs ("escalator_a_down") at translation time.
+_ESC_ZONE_RE = re.compile(r"^L[^_]+_esc_([a-f])_(up|down)$")
 
 
 class ActionTranslator:
@@ -154,22 +161,41 @@ class ActionTranslator:
                     resolved_id = None
 
                 if exit_coords:
+                    # Normalise the resolved ID: zone-form names like "L0_esc_a_down"
+                    # must become "escalator_a_down" so set_agent_evacuation_exit
+                    # finds them in the level's evacuation_exits dict.
+                    _raw_resolved = resolved_id or exit_name
+                    _m = re.match(r"^L[^_]+_esc_([a-f])_(up|down)$", _raw_resolved)
+                    _canonical_resolved = (
+                        f"escalator_{_m.group(1)}_{_m.group(2)}" if _m else _raw_resolved
+                    )
                     # Log successful resolution if display name was converted
-                    if resolved_id and resolved_id != exit_name:
+                    if _canonical_resolved and _canonical_resolved != exit_name:
                         logger.debug(
-                            f"Agent {agent_id} exit name '{exit_name}' → resolved to '{resolved_id}'"
+                            f"Agent {agent_id} exit name '{exit_name}' → resolved to '{_canonical_resolved}'"
                         )
                     return {
                         "action_type": "move",
                         "target": exit_coords,
                         "target_type": "exit",
                         "exit_name": exit_name,
+                        "resolved_exit_id": _canonical_resolved,
                         "confidence": 0.95,
                         "reasoning": f"Moving to known exit {exit_name}",
                         "speed": speed,  # Phase 4.3: Dynamic speed
                     }
                 else:
-                    # Provide helpful error with resolution attempt
+                    # Exit not available on this level.  If the resolved exit
+                    # lives on a different (higher) level, transparently redirect
+                    # the agent to the nearest UP escalator on their current level
+                    # so they make progress toward the requested exit.
+                    if resolved_id and agent_level:
+                        redirect = self._redirect_to_next_level_exit(
+                            agent_id, resolved_id, agent_level, current_position
+                        )
+                        if redirect is not None:
+                            redirect["speed"] = redirect.get("speed") or speed
+                            return redirect
                     if resolved_id:
                         logger.warning(
                             f"Agent {agent_id} exit name '{exit_name}' resolved to '{resolved_id}' "
@@ -232,6 +258,91 @@ class ActionTranslator:
             "target_type": "current_position",
             "confidence": 0.3,
             "reasoning": f"Parse failed, defaulting to wait: {action[:100]}",
+        }
+
+    def _redirect_to_next_level_exit(
+        self,
+        agent_id: str,
+        resolved_exit_id: str,
+        agent_level: str,
+        current_position: tuple[float, float],
+    ) -> dict[str, Any] | None:
+        """
+        When an agent requests an exit that doesn't exist on their current level,
+        find the nearest exit on the current level that leads toward it.
+
+        For platform agents (level -1) requesting a street exit: redirect to the
+        nearest UP escalator on level -1.
+        For concourse agents (level 0) requesting a platform escalator: redirect
+        to the nearest DOWN escalator on level 0.
+
+        Returns a translated-action dict, or None if no redirect is possible.
+        """
+        if not (self.jps_sim and hasattr(self.jps_sim, "simulations")):
+            return None
+
+        level_sim = self.jps_sim.simulations.get(agent_level)
+        if level_sim is None:
+            return None
+
+        level_exits = level_sim.exit_manager.exit_coordinates
+
+        # Determine which direction this agent needs to travel.
+        # Street exits (no "escalator_" prefix) are on level 0 → agents on level -1
+        # must go UP.  Down-escalator exits (escalator_*_down) are used to reach
+        # level -1 → agents on level 0 must use those.
+        is_street_exit = not resolved_exit_id.startswith("escalator_")
+        is_down_escalator = resolved_exit_id.endswith("_down")
+
+        if is_street_exit:
+            # Agent needs to go up: find UP escalators on current level.
+            candidates = {
+                name: coords for name, coords in level_exits.items()
+                if name.startswith("escalator_") and name.endswith("_up")
+            }
+            direction_label = "up escalator"
+        elif is_down_escalator:
+            # Agent wants to go down: find DOWN escalators on current level.
+            candidates = {
+                name: coords for name, coords in level_exits.items()
+                if name.startswith("escalator_") and name.endswith("_down")
+            }
+            direction_label = "down escalator"
+        else:
+            return None
+
+        if not candidates:
+            return None
+
+        nearest_name = min(
+            candidates,
+            key=lambda name: math.hypot(
+                current_position[0] - candidates[name][0],
+                current_position[1] - candidates[name][1],
+            ),
+        )
+        nearest_coords = candidates[nearest_name]
+
+        _m = re.match(r"^L[^_]+_esc_([a-f])_(up|down)$", nearest_name)
+        canonical_name = (
+            f"escalator_{_m.group(1)}_{_m.group(2)}" if _m else nearest_name
+        )
+
+        logger.info(
+            f"Agent {agent_id} on level {agent_level} requested '{resolved_exit_id}' "
+            f"(not on this level) — redirecting to {direction_label} '{canonical_name}'"
+        )
+        return {
+            "action_type": "move",
+            "target": nearest_coords,
+            "target_type": "exit",
+            "exit_name": self.exit_registry.get_display_name(canonical_name),
+            "resolved_exit_id": canonical_name,
+            "confidence": 0.8,
+            "reasoning": (
+                f"'{resolved_exit_id}' is not on level {agent_level}; "
+                f"routing via {canonical_name} to reach it"
+            ),
         }
 
     def _get_exit_coordinates(
@@ -335,12 +446,19 @@ class ActionTranslator:
         return nearest if nearest else {"name": "default", "coords": (0, 0)}
 
     def _find_zone_target(self, text: str) -> tuple[str, tuple[float, float]] | None:
-        """Find zone coordinates from zone name in text."""
+        """Find zone coordinates from zone name in text.
+
+        Uses ``representative_point()`` (guaranteed inside the polygon) instead of
+        ``centroid`` (which can fall outside concave shapes such as L- or U-shaped
+        concourses).  The executor further snaps the point to the walkable area in
+        case the zone polygon extends beyond the actual navigable geometry.
+        """
         for zone_name in self.zones_polygons.keys():
             if zone_name.lower() in text:
                 polygon = self.zones_polygons[zone_name]
-                centroid = polygon.centroid
-                return zone_name, (centroid.x, centroid.y)
+                # representative_point() always lies inside the polygon; centroid does not.
+                pt = polygon.representative_point()
+                return zone_name, (pt.x, pt.y)
 
         for zone_name, zone_bounds in self.zones.items():
             if zone_name.lower() in text:

@@ -5,6 +5,7 @@ Handles post-simulation video generation including:
 - Geometry loading from network files
 - Position history merging
 - Video file creation
+- Role-based agent colouring
 """
 
 import json
@@ -13,6 +14,66 @@ from pathlib import Path
 from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Palette — visually distinct colours, chosen to stand out against the red
+# used for ordinary agents and against the grey/green/blue map background.
+# Add more entries here if more than 8 distinct director roles are needed.
+# ---------------------------------------------------------------------------
+_DIRECTOR_PALETTE: list[tuple[str, str]] = [
+    ("#FFD700", "#B8860B"),  # gold
+    ("#FF6600", "#CC3300"),  # orange
+    ("#00CC66", "#007A3D"),  # green
+    ("#0080FF", "#004C99"),  # blue
+    ("#CC44CC", "#882288"),  # purple
+    ("#00CCCC", "#007A7A"),  # teal
+    ("#FF99CC", "#CC3377"),  # pink
+    ("#AAAAAA", "#555555"),  # grey (last resort)
+]
+_PASSENGER_COLOURS: tuple[str, str] = ("red", "darkred")
+
+
+class RoleColourMap:
+    """Assigns stable (face, edge) colour pairs to agent roles from a palette.
+
+    Passenger agents (empty role string) always receive ``_PASSENGER_COLOURS``.
+    Director agents are assigned palette entries in the order their role label
+    is first seen.  The same role label always maps to the same colour within
+    one session, and the mapping is deterministic across runs because roles
+    are resolved by sorted insertion order when ``from_roles`` is used.
+
+    Usage::
+
+        colour_map = RoleColourMap.from_roles(agent_roles)
+        face, edge = colour_map.get(agent_id, agent_roles)
+    """
+
+    def __init__(self) -> None:
+        self._role_to_index: dict[str, int] = {}
+
+    @classmethod
+    def from_roles(cls, agent_roles: dict[str, str]) -> "RoleColourMap":
+        """Pre-populate the map with all known roles (sorted for determinism)."""
+        instance = cls()
+        for role in sorted(set(agent_roles.values())):
+            if role:
+                instance._assign(role)
+        return instance
+
+    def _assign(self, role: str) -> int:
+        """Lazily assign the next palette slot to *role* and return its index."""
+        if role not in self._role_to_index:
+            self._role_to_index[role] = len(self._role_to_index)
+        return self._role_to_index[role]
+
+    def get(self, agent_id: str, agent_roles: dict[str, str]) -> tuple[str, str]:
+        """Return ``(face_colour, edge_colour)`` for *agent_id*."""
+        role = agent_roles.get(agent_id, "")
+        if not role:
+            return _PASSENGER_COLOURS
+        idx = self._assign(role) % len(_DIRECTOR_PALETTE)
+        return _DIRECTOR_PALETTE[idx]
 
 
 class VideoGenerationHelper:
