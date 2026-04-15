@@ -125,6 +125,12 @@ class DecisionProcessor:
         # Seeded from agent_cfg["initial_goal"] on first decision.
         self.agent_goals: dict[str, str] = {}
 
+        # Tracks the sim-time when each agent last issued a non-wait action.
+        # Used to inject an escalating wait-duration nudge into the observation so
+        # that the prompt hash changes every minute, busting the cache and forcing
+        # the LLM to re-evaluate agents stuck in a repetitive-wait deadlock.
+        self._agent_wait_since: dict[str, float] = {}
+
         # Config-driven exit knowledge — replaces hardcoded level-number comparisons.
         # All keys are defined in station.yaml under the station: section.
         self._arrival_exits_by_zone: dict[str, list[str]] = station_layout.get(
@@ -552,6 +558,21 @@ class DecisionProcessor:
                             "Goal status: You are currently at your goal destination."
                         )
 
+            # Wait-duration nudge: inject a message that changes every minute an
+            # agent has been continuously waiting.  The different text produces a
+            # fresh prompt hash each minute, busting the cache and forcing the LLM
+            # to reconsider rather than repeating the same wait decision forever.
+            wait_start = self._agent_wait_since.get(agent_id)
+            if wait_start is not None:
+                wait_secs = current_sim_time - wait_start
+                if wait_secs >= 60:
+                    wait_mins = int(wait_secs / 60)
+                    goal_lines.append(
+                        f"\u26a0\ufe0f You have been stationary for {wait_mins} minute(s) "
+                        f"while the evacuation alarm is active. "
+                        f"Staying put any longer is dangerous \u2014 you must decide to move now."
+                    )
+
             # Get observation for this agent and prepend goal context
             observation = observations.get(agent_id, "")
             if goal_lines:
@@ -736,6 +757,14 @@ class DecisionProcessor:
             with self.perf_timer.measure("translate_action", is_parallel=True):
                 translated = self.action_translator.translate(agent_id, action, position)
 
+            # Update wait-since tracker: reset on any movement, extend on wait.
+            if translated.get("action_type") == "wait":
+                async with self._state_lock:
+                    self._agent_wait_since.setdefault(agent_id, current_sim_time)
+            else:
+                async with self._state_lock:
+                    self._agent_wait_since.pop(agent_id, None)
+
             # Inject the LLM's own reasoning text into the translated dict so that
             # the previous-decision memory shown to the agent next turn uses the
             # agent's actual words rather than the translator's description.
@@ -846,6 +875,7 @@ class DecisionProcessor:
             agent_id: ID of exiting agent
         """
         self.prompt_cache.clear_agent(agent_id)
+        self._agent_wait_since.pop(agent_id, None)
         logger.debug(f"{agent_id}: Cache cleared on exit")
 
     def get_cache_statistics(self) -> dict[str, Any]:
