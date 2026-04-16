@@ -291,6 +291,12 @@ class HybridSimulationRunner:
             f"of ~{n // self._decision_groups} agents each"
         )
 
+        # Agents that need a decision at the *next* scheduled cycle regardless of
+        # which rotation group they belong to.  Populated when agents transfer
+        # between levels so they don't wait up to (decision_interval × N_GROUPS)
+        # seconds frozen at the arrival waypoint before their group's turn fires.
+        self._pending_immediate_decisions: set[str] = set()
+
         # Bootstrap decisions at t=0 so agents choose initial journeys before first sim step
         self._bootstrap_initial_decisions()
 
@@ -450,6 +456,7 @@ class HybridSimulationRunner:
                                 self.agent_destinations.pop(_tid, None)
                                 self.decision_processor.agent_goals.pop(_tid, None)
                                 self.decision_processor.prompt_cache.clear_agent(_tid)
+                                self._pending_immediate_decisions.add(_tid)
 
                     # Step rule-based systems (e.g. staff directives).
                     # Done every physics tick so directive timing is accurate.
@@ -516,6 +523,27 @@ class HybridSimulationRunner:
                                     if self._decision_groups > 1
                                     else None
                                 )
+
+                            # Merge any agents awaiting an out-of-group decision
+                            # (e.g. recently transferred) into the current batch.
+                            if self._pending_immediate_decisions:
+                                pending = {
+                                    a for a in self._pending_immediate_decisions
+                                    if a not in self.exited_agents
+                                }
+                                self._pending_immediate_decisions.clear()
+                                if pending:
+                                    if current_group is None:
+                                        # All-agents cycle — pending are already included
+                                        pass
+                                    else:
+                                        extras = pending - set(current_group)
+                                        if extras:
+                                            current_group = list(current_group) + list(extras)
+                                            logger.info(
+                                                f"Added {len(extras)} recently-transferred "
+                                                f"agent(s) to current decision batch: {extras}"
+                                            )
 
                             # Advance the group index only on normally-scheduled
                             # cycles so the regular staggered cadence is preserved.
