@@ -43,6 +43,7 @@ class MultiLevelJuPedSimulation:
         levels: list[str] | None = None,
         escalator_belt_speed: float = 0.5,
         level_arrival_waypoints: dict[str, tuple[float, float]] | None = None,
+        initially_blocked_exits: set[str] | None = None,
     ):
         """
         Initialize multi-level simulation.
@@ -58,6 +59,9 @@ class MultiLevelJuPedSimulation:
                 surrounding floor.  Agents that drift into an arrival-only zone
                 (wrong direction for their level) are redirected to the nearest
                 valid exit.  Default 0.5 m/s (standard commercial escalator).
+            initially_blocked_exits: Exits that are blocked from simulation start.
+                Their corridor geometry and exit stages are omitted so agents
+                physically cannot enter them.
         """
         self.dt = dt
         self.exit_radius = exit_radius
@@ -77,6 +81,8 @@ class MultiLevelJuPedSimulation:
             levels = ["0", "-1"]
         self.levels = levels
 
+        _initially_blocked = set(initially_blocked_exits or [])
+
         # Create simulation instance for each level
         self.simulations: dict[str, ConcordiaJuPedSimulation] = {}
         for level_id in levels:
@@ -86,6 +92,7 @@ class MultiLevelJuPedSimulation:
                 dt=dt,
                 exit_radius=exit_radius,
                 level_id=level_id,
+                initially_blocked_exits=_initially_blocked,
             )
 
         # Track which level each agent is on
@@ -104,6 +111,15 @@ class MultiLevelJuPedSimulation:
         # arrival zone before a return trip could be triggered accidentally.
         self._transfer_cooldown_steps: int = 100
         self._last_transfer_step: dict[str, int] = {}  # agent_id -> step number
+
+        # Exits that are currently blocked (set by hybrid_simulation / EventManager).
+        # When an agent physically reaches a blocked escalator exit on a level
+        # where no geometry obstacle could be placed, they are returned to the
+        # platform floor and flagged for an immediate re-decision.
+        self.blocked_exits: set[str] = set()
+        # Agents returned from a blocked escalator this step; hybrid_simulation
+        # should trigger an immediate LLM re-decision for these.
+        self.agents_needing_redecision: set[str] = set()
 
         # Setup level transfer manager
         self.transfer_manager = LevelTransferManager(network_path, levels)
@@ -388,7 +404,7 @@ class MultiLevelJuPedSimulation:
             return False
 
         # Step 1: Check for agents that exited through escalators and transfer them
-        self._process_escalator_exits()
+        self._process_escalator_exits(self.blocked_exits)
 
         # Step 2: Step each level's simulation
         any_active = False
@@ -411,13 +427,19 @@ class MultiLevelJuPedSimulation:
 
         return True
 
-    def _process_escalator_exits(self):
+    def _process_escalator_exits(self, blocked_exits: set[str] | None = None):
         """
         Check each level for agents that have exited through escalators.
 
         Escalators are exits that connect two levels. When an agent exits through
         an escalator on one level, they are spawned into the target level.
+
+        If *blocked_exits* is provided, agents that reach a blocked escalator exit
+        are returned to a safe position on their current level and flagged for
+        immediate re-decision rather than being transferred.
         """
+        if blocked_exits is None:
+            blocked_exits = set()
         # Reset same-step spawn tracking so each step starts fresh.
         self._pending_spawn_positions.clear()
 
@@ -448,6 +470,35 @@ class MultiLevelJuPedSimulation:
                     # Remove from level tracking - agent has truly exited station
                     if agent_id in self.agent_levels:
                         del self.agent_levels[agent_id]
+                    continue
+
+                # --- Blocked exit interception (general) ---
+                # If this exit is blocked, the agent physically reached a barrier.
+                # Re-spawn them at their last known position so they are back
+                # just in front of the barrier, and flag for immediate re-decision.
+                # This mechanism is exit-type agnostic — it works for any blocked
+                # exit (escalator, door, collapsed-person blockage, etc.).
+                if exit_name in blocked_exits:
+                    last_pos = self.simulations[level_id].last_known_positions.get(agent_id)
+                    sim = self.simulations[level_id]
+                    if last_pos is not None:
+                        try:
+                            sim.add_agent(agent_id, last_pos, walking_speed=1.34)
+                            self.agent_levels[agent_id] = level_id
+                            self.agents_needing_redecision.add(agent_id)
+                            logger.info(
+                                f"Agent {agent_id} reached blocked exit {exit_name} on level "
+                                f"{level_id} — returned to last position {last_pos} for re-decision"
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Could not return agent {agent_id} after blocked exit: {e}"
+                            )
+                    else:
+                        logger.warning(
+                            f"Agent {agent_id} reached blocked exit {exit_name} "
+                            f"but no last position recorded — agent lost"
+                        )
                     continue
 
                 # Enforce cooldown to prevent immediate bounce-back transfers.
@@ -616,6 +667,22 @@ class MultiLevelJuPedSimulation:
             if agent_id in self.agent_levels:
                 del self.agent_levels[agent_id]
 
+    def add_geometry_obstacle_for_exit(self, exit_name: str) -> None:
+        """Punch a geometry obstacle at the entrance of *exit_name* on every level.
+
+        Each level is attempted independently so a failure on one level (e.g. the
+        platform level whose topology doesn't support runtime corridor removal)
+        doesn't prevent the blocker being applied on other levels.
+        """
+        for level_id, sim in self.simulations.items():
+            try:
+                sim.add_geometry_obstacle_for_exit(exit_name)
+            except Exception as e:
+                from evacusim.utils.logger import get_logger as _gl
+                _gl(__name__).debug(
+                    f"Geometry obstacle skipped for '{exit_name}' on level {level_id}: {e}"
+                )
+
     def consume_recently_transferred_agents(self) -> set[str]:
         """Return and clear agents transferred since last consume call."""
         transferred = set(self.recently_transferred_agents)
@@ -697,12 +764,15 @@ class MultiLevelJuPedSimulation:
 
         # Check if exit exists on this level
         if exit_name not in level_sim.exit_manager.evacuation_exits:
-            logger.warning(
+            # Raise KeyError so callers (e.g. ActionExecutor._handle_move_action)
+            # can fall back to waypoint navigation toward the blocked position,
+            # allowing the agent to walk up to the exit and discover the blockage
+            # through observation.
+            raise KeyError(
                 f"Agent {agent_id} on level {level_id} tried to route to exit '{exit_name}' "
                 f"which doesn't exist on this level. Available exits: "
                 f"{list(level_sim.exit_manager.evacuation_exits.keys())}"
             )
-            return
 
         # Route to the exit on this level
         level_sim.set_agent_evacuation_exit(agent_id, exit_name)

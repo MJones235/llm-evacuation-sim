@@ -85,6 +85,12 @@ class EventManager:
               platforms: [1, 2, 3, 4]         # platform numbers with waiting trains
               message: "A train is waiting at all platforms."
 
+        Exit blocking event (marks exits as blocked in observations + routing)::
+
+            - time: 15.0
+              type: block_exit
+              exits: [escalator_d_down, escalator_e_up, escalator_f_up]
+
         Args:
             current_sim_time: Current simulation time in seconds.
             agents: Dictionary of agent_id -> agent entity (required for standard broadcasts).
@@ -121,8 +127,11 @@ class EventManager:
             event_type = event.get("type", "")
             is_pa = event.get("pa_announcement") or event_type == "pa_announcement"
             is_train_arrival = event_type == "train_arrival"
+            is_block_exit = event_type == "block_exit"
 
-            if is_train_arrival:
+            if is_block_exit:
+                self._fire_block_exit(event, current_sim_time)
+            elif is_train_arrival:
                 self._fire_train_arrival(event, current_sim_time, agents, message_system,
                                          exited_agents, zone_id_for_agent_fn)
             elif is_pa and message_system is not None:
@@ -138,6 +147,30 @@ class EventManager:
             fired = True
 
         return fired
+
+    def _fire_block_exit(self, event: dict[str, Any], current_sim_time: float) -> None:
+        """
+        Handle a ``block_exit`` event from config.
+
+        Config schema::
+
+            - time: 15.0
+              type: block_exit
+              exits:
+                - escalator_d_down
+                - escalator_e_up
+                - escalator_f_up
+
+        Each named exit is passed to :meth:`block_exit`.  Unknown exit names are
+        logged as warnings and skipped.
+        """
+        exits = event.get("exits", [])
+        # Also support a single exit as a scalar string for convenience.
+        if isinstance(exits, str):
+            exits = [exits]
+        for exit_name in exits:
+            logger.info(f"⏰ block_exit event at t={current_sim_time:.1f}s — blocking '{exit_name}'")
+            self.block_exit(exit_name)
 
     def _fire_pa_announcement(
         self,
@@ -272,43 +305,39 @@ class EventManager:
 
     def block_exit(self, exit_name: str) -> None:
         """
-        Block an exit by placing a physical obstacle in JuPedSim.
+        Mark an exit as blocked.
 
-        Agents will discover the blockage when they get close (visual range ~20m)
-        or observe others turning back from it.
+        Adds the exit to ``blocked_exits`` so that:
+        - Agents who have line-of-sight will see it as blocked in their observation.
+        - The multi-level simulation will refuse level transfers through blocked escalators.
+
+        Discovery is entirely spatial/observational — no broadcast is made.  An agent
+        only learns about the blockage when they approach close enough to see it, or
+        when a nearby fireman's directive message reaches them.
 
         Args:
-            exit_name: Name of the exit to block
+            exit_name: Name of the exit to block (must be in station_layout["exits"]).
         """
-        if exit_name not in self.station_layout["exits"]:
-            logger.warning(f"Cannot block unknown exit: {exit_name}")
-            return
-
-        exit_pos = self.station_layout["exits"][exit_name]
-
-        # Add to blocked exits set (for observations)
+        is_known = exit_name in self.station_layout["exits"]
+        if not is_known:
+            # Pre-blocked exits were removed from the navmesh at init and were never
+            # registered as JuPedSim stages, so they won't appear in station_layout.
+            # Still track them in blocked_exits so agents can observe the blockage.
+            logger.info(
+                f"Exit '{exit_name}' not in station_layout (pre-blocked at init) — "
+                "adding to blocked_exits for observation only"
+            )
         self.blocked_exits.add(exit_name)
 
-        # Place physical obstacle in JuPedSim
-        # Use a radius that blocks the entrance (typically 2-3m wide, so 3-4m radius covers it)
-        # This makes the exit unreachable in pathfinding - agents cannot get close enough
-        # to evacuate through it, and will naturally reroute when they observe the blockage
-        try:
-            # Obstacle radius sized for typical entrance width (2-3m)
-            obstacle_radius = 4.0
-            self.jps_sim.add_obstacle(exit_pos, radius=obstacle_radius)
-            logger.info(
-                f"🚧 Exit {exit_name} physically blocked at {exit_pos} "
-                f"(obstacle radius: {obstacle_radius}m)"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to add physical obstacle at {exit_name}: {e}")
+        # Place a geometry obstacle only if the exit is a known registered stage.
+        # Pre-blocked exits already have their corridor removed from the navmesh.
+        if is_known and exit_name.startswith("escalator_") and hasattr(self.jps_sim, "add_geometry_obstacle_for_exit"):
+            try:
+                self.jps_sim.add_geometry_obstacle_for_exit(exit_name)
+            except Exception as e:
+                logger.warning(f"Could not add geometry obstacle for '{exit_name}': {e}")
 
-        # NO announcement - agents discover naturally through observation
-        # NOTE: We do NOT immediately reroute agents heading to this exit.
-        # Agents should be allowed to travel to the blocked exit and discover it naturally,
-        # then they will observe the blockage and choose alternative routes in their next decision.
-        logger.info(f"Exit {exit_name} blocked - agents will discover naturally")
+        logger.info(f"🚧 Exit '{exit_name}' blocked — geometry + marshals prevent entry")
 
     def broadcast_event(
         self, event_message: str, current_sim_time: float, agents: dict[str, Any]

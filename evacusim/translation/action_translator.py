@@ -308,6 +308,15 @@ class ActionTranslator:
                 if name.startswith("escalator_") and name.endswith("_down")
             }
             direction_label = "down escalator"
+            # If no down escalators exist on this level (e.g. agent is already on
+            # the lowest level), fall back to UP escalators — the agent is confused
+            # about their location and needs to go up to reach the concourse first.
+            if not candidates:
+                candidates = {
+                    name: coords for name, coords in level_exits.items()
+                    if name.startswith("escalator_") and name.endswith("_up")
+                }
+                direction_label = "up escalator (redirected from down request)"
         else:
             return None
 
@@ -408,6 +417,20 @@ class ActionTranslator:
                             f"— using '{key}' (same letter, valid on this level)"
                         )
                         return coords
+
+            # 3. Pre-blocked exits: the TZ polygon was removed from the navmesh
+            #    at startup, so it's absent from exit_coordinates.  Fall back to
+            #    the centroid recorded by geometry_manager before removal so the
+            #    agent can navigate to the nearest accessible point and then
+            #    receive a "blocked" observation at close range.
+            if level_sim and hasattr(level_sim, "geometry_manager"):
+                gm = level_sim.geometry_manager
+                blocked_pos = gm.blocked_exit_positions.get(resolved_id)
+                if blocked_pos is not None:
+                    logger.debug(
+                        f"Exit '{resolved_id}' is pre-blocked; using stored centroid {blocked_pos}"
+                    )
+                    return blocked_pos
 
             # Exit not available on this level
             return None

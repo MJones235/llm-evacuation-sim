@@ -458,13 +458,20 @@ class HybridSimulationRunner:
                                 self.decision_processor.prompt_cache.clear_agent(_tid)
                                 self._pending_immediate_decisions.add(_tid)
 
-                    # Step rule-based systems (e.g. staff directives).
-                    # Done every physics tick so directive timing is accurate.
-                    self._step_systems(self.current_sim_time)
-
-                    # Check for events BEFORE decisions so that an event firing
-                    # at the same timestep as a decision cycle is visible in the
-                    # observations generated below (previously events fired after
+                    # Consume agents that were bounced back from a blocked escalator.
+                    # Clear their stale route commitments and schedule an immediate
+                    # re-decision so they pick an unblocked exit next cycle.
+                    if hasattr(self.jps_sim, "agents_needing_redecision") and self.jps_sim.agents_needing_redecision:
+                        bounced = set(self.jps_sim.agents_needing_redecision)
+                        self.jps_sim.agents_needing_redecision.clear()
+                        logger.info(
+                            f"Bounced agents re-deciding after blocked escalator: {bounced}"
+                        )
+                        for _bid in bounced:
+                            self.agent_destinations.pop(_bid, None)
+                            self.decision_processor.agent_goals.pop(_bid, None)
+                            self.decision_processor.prompt_cache.clear_agent(_bid)
+                            self._pending_immediate_decisions.add(_bid)
                     # decisions, meaning the alarm was missed for the entire
                     # decision cycle that coincided with the alarm time).
                     with self.perf_timer.measure("event_checking"):
@@ -757,7 +764,11 @@ class HybridSimulationRunner:
             True if simulation should continue, False if complete
         """
         try:
-            # TODO: This works with MockJuPedSim, verify with real JuPedSim
+            # Keep jps_sim's blocked_exits in sync so the physics layer can
+            # intercept agents that reach a blocked escalator exit on levels
+            # where no geometry obstacle could be placed (e.g. level -1).
+            if hasattr(self.jps_sim, "blocked_exits"):
+                self.jps_sim.blocked_exits = set(self.event_manager.blocked_exits)
             return self.jps_sim.step()
         except Exception as e:
             logger.error(f"JuPedSim step error: {e}")

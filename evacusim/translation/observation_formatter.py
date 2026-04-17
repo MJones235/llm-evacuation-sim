@@ -248,7 +248,7 @@ class ObservationFormatter:
         for blocked in visible_blocked:
             lines.append(
                 f"The {blocked['name']} appears blocked or obstructed "
-                f"({blocked['distance']} away)."
+                f"({blocked['distance']})."
             )
 
         return lines

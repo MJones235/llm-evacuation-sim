@@ -273,9 +273,13 @@ class ObservationGenerator:
         # --- Exit awareness (line-of-sight + persistent memory) ---
 
         # 1. Discover exits visible right now via LOS geometry.
+        #    Pass blocked_exits so that currently-blocked exits are excluded from
+        #    the visible list — they appear instead as blocked visual observations
+        #    once the agent is within discovery range.
         visible_exits = self.spatial_analyzer.get_visible_exits(
             position, agent_level=agent_level, jps_sim=self.jps_sim,
             inactive_exits=inactive_exits,
+            blocked_exits=blocked_exits if blocked_exits else None,
         )
 
         # 2. Update: learn exits seen this tick.
@@ -312,6 +316,15 @@ class ObservationGenerator:
         # Suppress inactive exits (e.g. trains not yet arrived) from recalled list too.
         if inactive_exits:
             recalled = {c for c in recalled if c not in inactive_exits}
+        # Filter recalled exits to only those accessible from the agent's current level.
+        # This prevents agents who have transitioned levels from recalling exits that
+        # only exist on another level (e.g. a platform agent recalling "Escalator A
+        # (down to platforms)" which is only accessible from the concourse level).
+        if agent_level and self.jps_sim and hasattr(self.jps_sim, "simulations"):
+            level_sim = self.jps_sim.simulations.get(str(agent_level))
+            if level_sim and hasattr(level_sim, "exit_manager"):
+                level_exit_ids = set(level_sim.exit_manager.exit_coordinates.keys())
+                recalled = {c for c in recalled if c in level_exit_ids}
         if recalled:
             recalled_names = sorted(
                 self._canonical_to_display.get(c, c) for c in recalled
@@ -370,7 +383,9 @@ class ObservationGenerator:
                     observations.append(f"  - With {convo['other']}: {convo['summary']}")
 
         # Visual observation of blocked exits (Phase 4.2: Realistic discovery)
-        visible_blocked = self.spatial_analyzer.get_visible_blocked_exits(position, blocked_exits)
+        visible_blocked = self.spatial_analyzer.get_visible_blocked_exits(
+            position, blocked_exits, agent_level=agent_level, jps_sim=self.jps_sim
+        )
         blocked_lines = ObservationFormatter.format_blocked_exits(visible_blocked)
         observations.extend(blocked_lines)
 

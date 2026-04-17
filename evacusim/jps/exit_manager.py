@@ -35,6 +35,7 @@ class ExitManager:
         level_id: str | int = "0",
         exit_thresholds: dict[str, Any] | None = None,
         train_entrance_areas: dict[str, Any] | None = None,
+        initially_blocked_exits: set[str] | None = None,
     ):
         """
         Initialize exit manager and create evacuation exits.
@@ -56,6 +57,12 @@ class ExitManager:
         self.level_id = str(level_id)
         self.exit_thresholds = exit_thresholds or {}
         self.train_entrance_areas = train_entrance_areas or {}
+        # Escalator letters that are pre-blocked — skip registering their stages.
+        blocked = set(initially_blocked_exits or [])
+        self._blocked_esc_letters: set[str] = {
+            p.split("_")[1] for p in blocked
+            if p.startswith("escalator_") and len(p.split("_")) >= 2
+        }
 
         # Names of exits that represent train boarding points.  They are
         # registered in JuPedSim at init time but hidden from agent observations
@@ -177,6 +184,10 @@ class ExitManager:
             exit_name = f"escalator_{esc_id}_down"
             if exit_name in evacuation_exits:
                 continue  # Already registered (shouldn't happen, but be safe)
+            # Skip pre-blocked escalators — their corridor is not in the navmesh.
+            if esc_id in self._blocked_esc_letters:
+                logger.info(f"Skipping pre-blocked escalator exit '{exit_name}' on level {self.level_id}")
+                continue
             try:
                 coords = list(zone_polygon.exterior.coords)[:-1]
                 if len(coords) < 3:
@@ -234,6 +245,11 @@ class ExitManager:
             # Only create exits for escalators on the current level
             if level != self.level_id:
                 logger.debug(f"Skipping escalator zone {zone_name} (not for level {self.level_id})")
+                continue
+
+            # Skip pre-blocked escalators — their corridor is not in the navmesh.
+            if esc_id in self._blocked_esc_letters:
+                logger.info(f"Skipping pre-blocked escalator exit 'escalator_{esc_id}_{direction}' on level {self.level_id}")
                 continue
 
             # On platform levels (no street exits), only UP escalators are departure exits.

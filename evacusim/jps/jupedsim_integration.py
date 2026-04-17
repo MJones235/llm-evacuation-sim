@@ -42,8 +42,7 @@ class ConcordiaJuPedSimulation:
         network_path: Path | None = None,
         dt: float = 0.05,
         exit_radius: float = 10.0,
-        level_id: int | str = 0,
-    ):
+        level_id: int | str = 0,        initially_blocked_exits: set[str] | None = None,    ):
         """
         Initialize JuPedSim simulation with station geometry.
 
@@ -63,7 +62,8 @@ class ConcordiaJuPedSimulation:
             raise ValueError("network_path required")
 
         self.network_path = network_path
-        self.geometry_manager = GeometryManager(network_path, dt, level_id)
+        self.geometry_manager = GeometryManager(network_path, dt, level_id,
+                                                initially_blocked_exits=initially_blocked_exits)
         self.simulation = self.geometry_manager.simulation
         self.stage_manager = StageManager(self.simulation)
 
@@ -75,6 +75,7 @@ class ConcordiaJuPedSimulation:
             level_id=self.level_id,
             exit_thresholds=self.geometry_manager.exit_thresholds,
             train_entrance_areas=self.geometry_manager.train_entrance_areas,
+            initially_blocked_exits=initially_blocked_exits,
         )
 
         self.agent_tracker = AgentTracker(self.simulation)
@@ -86,6 +87,55 @@ class ConcordiaJuPedSimulation:
             f"{len(self.geometry_manager.walkable_areas)} walkable areas, "
             f"{len(self.geometry_manager.entrance_areas)} entrances, "
             f"{len(self.exit_manager.evacuation_exits)} exits"
+        )
+
+    def add_geometry_obstacle_for_exit(self, exit_name: str) -> None:
+        """Add a physical barrier that prevents agent access to a blocked exit.
+
+        Removes the entire escalator shaft volume — corridor polygon unioned with
+        its transfer-zone walkable area — from the navmesh in one operation.
+        This keeps the navmesh topologically connected (single Polygon) on both
+        levels: agents simply cannot path into space that no longer exists.
+        """  # noqa: D401
+        from shapely.ops import unary_union as _union
+
+        parts = exit_name.split("_")  # ["escalator", "d", "down"]
+        if len(parts) < 3:
+            return
+        esc_letter = parts[1]
+        corridor_name = f"L{self.level_id}_esc_corridor_{esc_letter}"
+        corridor_poly = self.geometry_manager.escalator_corridors.get(corridor_name)
+        if corridor_poly is None:
+            logger.warning(
+                f"No corridor polygon '{corridor_name}' found — cannot add geometry obstacle"
+            )
+            return
+
+        # Find the matching transfer-zone walkable area (e.g. L0_esc_d_down,
+        # L-1_esc_d_down, etc.) and union it with the corridor polygon.
+        tz_key = next(
+            (
+                k
+                for k in self.geometry_manager.walkable_areas
+                if k.startswith(f"L{self.level_id}_esc_{esc_letter}_")
+            ),
+            None,
+        )
+        shapes = [corridor_poly]
+        if tz_key:
+            shapes.append(self.geometry_manager.walkable_areas[tz_key])
+        else:
+            logger.warning(
+                f"No transfer-zone walkable area found for '{corridor_name}' — "
+                f"using corridor polygon only"
+            )
+
+        # Small buffer ensures a clean union even when polygons only touch.
+        full_block = _union(shapes).buffer(0.02)
+        self.geometry_manager.add_obstacle_polygon(full_block)
+        logger.info(
+            f"🚧 Escalator '{corridor_name}' sealed "
+            f"(removed {full_block.area:.2f} m² from navmesh)"
         )
 
     def add_agent(

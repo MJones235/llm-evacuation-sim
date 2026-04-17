@@ -323,12 +323,23 @@ class DecisionProcessor:
             from shapely.geometry import Point as _Point
 
             pt = _Point(position)
+            # Collect all matching zones, then return the one with the smallest
+            # area.  This ensures that specific zones (e.g. "platform_1") take
+            # priority over coarse background polygons (e.g. "level_-1") that
+            # may cover the entire level and would otherwise shadow every
+            # specific zone for agents who happen to be inside both.
+            best_zone: str | None = None
+            best_area: float = float("inf")
             for zone_id, poly in self.action_translator.zones_polygons.items():
                 try:
                     if poly.covers(pt) or poly.contains(pt):
-                        return zone_id
+                        area = poly.area
+                        if area < best_area:
+                            best_area = area
+                            best_zone = zone_id
                 except Exception:
                     pass
+            return best_zone
         except Exception:
             pass
         return None
@@ -424,6 +435,8 @@ class DecisionProcessor:
         # --- Per-cycle zone cache ---
         # Pre-compute zone_id for every active agent once (avoids N × M Shapely
         # contains-checks spread across N concurrent coroutines).
+        # Use smallest-area match so specific sub-zones (e.g. "platform_1")
+        # take priority over large background polygons (e.g. "level_-1").
         cycle_zone_cache: dict[str, str | None] = {}
         zones_polygons = getattr(self.action_translator, "zones_polygons", {})
         if zones_polygons:
@@ -436,11 +449,14 @@ class DecisionProcessor:
                     continue
                 pt = _Point(pos)
                 found: str | None = None
+                found_area: float = float("inf")
                 for z_id, poly in zones_polygons.items():
                     try:
                         if poly.covers(pt) or poly.contains(pt):
-                            found = z_id
-                            break
+                            area = poly.area
+                            if area < found_area:
+                                found_area = area
+                                found = z_id
                     except Exception:
                         pass
                 cycle_zone_cache[agent_id] = found

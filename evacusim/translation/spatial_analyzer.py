@@ -228,6 +228,7 @@ class SpatialAnalyzer:
         agent_level: str | None = None,
         jps_sim=None,
         inactive_exits: set[str] | None = None,
+        blocked_exits: set[str] | None = None,
     ) -> list[dict[str, str]]:
         """
         Get all exits visible from the agent's position.
@@ -242,6 +243,9 @@ class SpatialAnalyzer:
             jps_sim: JuPedSim simulation (for multi-level exit access)
             inactive_exits: Set of canonical exit keys to exclude from visibility
                 (used to hide train exits before the train arrives).
+            blocked_exits: Set of currently-blocked exit canonical IDs to exclude
+                from the visible exits list (they will appear instead in the
+                visual blocked-exit observations).
 
         Returns:
             List of dicts with keys ``id`` (canonical exit key), ``name``
@@ -261,6 +265,14 @@ class SpatialAnalyzer:
                         exits_to_check[exit_name] = level_sim.exit_manager.exit_coordinates[
                             exit_name
                         ]
+                # Also include pre-blocked exits (removed from navmesh at startup).
+                # Their physical location (the escalator shaft entrance) is still
+                # visible to agents — they should appear in the exit list and only
+                # become "blocked" once an agent gets close enough to see the barrier.
+                if level_sim and hasattr(level_sim, "geometry_manager"):
+                    for exit_name, pos in level_sim.geometry_manager.blocked_exit_positions.items():
+                        if exit_name not in exits_to_check:
+                            exits_to_check[exit_name] = pos
             # Level 0: also add down-access escalator zones (not in evacuation_exits;
             # they are walkable-area level-transfer triggers)
             if agent_level == "0" and self.down_access_exits:
@@ -276,13 +288,53 @@ class SpatialAnalyzer:
                 if self._canonical_visible_exit_key(name) not in inactive_exits
             }
 
+        # Filter out exits that are currently blocked.
+        # - For runtime-blocked exits (created by an event after spawn): hide
+        #   immediately — agents can reasonably assume the exit is inaccessible
+        #   once an announcement or visual cue reaches them.
+        # - For pre-blocked exits (shaft removed from navmesh at startup, stored
+        #   in blocked_exit_positions): keep them visible UNTIL the agent is
+        #   within the discovery radius.  The physical escalator shaft is still
+        #   there and labelled; only the barrier at the entrance reveals the
+        #   blockage.  This produces the "walk-up-and-discover" behaviour.
+        if blocked_exits:
+            # Resolve the level geometry manager once for the proximity check.
+            _pre_blocked_pos: dict[str, tuple[float, float]] = {}
+            if agent_level and jps_sim and hasattr(jps_sim, "simulations"):
+                _lvl = jps_sim.simulations.get(agent_level)
+                if _lvl and hasattr(_lvl, "geometry_manager"):
+                    _pre_blocked_pos = _lvl.geometry_manager.blocked_exit_positions
+            _DISCOVERY_RADIUS = 8.0
+
+            def _keep_exit(name: str, pos: tuple[float, float]) -> bool:
+                if name not in blocked_exits:
+                    return True  # not blocked — always visible
+                if name in _pre_blocked_pos:
+                    # Pre-blocked: only hide once within discovery range
+                    dist_sq = (position[0] - pos[0]) ** 2 + (position[1] - pos[1]) ** 2
+                    return dist_sq > _DISCOVERY_RADIUS ** 2
+                return False  # runtime-blocked: hide immediately
+
+            exits_to_check = {
+                name: pos for name, pos in exits_to_check.items()
+                if _keep_exit(name, pos)
+            }
+
         # Prefer level-specific obstacles for line-of-sight checks.
+        # NOTE: On underground platform levels (level_id starting with "-"),
+        # JuPedSim obstacle polygons represent escalator shaft walls and internal
+        # structural elements.  These obstacles block every ray to any escalator
+        # TZ centroid, making ALL escalator exits invisible if we use obstacle LOS.
+        # Escalator exits should always be visible to agents on the same level
+        # (the station layout is open and agents can see escalator signage).
+        # We therefore skip obstacle-based LOS for exit visibility and rely only
+        # on the walkable-area boundary check (which is sufficient on level 0
+        # for filtering out street exits around concourse corners).
         level_obstacles = None
         level_walkable_geom = None
         if agent_level and jps_sim and hasattr(jps_sim, "simulations"):
             level_sim = jps_sim.simulations.get(agent_level)
             if level_sim and hasattr(level_sim, "geometry_manager"):
-                level_obstacles = getattr(level_sim.geometry_manager, "obstacles", None)
                 # Build (and cache) the union of all walkable areas for this level.
                 # Used to reject sight lines that pass through a wall formed by
                 # the concourse boundary itself (i.e. the concave gap between the
@@ -375,8 +427,14 @@ class SpatialAnalyzer:
                     pass  # geometry error; fall through to obstacle check
 
             # Check 2: explicit obstacle polygons.
+            # obstacles_to_check may be a list (from geometry_manager) or a dict.
             if obstacles_to_check:
-                for poly in obstacles_to_check.values():
+                polys_iter = (
+                    obstacles_to_check.values()
+                    if isinstance(obstacles_to_check, dict)
+                    else obstacles_to_check
+                )
+                for poly in polys_iter:
                     if poly is None:
                         continue
                     # Treat any interior intersection as blocked. Endpoint touching is fine.
@@ -422,43 +480,113 @@ class SpatialAnalyzer:
         return current_label
 
     def get_visible_blocked_exits(
-        self, position: tuple[float, float], blocked_exits: set[str]
+        self,
+        position: tuple[float, float],
+        blocked_exits: set[str],
+        agent_level: str | None = None,
+        jps_sim=None,
     ) -> list[dict[str, Any]]:
         """
-        Get blocked exits that have line-of-sight from the agent's position.
+        Get blocked exits that an agent can perceive from their current position.
+
+        Uses the same line-of-sight check as :meth:`get_visible_exits` so that
+        walls (e.g. the platform tunnel walls separating platforms from the
+        escalator shafts) correctly block awareness of a blockage until the
+        agent has a clear sightline to it.
 
         Args:
             position: Agent's (x, y) position
-            blocked_exits: Set of blocked exit names
+            blocked_exits: Set of blocked exit canonical IDs
+            agent_level: Current level ID (e.g. "0", "-1")
+            jps_sim: JuPedSim simulation (for level-specific geometry)
 
         Returns:
             List of visible blocked exits with name and distance category
         """
+        # Resolve level-specific exit coordinates and LOS geometry.
+        level_obstacles = None
+        level_walkable_geom = None
+        exits_to_check: dict[str, tuple[float, float]] = {}
+
+        if agent_level and jps_sim and hasattr(jps_sim, "simulations"):
+            level_sim = jps_sim.simulations.get(str(agent_level))
+            if level_sim:
+                if hasattr(level_sim, "exit_manager"):
+                    exits_to_check = dict(level_sim.exit_manager.exit_coordinates)
+                if hasattr(level_sim, "geometry_manager"):
+                    level_obstacles = getattr(level_sim.geometry_manager, "obstacles", None)
+                    if agent_level not in self._walkable_union_cache:
+                        try:
+                            from shapely.ops import unary_union
+                            polys = list(level_sim.geometry_manager.walkable_areas.values())
+                            self._walkable_union_cache[agent_level] = (
+                                unary_union(polys) if polys else None
+                            )
+                        except Exception:
+                            self._walkable_union_cache[agent_level] = None
+                    level_walkable_geom = self._walkable_union_cache.get(agent_level)
+        else:
+            exits_to_check = self.exits
+
         visible_blocked = []
 
         for exit_name in blocked_exits:
-            if exit_name in self.exits:
-                exit_pos = self.exits[exit_name]
-                distance = (
-                    (position[0] - exit_pos[0]) ** 2 + (position[1] - exit_pos[1]) ** 2
-                ) ** 0.5
+            exit_pos = exits_to_check.get(exit_name)
+            # Determine whether this is a pre-blocked exit (navmesh removed).
+            # Pre-blocked exits are surrounded by obstacle polygons that define
+            # the escalator shaft — any LOS ray to their centroid will be
+            # blocked by those same obstacles even at close range.  For these
+            # exits, use a simple proximity check inside a discovery radius so
+            # that agents who navigate toward the blocked shaft can still learn
+            # about the blockage.
+            is_pre_blocked = False
+            if exit_pos is None:
+                # Not in regular exit_coordinates — look in blocked_exit_positions.
+                if agent_level and jps_sim and hasattr(jps_sim, "simulations"):
+                    lvl = jps_sim.simulations.get(str(agent_level))
+                    if lvl and hasattr(lvl, "geometry_manager"):
+                        bp = lvl.geometry_manager.blocked_exit_positions.get(exit_name)
+                        if bp is not None:
+                            exit_pos = bp
+                            is_pre_blocked = True
+            if exit_pos is None:
+                # Final fallback: single-level exits dict
+                exit_pos = self.exits.get(exit_name)
+            if exit_pos is None:
+                continue
 
-                if self._has_line_of_sight(position, exit_pos):
-                    if distance >= 50:
-                        dist_cat = "50-100m"
-                    elif distance >= 10:
-                        dist_cat = "<50m"
-                    else:
-                        dist_cat = "very close"
+            distance = (
+                (position[0] - exit_pos[0]) ** 2 + (position[1] - exit_pos[1]) ** 2
+            ) ** 0.5
 
-                    # Use display name if registry available
-                    display_name = (
-                        self.exit_registry.get_display_name(exit_name)
-                        if self.exit_registry
-                        else exit_name
-                    )
+            if is_pre_blocked:
+                # Obstacle-based LOS cannot work for pre-blocked exits (the shaft
+                # walls block every ray).  Use proximity: the blockage is visible
+                # once the agent is close enough to see the barrier/marshal
+                # standing at the escalator entrance (~8 m).  This is small enough
+                # that agents on platform 1/2 need to walk toward E/F before
+                # discovering the blockage, giving the "walk-up-and-discover"
+                # behaviour, yet large enough to be detected comfortably.
+                _PREBLOCKED_DISCOVERY_RADIUS = 8.0
+                if distance > _PREBLOCKED_DISCOVERY_RADIUS:
+                    continue
+            else:
+                if not self._has_line_of_sight(position, exit_pos, level_obstacles, level_walkable_geom):
+                    continue
 
-                    visible_blocked.append({"name": display_name, "distance": dist_cat})
+            if distance < 5:
+                dist_cat = "very close"
+            elif distance < 15:
+                dist_cat = "nearby"
+            else:
+                dist_cat = "visible in the distance"
+
+            display_name = (
+                self.exit_registry.get_display_name(exit_name)
+                if self.exit_registry
+                else exit_name
+            )
+            visible_blocked.append({"name": display_name, "distance": dist_cat})
 
         return visible_blocked
 

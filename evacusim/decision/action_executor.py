@@ -263,28 +263,37 @@ class ActionExecutor:
         new_exit_name = extract_exit_name(translated_action, self.station_layout)
 
         if new_exit_name:
-            # Check if agent is trying to switch to a blocked exit
-            if new_exit_name in self.event_manager.blocked_exits:
-                logger.warning(
-                    f"⚠️ {agent_id} tried to switch to blocked exit '{new_exit_name}' - "
-                    f"setting waypoint only, NOT updating journey or destination tracking"
-                )
-                # Only set waypoint, don't switch journey (would let them evacuate through blocked exit)
-                # Do NOT update agent_destinations - they haven't actually changed their route
-                logger.debug(
-                    f"[MOVE] {agent_id} set_agent_target({agent_id}, {target}) for blocked exit"
-                )
-                self.jps_sim.set_agent_target(agent_id, target)
-            else:
-                # Valid exit - update destination tracking ONLY for non-blocked exits
-                self.agent_destinations[agent_id] = new_exit_name
-
-                # Switch the agent's evacuation journey to this exit
-                logger.debug(
-                    f"[MOVE] {agent_id} set_agent_evacuation_exit({agent_id}, {new_exit_name})"
-                )
+            # Track destination and commit the JuPedSim journey regardless of whether
+            # the exit is currently blocked.  Realism requires that agents navigate
+            # toward their chosen exit and discover the blockage through observation
+            # (line-of-sight) rather than having their decision silently overridden.
+            # If they reach a blocked escalator the multi-level simulation will bounce
+            # them back and trigger an immediate re-decision.
+            self.agent_destinations[agent_id] = new_exit_name
+            logger.debug(
+                f"[MOVE] {agent_id} set_agent_evacuation_exit({agent_id}, {new_exit_name})"
+            )
+            try:
                 self.jps_sim.set_agent_evacuation_exit(agent_id, new_exit_name)
                 logger.debug(f"Switched {agent_id} to journey for {new_exit_name}")
+            except KeyError as exc:
+                # Pre-blocked or absent exit: navigate via waypoint so the agent
+                # walks toward the blocked position and discovers the blockage
+                # through observation at close range, then redecides.
+                logger.debug(f"[MOVE] {agent_id} exit routing failed: {exc}")
+                if target is not None:
+                    agent_pos = self.state_queries.get_agent_position(agent_id)
+                    snapped = self._safe_follow_target(agent_id, agent_pos, target)
+                    logger.info(
+                        f"[MOVE] {agent_id} → blocked/absent exit '{new_exit_name}'; "
+                        f"using waypoint navigation to {snapped}"
+                    )
+                    self.jps_sim.set_agent_target(agent_id, snapped)
+                else:
+                    logger.warning(
+                        f"[MOVE] {agent_id} → blocked exit '{new_exit_name}' has no "
+                        f"known position; cannot navigate toward it"
+                    )
         else:
             # Not moving to an exit, just a waypoint — snap to walkable area first so
             # that zone centroids landing on obstacles or outside the geometry don't

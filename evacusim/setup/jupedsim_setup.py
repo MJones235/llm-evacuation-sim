@@ -42,6 +42,17 @@ class JuPedSimSetup:
         dt = sim_config.get("dt", 0.05)
         network_path = Path(sim_config.get("network_path", "scenarios/station_sim/network"))
 
+        # Collect exits that are blocked from simulation start.
+        # Any block_exit event in the config means the blockage is in place before agents
+        # arrive — we omit those corridors and stages from the navmesh entirely.
+        initially_blocked_exits: set[str] = set()
+        for event in config.get("events", []):
+            if event.get("type") == "block_exit":
+                for exit_name in event.get("exits", []):
+                    initially_blocked_exits.add(exit_name)
+        if initially_blocked_exits:
+            logger.info(f"Pre-blocking exits at simulation start: {initially_blocked_exits}")
+
         # Check if multi-level mode is enabled
         multi_level = sim_config.get("multi_level", False)
         levels = sim_config.get("levels", ["0", "-1"])
@@ -60,6 +71,7 @@ class JuPedSimSetup:
                 levels=levels,
                 escalator_belt_speed=escalator_belt_speed,
                 level_arrival_waypoints=level_arrival_waypoints,
+                initially_blocked_exits=initially_blocked_exits,
             )
             logger.info("Multi-level JuPedSim simulation created successfully")
         else:

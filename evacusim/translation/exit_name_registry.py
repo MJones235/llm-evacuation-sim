@@ -311,5 +311,16 @@ def build_registry_from_station_layout(
                     if exit_id not in registry._id_to_display:
                         registry.register_exit(exit_id, custom_names.get(exit_id))
 
+    # Register any exit IDs referenced in commuter/novice memory profiles that
+    # aren't yet in the registry.  Pre-blocked exits are absent from
+    # evacuation_exits but agents must still be able to name and reason about
+    # them (e.g. "Escalator E is blocked") so they need a registry entry.
+    zone_known = station_layout.get("zone_known_exits_by_profile", {})
+    for zone_data in zone_known.values():
+        for profile_exits in zone_data.values():
+            for exit_id in profile_exits:
+                if exit_id not in registry._id_to_display:
+                    registry.register_exit(exit_id, custom_names.get(exit_id))
+
     logger.info(f"Built exit name registry with {len(registry)} exits")
     return registry
