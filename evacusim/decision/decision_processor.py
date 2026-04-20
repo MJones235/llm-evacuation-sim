@@ -37,7 +37,9 @@ _RE_VISUAL_FRAGMENTS = re.compile(r"You can see\s+([^\.]+)\.")
 # Matches the observation format: "Exits visible right now: Name (cat); ...."
 _RE_VISIBLE_EXITS_LINE = re.compile(r"Exits visible right now:\s*([^\.]+)\.")
 # Parses each semicolon-delimited entry: "Exit Name (going up) (nearby)"
-_RE_EXITS_LINE_ENTRY = re.compile(r"(.+?)\s+\((very close|nearby|visible in distance)\)") 
+_RE_EXITS_LINE_ENTRY = re.compile(r"(.+?)\s+\((very close|nearby|visible in distance)\)")
+# Matches blocked exit lines from ObservationFormatter.format_blocked_exits
+_RE_BLOCKED_EXIT_LINE = re.compile(r"The (.+?) appears blocked or obstructed")
 _RE_CIRCULAR_FOLLOW = re.compile(
     r"You are following (Person (\w+)), and Person \2 is following YOU"
 )
@@ -210,6 +212,14 @@ class DecisionProcessor:
 
         visible_distance_rank = _extract_visible_distance_ranks(observation)
 
+        # Exits the agent currently knows are blocked (could be from proximity
+        # discovery this tick, or from persistent remembered knowledge injected
+        # by ObservationCoordinator).  These are stripped from every exit list so
+        # the agent never chooses a confirmed-blocked exit regardless of profile.
+        blocked_display: set[str] = set()
+        for _m in _RE_BLOCKED_EXIT_LINE.finditer(observation):
+            blocked_display.add(_m.group(1).strip())
+
         def _sort_display_exits(display_names: list[str]) -> list[str]:
             indexed = list(enumerate(display_names))
 
@@ -227,7 +237,9 @@ class DecisionProcessor:
             exits = [
                 registry.get_display_name(eid)
                 for eid in mem_ids
-                if eid in valid_ids and _is_valid_departure(eid)
+                if eid in valid_ids
+                and _is_valid_departure(eid)
+                and registry.get_display_name(eid) not in blocked_display
             ]
             exits = _sort_display_exits(exits)
             if exits:
@@ -244,7 +256,7 @@ class DecisionProcessor:
         all_departure = [
             registry.get_display_name(eid) for eid in valid_ids if _is_valid_departure(eid)
         ]
-        visible = [n for n in all_departure if n in visual_text]
+        visible = [n for n in all_departure if n in visual_text and n not in blocked_display]
         if visible:
             visible = _sort_display_exits(visible)
             bullets = "".join(f"\n  \u2022 {n}" for n in visible)
@@ -255,7 +267,9 @@ class DecisionProcessor:
         fallback = [
             registry.get_display_name(eid)
             for eid in fallback_ids
-            if eid in valid_ids and _is_valid_departure(eid)
+            if eid in valid_ids
+            and _is_valid_departure(eid)
+            and registry.get_display_name(eid) not in blocked_display
         ]
         if fallback:
             bullets = "".join(f"\n  \u2022 {n}" for n in fallback)

@@ -66,6 +66,10 @@ class ObservationCoordinator:
         self.agent_last_decision = agent_last_decision
         self.jps_sim = jps_sim
         self.agent_roles: dict[str, str] = agent_roles or {}
+        # Persistent per-agent memory of discovered blocked exits.
+        # Once an agent walks close enough to see a blockage, that knowledge is
+        # retained permanently so they don't oscillate back toward blocked exits.
+        self._agent_known_blocked: dict[str, set[str]] = {}
 
     def generate_all_observations(self, current_sim_time: float) -> dict[str, str]:
         """
@@ -161,7 +165,10 @@ class ObservationCoordinator:
                 if self.jps_sim and hasattr(self.jps_sim, "agent_levels"):
                     agent_level = self.jps_sim.agent_levels.get(agent_id)
 
-                # Generate observation
+                # Generate observation, passing any exits already known to
+                # be blocked so they persist in the prompt even when the agent
+                # has moved out of the 8 m proximity discovery radius.
+                known_blocked = self._agent_known_blocked.get(agent_id, set())
                 obs = self.observation_generator.generate_observation(
                     agent_id=agent_id,
                     position=position,
@@ -177,7 +184,32 @@ class ObservationCoordinator:
                     received_messages=received_messages,
                     conversation_history=conversation_history,
                     inactive_exits=inactive_exits,
+                    known_blocked_exits=known_blocked,
                 )
+
+                # Update persistent blocked-exit memory from the returned observation.
+                # Scan for lines like "The X appears blocked or obstructed".
+                import re as _re
+                newly_blocked = _re.findall(
+                    r"The (.+?) appears blocked or obstructed", obs
+                )
+                if newly_blocked:
+                    agent_kb = self._agent_known_blocked.setdefault(agent_id, set())
+                    # Resolve display names to canonical IDs via the exit registry.
+                    registry = getattr(
+                        getattr(self.observation_generator, "action_translator", None),
+                        "exit_registry", None,
+                    )
+                    if registry is None:
+                        registry = getattr(self.observation_generator, "exit_registry", None)
+                    for display_name in newly_blocked:
+                        if registry is not None:
+                            cid = registry.resolve_to_id(display_name.strip())
+                            if cid:
+                                agent_kb.add(cid)
+                                continue
+                        # Fallback: store the display name directly
+                        agent_kb.add(display_name.strip())
 
                 observations[agent_id] = obs
 

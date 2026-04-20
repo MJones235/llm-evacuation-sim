@@ -122,6 +122,7 @@ class ObservationGenerator:
         received_messages: list[dict[str, Any]] | None = None,
         conversation_history: dict[str, list[dict]] | None = None,
         inactive_exits: set[str] | None = None,
+        known_blocked_exits: set[str] | None = None,
     ) -> str:
         """
         Generate a natural language observation for an agent.
@@ -382,10 +383,25 @@ class ObservationGenerator:
                 for convo in active_conversations[:2]:  # Max 2 to keep it concise
                     observations.append(f"  - With {convo['other']}: {convo['summary']}")
 
-        # Visual observation of blocked exits (Phase 4.2: Realistic discovery)
+        # Visual observation of blocked exits (Phase 4.2: Realistic discovery).
+        # Proximity-based discovery: only exits within 8 m are newly visible.
         visible_blocked = self.spatial_analyzer.get_visible_blocked_exits(
             position, blocked_exits, agent_level=agent_level, jps_sim=self.jps_sim
         )
+        # Merge with exits the agent already knows are blocked (persistent memory).
+        # These are shown as "remembered" so the agent doesn't forget and oscillate
+        # back toward blocked escalators after walking away from them.
+        if known_blocked_exits:
+            visible_names = {e["name"] for e in visible_blocked}
+            registry = getattr(self, "exit_registry", None) or getattr(
+                getattr(self, "action_translator", None), "exit_registry", None
+            )
+            for cid in known_blocked_exits:
+                display = (
+                    registry.get_display_name(cid) if registry else cid
+                )
+                if display not in visible_names:
+                    visible_blocked.append({"name": display, "distance": "remembered"})
         blocked_lines = ObservationFormatter.format_blocked_exits(visible_blocked)
         observations.extend(blocked_lines)
 

@@ -246,10 +246,19 @@ class ObservationFormatter:
 
         lines = ["Visual observations:"]
         for blocked in visible_blocked:
-            lines.append(
-                f"The {blocked['name']} appears blocked or obstructed "
-                f"({blocked['distance']})."
-            )
+            dist = blocked["distance"]
+            if dist == "remembered":
+                # Exit was seen as blocked earlier in this evacuation — keep it
+                # in the agent's mental model even when they've moved away.
+                lines.append(
+                    f"The {blocked['name']} appears blocked or obstructed "
+                    f"(you already know this exit is blocked)."
+                )
+            else:
+                lines.append(
+                    f"The {blocked['name']} appears blocked or obstructed "
+                    f"({dist})."
+                )
 
         return lines
 
