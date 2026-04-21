@@ -214,27 +214,28 @@ class AzureLLMConcordia:
 
                     # Check if it's a content filter / jailbreak error
                     if response.status_code == 400:
+                        is_content_filter = False
                         try:
                             if (
                                 "content_filter" in response.text
                                 or "jailbreak" in response.text.lower()
                             ):
-                                logger.error("=" * 80)
-                                logger.error("CONTENT FILTER / JAILBREAK DETECTED")
-                                logger.error("=" * 80)
-                                logger.error(f"Error: {error_msg}")
-                                logger.error("\n" + "=" * 80)
-                                logger.error("FULL PROMPT THAT TRIGGERED THE FILTER:")
-                                logger.error("=" * 80)
-                                logger.error(f"System message:\n{messages[0]['content']}")
-                                logger.error("\n" + "-" * 80)
-                                logger.error(f"User prompt:\n{messages[1]['content']}")
-                                logger.error("=" * 80)
+                                is_content_filter = True
+                                logger.warning(
+                                    "Azure content filter triggered (self_harm false-positive "
+                                    "on fire-evacuation scenario) — skipping retries."
+                                )
+                                last_error = Exception(error_msg)
+                                break  # No point retrying; same prompt will always fail
                         except Exception:
                             pass
 
-                    logger.warning(f"Attempt {attempt}/{self.max_retries} failed: {error_msg}")
-                    last_error = Exception(error_msg)
+                        if not is_content_filter:
+                            logger.warning(f"Attempt {attempt}/{self.max_retries} failed: {error_msg}")
+                            last_error = Exception(error_msg)
+                    else:
+                        logger.warning(f"Attempt {attempt}/{self.max_retries} failed: {error_msg}")
+                        last_error = Exception(error_msg)
 
             except requests.exceptions.Timeout as e:
                 logger.warning(f"Attempt {attempt}/{self.max_retries} timed out")

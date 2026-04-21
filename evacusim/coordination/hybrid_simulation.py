@@ -416,11 +416,11 @@ class HybridSimulationRunner:
                     # Check for agents who have exited and remove them
                     self.exit_tracker.check_exited_agents(self.current_sim_time, self.current_step)
 
-                    # Board agents on any platform that currently has a train present.
-                    # Any agent standing anywhere in the platform polygon is removed —
-                    # they do not need to walk to the small train-entrance marker at
-                    # the end of the platform.  We add them to exited_agents here so
-                    # that if exit_tracker also sees them disappear next step it won't
+                    # Board agents who have explicitly committed to boarding this
+                    # train (destination == exit_name).  Agents merely waiting on the
+                    # platform or routing to an escalator are left untouched.
+                    # We add boarded agents to exited_agents here so that if
+                    # exit_tracker also sees them disappear next step it won't
                     # double-count them.
                     if (
                         hasattr(self.jps_sim, "board_agents_on_platform")
@@ -753,6 +753,7 @@ class HybridSimulationRunner:
                 self.perf_timer.report(),
                 self.llm_provider,
                 agent_levels,
+                self.agent_roles if self.agent_roles else None,
             )
             logger.info(f"Partial results saved to {self.output_file}")
 

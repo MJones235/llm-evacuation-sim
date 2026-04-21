@@ -17,21 +17,31 @@ logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Palette — visually distinct colours, chosen to stand out against the red
-# used for ordinary agents and against the grey/green/blue map background.
-# Add more entries here if more than 8 distinct director roles are needed.
+# Passenger colour — used for all ordinary (non-staff) agents.
 # ---------------------------------------------------------------------------
-_DIRECTOR_PALETTE: list[tuple[str, str]] = [
-    ("#FFD700", "#B8860B"),  # gold
-    ("#FF6600", "#CC3300"),  # orange
+_PASSENGER_COLOURS: tuple[str, str] = ("red", "darkred")
+
+# ---------------------------------------------------------------------------
+# Named role colours — keyed by the exact role_label string set in config.
+# Staff agents use vivid, immediately distinguishable colours so they stand
+# out clearly from the red passenger agents on the platform map.
+# Any role not listed here falls through to the fallback palette below.
+# ---------------------------------------------------------------------------
+_ROLE_COLOURS: dict[str, tuple[str, str]] = {
+    "Fire Marshal":              ("#FFE000", "#B8A000"),   # yellow
+    "Fire Brigade Officer":      ("#FF6600", "#993300"),   # orange
+    "Revenue Control Inspector": ("#0080FF", "#004C99"),   # bright blue
+    "Station Controller":        ("#00CC66", "#007A3D"),   # green
+}
+
+# Fallback palette for any role not in _ROLE_COLOURS.
+_FALLBACK_PALETTE: list[tuple[str, str]] = [
     ("#00CC66", "#007A3D"),  # green
-    ("#0080FF", "#004C99"),  # blue
     ("#CC44CC", "#882288"),  # purple
     ("#00CCCC", "#007A7A"),  # teal
     ("#FF99CC", "#CC3377"),  # pink
     ("#AAAAAA", "#555555"),  # grey (last resort)
 ]
-_PASSENGER_COLOURS: tuple[str, str] = ("red", "darkred")
 
 
 class RoleColourMap:
@@ -72,8 +82,11 @@ class RoleColourMap:
         role = agent_roles.get(agent_id, "")
         if not role:
             return _PASSENGER_COLOURS
-        idx = self._assign(role) % len(_DIRECTOR_PALETTE)
-        return _DIRECTOR_PALETTE[idx]
+        if role in _ROLE_COLOURS:
+            return _ROLE_COLOURS[role]
+        # Fallback: assign sequentially from the fallback palette.
+        idx = self._assign(role) % len(_FALLBACK_PALETTE)
+        return _FALLBACK_PALETTE[idx]
 
 
 class VideoGenerationHelper:
@@ -104,6 +117,7 @@ class VideoGenerationHelper:
                 load_obstacles,
                 load_platform_areas,
                 load_train_entrance_areas,
+                load_train_track_sides,
                 load_walkable_areas,
             )
 
@@ -117,6 +131,7 @@ class VideoGenerationHelper:
                 obstacles = load_obstacles(str(xml_path))
                 escalator_corridors = load_escalator_corridors(str(xml_path))
                 train_entrance_areas = load_train_entrance_areas(str(xml_path))
+                train_track_sides = load_train_track_sides(str(xml_path))
                 logger.info(
                     f"Loaded geometry from {xml_path.name}: "
                     f"{len(walkable_areas)} walkable, {len(entrance_areas)} entrances, "
@@ -135,6 +150,7 @@ class VideoGenerationHelper:
                     "train_entrance_areas": {
                         n: poly_to_coords(p) for n, p in train_entrance_areas.items()
                     },
+                    "train_track_sides": train_track_sides,
                 }
 
             level0_file = network_path / "level_0.xml"
@@ -200,6 +216,25 @@ class VideoGenerationHelper:
 
             # Merge position history into decisions data
             decisions_data["position_history"] = position_history
+
+            # Pull agent_roles from the positions sidecar if not already present
+            # in the main decisions file (older runs that pre-date the final-save fix).
+            if not decisions_data.get("agent_roles"):
+                positions_sidecar = decisions_file.parent / (
+                    decisions_file.stem.replace("agent_decisions", "agent_decisions_positions") + ".json"
+                )
+                if not positions_sidecar.exists():
+                    # Generic fallback name
+                    positions_sidecar = decisions_file.parent / "agent_decisions_positions.json"
+                if positions_sidecar.exists():
+                    with open(positions_sidecar) as f:
+                        sidecar = json.load(f)
+                    roles = sidecar.get("agent_roles", {})
+                    if roles:
+                        decisions_data["agent_roles"] = roles
+                        logger.info(
+                            f"Loaded {len(roles)} agent role(s) from positions sidecar"
+                        )
 
             # Save merged data temporarily
             merged_file = decisions_file.parent / f"{decisions_file.stem}_merged.json"

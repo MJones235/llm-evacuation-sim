@@ -153,6 +153,7 @@ class ResultsWriter:
         performance_report: str,
         llm_provider: Any,
         agent_levels: dict[str, str] | None = None,
+        agent_roles: dict[str, str] | None = None,
     ) -> None:
         """
         Save final simulation results with all reports.
@@ -204,9 +205,11 @@ class ResultsWriter:
             },
         }
 
-        # Add agent levels for multi-level visualization
+        # Add agent levels and roles for multi-level visualization
         if agent_levels:
             results["agent_levels"] = agent_levels
+        if agent_roles:
+            results["agent_roles"] = agent_roles
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:

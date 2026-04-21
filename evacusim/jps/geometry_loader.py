@@ -169,6 +169,36 @@ def load_train_entrance_areas(xml_path: str) -> dict[str, Polygon]:
     return areas
 
 
+def load_train_track_sides(xml_path: str) -> dict[str, str]:
+    """
+    Load the ``track_side`` attribute from each ``jupedsim.train_entrance`` polygon.
+
+    The ``track_side`` attribute encodes which long side of the platform the
+    running track (and therefore the train body) is on.  Valid values are
+    ``"left"``, ``"right"``, ``"above"``, ``"below"``.  Platforms without the
+    attribute are omitted from the returned dict (callers should fall back to a
+    heuristic).
+
+    Args:
+        xml_path: Path to the level geometry XML file.
+
+    Returns:
+        Dictionary mapping entrance names (e.g. ``"train_platform_1"``) to
+        track-side strings (e.g. ``"right"``).
+    """
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+
+    sides: dict[str, str] = {}
+    for poly in root.findall('.//poly[@type="jupedsim.train_entrance"]'):
+        name = poly.get("name") or poly.get("id")
+        side = poly.get("track_side")
+        if name and side:
+            sides[name] = side
+
+    return sides
+
+
 def load_exit_thresholds(xml_path: str) -> dict[str, Polygon]:
     """
     Load exit threshold markers from a level geometry file.

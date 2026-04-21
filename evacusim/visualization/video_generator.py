@@ -81,6 +81,14 @@ class VideoGenerator:
         self._boarded_count: int = 0
         self._boarded_agents: set[str] = set()
 
+        # Pre-computed train rectangles (one per platform) for visualisation.
+        # Keyed by exit name, e.g. "train_platform_1".
+        self.train_rects: dict[str, dict] = self._compute_train_rects()
+        if self.train_rects:
+            logger.info(
+                f"Pre-computed train rects for: {list(self.train_rects.keys())}"
+            )
+
         logger.info(
             f"Loaded {len(self.time_series)} time steps "
             f"from {self.data.get('current_time', 0):.1f}s simulation"
@@ -183,6 +191,7 @@ class VideoGenerator:
                         "decisions": self.data.get("agent_decisions", {}),
                         "blocked_exits": frame.get("blocked_exits", []),
                         "agent_states": frame.get("agent_states", {}),
+                        "active_train_exits": frame.get("active_train_exits", []),
                     }
                 )
         else:
@@ -409,6 +418,102 @@ class VideoGenerator:
             geom = self.geometry
         return geom.get("train_entrance_areas", {})
 
+    def _compute_train_rects(self) -> dict[str, dict]:
+        """Pre-compute the on-screen bounding box for each train from geometry.
+
+        For every ``train_platform_N`` entrance area the method:
+        1. Finds the matching ``platform_N`` walkable-area polygon on level -1.
+        2. Determines whether the platform runs vertically or horizontally.
+        3. Uses the entrance centroid to pick which long side of the platform
+           the train is on (left/right for vertical, bottom/top for horizontal).
+        4. Returns a tight rectangle that sits just outside that edge, sized to
+           the full length of the platform and ~2.8 m wide (tube train width).
+
+        Returns:
+            Dict mapping exit_name (e.g. ``"train_platform_1"``) to a rect dict
+            with keys ``x_min``, ``x_max``, ``y_min``, ``y_max``,
+            ``platform_num``.
+        """
+        train_rects: dict[str, dict] = {}
+        if not self.geometry or "levels" not in self.geometry:
+            return train_rects
+
+        geom_m1 = self.geometry["levels"].get("level_-1", {})
+        walkable = geom_m1.get("walkable_areas", {})
+        train_entrances = geom_m1.get("train_entrance_areas", {})
+
+        TRAIN_WIDTH = 2.8   # metres — approximate tube car width
+        GAP = 0.3           # metres gap between platform edge and train body
+
+        for exit_name, entrance_coords in train_entrances.items():
+            platform_num = exit_name.rsplit("_", 1)[-1]
+            platform_name = f"platform_{platform_num}"
+            platform_coords = walkable.get(platform_name)
+            if not platform_coords or len(platform_coords) < 3:
+                logger.debug(f"No walkable area for {platform_name}, skipping train rect")
+                continue
+
+            # Platform bounding box
+            pxs = [c[0] for c in platform_coords]
+            pys = [c[1] for c in platform_coords]
+            px_min, px_max = min(pxs), max(pxs)
+            py_min, py_max = min(pys), max(pys)
+            pcx = (px_min + px_max) / 2
+            pcy = (py_min + py_max) / 2
+
+            # Entrance centroid (used only if no explicit track_side is given)
+            exs = [c[0] for c in entrance_coords]
+            eys = [c[1] for c in entrance_coords]
+            ecx = sum(exs) / len(exs)
+            ecy = sum(eys) / len(eys)
+
+            p_width = px_max - px_min
+            p_height = py_max - py_min
+
+            # Use explicit track_side from XML when available; fall back to a
+            # geometric heuristic otherwise so new stations work without the
+            # attribute (assuming entrance marker is on the track-facing face).
+            track_sides = geom_m1.get("train_track_sides", {})
+            side = track_sides.get(exit_name)
+
+            if side is None:
+                # Heuristic: entrance centroid relative to platform centre.
+                # entrance centroid >= platform centre (x) → entrance is on
+                # the right-hand face → track is on the LEFT, and vice versa.
+                if p_height >= p_width:
+                    side = "left" if ecx >= pcx else "right"
+                else:
+                    side = "below" if ecy > pcy else "above"
+
+            if side == "left":
+                tx_min = px_min - GAP - TRAIN_WIDTH
+                tx_max = px_min - GAP
+                ty_min, ty_max = py_min, py_max
+            elif side == "right":
+                tx_min = px_max + GAP
+                tx_max = px_max + GAP + TRAIN_WIDTH
+                ty_min, ty_max = py_min, py_max
+            elif side == "above":
+                tx_min, tx_max = px_min, px_max
+                ty_min = py_max + GAP
+                ty_max = py_max + GAP + TRAIN_WIDTH
+            else:  # "below"
+                tx_min, tx_max = px_min, px_max
+                ty_min = py_min - GAP - TRAIN_WIDTH
+                ty_max = py_min - GAP
+
+            train_rects[exit_name] = {
+                "x_min": tx_min, "x_max": tx_max,
+                "y_min": ty_min, "y_max": ty_max,
+                "platform_num": platform_num,
+            }
+            logger.debug(
+                f"Train rect for {exit_name}: x=[{tx_min:.2f},{tx_max:.2f}] "
+                f"y=[{ty_min:.2f},{ty_max:.2f}]"
+            )
+
+        return train_rects
+
     def _draw_frame(self, axes_dict, frame_data, title_text):
         """
         Draw a single frame of the video.
@@ -523,35 +628,82 @@ class VideoGenerator:
 
         self._boarded_count = len(self._boarded_agents)
 
+        # Draw train rectangles on the platform panel (level -1) for every
+        # train that is currently present in the station.
+        active_exits = set(frame_data.get("active_train_exits", []))
+        if "-1" in axes_dict and self.train_rects:
+            ax_plat = axes_dict["-1"]
+            for exit_name, rect in self.train_rects.items():
+                if exit_name not in active_exits:
+                    continue
+                # Tube-carriage colour: dark silver body, yellow stripe
+                train_patch = MPLPolygon(
+                    [
+                        (rect["x_min"], rect["y_min"]),
+                        (rect["x_max"], rect["y_min"]),
+                        (rect["x_max"], rect["y_max"]),
+                        (rect["x_min"], rect["y_max"]),
+                    ],
+                    closed=True,
+                    facecolor="#B0B8C1",
+                    edgecolor="#4A4A4A",
+                    linewidth=1.5,
+                    alpha=0.92,
+                    zorder=7,
+                    label="_agent",
+                )
+                ax_plat.add_patch(train_patch)
+                # Yellow door-stripe along the platform-facing edge
+                p_num = rect["platform_num"]
+                x_mid = (rect["x_min"] + rect["x_max"]) / 2
+                y_mid = (rect["y_min"] + rect["y_max"]) / 2
+                train_width = rect["x_max"] - rect["x_min"]
+                train_height = rect["y_max"] - rect["y_min"]
+                label_txt = f"TRAIN P{p_num}"
+                # Place the label at the centre of the train
+                ax_plat.text(
+                    x_mid, y_mid, label_txt,
+                    ha="center", va="center",
+                    fontsize=7, color="#222222", fontweight="bold",
+                    rotation=0 if train_width > train_height else 90,
+                    zorder=8, clip_on=True,
+                    label="_agent",
+                )
+
         # Compact train/boarding status badge on the platform panel (level -1).
+        # Only shown when the train is present (rectangle covers that) or after departure.
         if "-1" in axes_dict:
             ax_plat = axes_dict["-1"]
-            active_exits = set(frame_data.get("active_train_exits", []))
             boarded = self._boarded_count
             if active_exits:
                 platforms = " ".join(
                     f"P{n.rsplit('_',1)[-1]}" for n in sorted(active_exits)
                 )
-                status_str = f"\U0001f682 Boarding: {platforms}   Boarded: {boarded}"
+                status_str = f"[TRAIN] Boarding: {platforms}   Boarded: {boarded}"
                 status_color = "#006600"
                 face_color = "#CCFFCC"
+                ax_plat.text(
+                    0.02, 0.97,
+                    status_str,
+                    transform=ax_plat.transAxes,
+                    ha="left", va="top",
+                    fontsize=8, color=status_color,
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor=face_color, alpha=0.85),
+                    label="_agent",
+                )
             elif boarded > 0:
-                status_str = f"\U0001f6ab Train departed   Boarded: {boarded}"
+                status_str = f"Train departed   Boarded: {boarded}"
                 status_color = "#555555"
                 face_color = "#F0F0F0"
-            else:
-                status_str = "Train not yet arrived"
-                status_color = "#555555"
-                face_color = "#F8F8F8"
-            ax_plat.text(
-                0.02, 0.97,
-                status_str,
-                transform=ax_plat.transAxes,
-                ha="left", va="top",
-                fontsize=8, color=status_color,
-                bbox=dict(boxstyle="round,pad=0.25", facecolor=face_color, alpha=0.85),
-                label="_agent",
-            )
+                ax_plat.text(
+                    0.02, 0.97,
+                    status_str,
+                    transform=ax_plat.transAxes,
+                    ha="left", va="top",
+                    fontsize=8, color=status_color,
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor=face_color, alpha=0.85),
+                    label="_agent",
+                )
 
     def generate(self, output_path: Path, dpi: int = 100) -> bool:
         """

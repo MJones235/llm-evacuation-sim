@@ -894,15 +894,13 @@ class MultiLevelJuPedSimulation:
 
         current_positions = level_sim.agent_tracker.get_all_positions()
         for concordia_id, pos in current_positions.items():
-            # Board agents on this platform unless they are actively routing
-            # away via an escalator or street exit.  Agents who are waiting
-            # (no destination) or who have already committed to a train exit
-            # are boarded automatically — this mirrors real-world behaviour
-            # where a train on your platform boards you if you don't leave.
+            # Only board agents who have explicitly committed to this exact
+            # train exit.  Agents with no destination (waiting) or heading to
+            # an escalator/street exit are left alone — they haven't chosen
+            # to board and should not be silently removed.
             if agent_destinations is not None:
                 dest = agent_destinations.get(concordia_id, "")
-                # Skip agents heading to a non-train destination (escalator/street).
-                if dest and not dest.startswith("train_platform_"):
+                if dest != exit_name:
                     continue
             if not platform_poly.contains(Point(pos)):
                 continue
