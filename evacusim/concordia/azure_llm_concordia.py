@@ -54,6 +54,8 @@ class AzureLLMConcordia:
         max_retries: int = 3,
         max_completion_tokens: int = 8000,
         timeout: float = 90.0,
+        reasoning_effort: str | None = None,
+        response_format: str | None = "json_object",
     ):
         """
         Initialize Azure OpenAI client for Concordia.
@@ -67,6 +69,14 @@ class AzureLLMConcordia:
             max_retries: Maximum number of retry attempts on failure
             max_completion_tokens: Maximum tokens in completion
             timeout: Request timeout in seconds (default: 90s)
+            reasoning_effort: For reasoning models (o-series, gpt-5-nano): "low",
+                "medium", "high", or None to use the model default.  "low" is
+                recommended to minimise latency on simple action-selection tasks.
+            response_format: When "json_object" the model is constrained to emit
+                valid JSON (the "customs" structured-output path for gpt-5-nano).
+                This eliminates the prefix-stripping hack in _parse_json_response
+                and may slightly reduce reasoning overhead because the output
+                schema is pre-declared.  Set to None to disable.
         """
         self.endpoint = endpoint.rstrip("/")
         self.api_key = api_key
@@ -75,6 +85,8 @@ class AzureLLMConcordia:
         self.max_retries = max_retries
         self.max_completion_tokens = max_completion_tokens
         self.timeout = timeout
+        self.reasoning_effort = reasoning_effort
+        self.response_format = response_format
 
         # Token usage tracking
         self.total_prompt_tokens = 0
@@ -118,17 +130,14 @@ class AzureLLMConcordia:
         Raises:
             Exception: If all retry attempts fail
         """
-        temp = temperature if temperature is not None else self.temperature
-        if temp != 1:
-            logger.warning(
-                "Azure model only supports default temperature=1. Overriding temp=%s -> 1",
-                temp,
-            )
-            temp = 1
+        # gpt-5-nano ignores temperature (always uses 1); don't warn on every call.
+        temp = 1
         if max_tokens is None:
             max_tokens = self.max_completion_tokens
         else:
-            max_tokens = max(max_tokens, self.max_completion_tokens)
+            # Use the caller's requested limit when it is lower than the default;
+            # previously this was max() which silently ignored smaller requests.
+            max_tokens = min(max_tokens, self.max_completion_tokens)
 
         # Build the API URL
         url = f"{self.endpoint}/chat/completions?api-version={self.api_version}"
@@ -162,9 +171,19 @@ class AzureLLMConcordia:
 
                 payload = {
                     "messages": messages,
-                    "max_completion_tokens": max_tokens,  # Use max_completion_tokens for newer models
+                    "max_completion_tokens": max_tokens,
                     "temperature": temp,
                 }
+                # Suppress excessive internal chain-of-thought on reasoning models
+                # (o-series, gpt-5-nano).  "low" cuts latency 5-10× with no
+                # meaningful quality loss for simple action-selection tasks.
+                if self.reasoning_effort is not None:
+                    payload["reasoning_effort"] = self.reasoning_effort
+                # Structured output path ("customs" tool equivalent for JSON).
+                # Constrains the model to emit valid JSON, eliminating prefix
+                # text and reducing parse failures.
+                if self.response_format is not None:
+                    payload["response_format"] = {"type": self.response_format}
 
                 response = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
 
@@ -308,6 +327,13 @@ class AzureLLMConcordia:
                 "max_completion_tokens": max_completion_tokens,
                 "usage": usage,
             }
+            # latency_checkpoint is returned by gpt-5-nano and gives per-call
+            # timing breakdowns (ttft, ttlt, pre_inference, etc.).  It is nested
+            # inside usage by the API but promoted to the top level here for
+            # easier analysis.
+            latency = usage.get("latency_checkpoint")
+            if latency:
+                payload["latency_checkpoint"] = latency
             with log_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(payload) + "\n")
         except Exception as e:

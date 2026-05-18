@@ -28,6 +28,7 @@ class SimulationRunnerFactory:
         embedder,
         decisions_file: Path,
         config: dict,
+        pace_to_realtime: bool = False,
     ) -> HybridSimulationRunner:
         """
         Create and configure a HybridSimulationRunner.
@@ -76,6 +77,7 @@ class SimulationRunnerFactory:
                 enable_video=enable_video,
                 monitoring_config=monitoring_config,
                 systems_config=systems_config,
+                pace_to_realtime=pace_to_realtime,
             )
             logger.info("HybridSimulationRunner initialized")
         except Exception as e:

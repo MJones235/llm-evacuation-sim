@@ -117,6 +117,12 @@ class DecisionProcessor:
         self._llm_semaphore: asyncio.Semaphore | None = None
         # Configurable concurrency cap — alter before running if needed.
         self._llm_semaphore_limit: int = 20
+        # Per-agent wall-clock timeout (seconds).  If an agent's full decision
+        # pipeline (including the LLM call) exceeds this limit the task is
+        # cancelled and a warning is logged.  The agent keeps their existing
+        # JuPedSim waypoint so the simulation is not blocked.
+        # Set to None to disable (matches old behaviour).
+        self._per_agent_timeout_secs: float | None = 30.0
 
         # Initialize prompt cache for intelligent LLM call reduction
         self.prompt_cache = PromptCache(enable_detailed_logging=True)
@@ -530,9 +536,27 @@ class DecisionProcessor:
         else:
             self._group_followers = set()
 
-        # Process all agents concurrently
-        with self.perf_timer.measure("parallel_agent_processing"):
-            await asyncio.gather(*tasks, return_exceptions=True)
+        # Process all agents concurrently, with an optional per-agent timeout
+        # so that one slow or retrying LLM call cannot stall the whole cycle.
+        if self._per_agent_timeout_secs is not None:
+            timeout_secs = self._per_agent_timeout_secs
+
+            async def _guarded(coro, aid: str):
+                try:
+                    async with asyncio.timeout(timeout_secs):
+                        await coro
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"{aid}: decision timed out after {timeout_secs:.0f}s — "
+                        "keeping existing waypoint"
+                    )
+
+            guarded_tasks = [_guarded(task, aid) for task, aid in zip(tasks, agents_to_process)]
+            with self.perf_timer.measure("parallel_agent_processing"):
+                await asyncio.gather(*guarded_tasks, return_exceptions=True)
+        else:
+            with self.perf_timer.measure("parallel_agent_processing"):
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         # No need to check for abandonment - it's handled naturally in action execution
         # Agents who choose move/wait over help automatically end relationships

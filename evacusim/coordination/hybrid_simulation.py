@@ -74,6 +74,7 @@ class HybridSimulationRunner:
         enable_video: bool = False,
         monitoring_config: dict[str, Any] | None = None,
         systems_config: dict[str, Any] | None = None,
+        pace_to_realtime: bool = False,
     ):
         """
         Initialize the hybrid simulation runner.
@@ -95,6 +96,10 @@ class HybridSimulationRunner:
                 Each key is a system name (e.g. ``"staff"``); the value is the
                 system configuration dict.  Systems with ``enabled: true`` are
                 initialised and stepped each simulation cycle.
+            pace_to_realtime: When True each simulation step sleeps until
+                ``jps_sim.dt`` seconds have elapsed, matching wall-clock to
+                simulation time (useful for live viewers).  When False the
+                simulation runs as fast as possible.  Defaults to False.
         """
         self.jps_sim = jupedsim_simulation
         self.station_layout = station_layout
@@ -104,6 +109,7 @@ class HybridSimulationRunner:
         self.max_steps = max_steps
         self.output_file = output_file
         self.enable_video = enable_video
+        self.pace_to_realtime = pace_to_realtime
 
         # Roles map: agent_id → human-readable role label.
         # Populated during setup (e.g. by StaffSystem) before the simulation loop.
@@ -661,8 +667,10 @@ class HybridSimulationRunner:
                     # Update progress bar
                     progress.update(task, advance=1)
 
-                    # Pace simulation to real time for smooth visualization
-                    if self.jps_sim.dt > 0:
+                    # Pace simulation to real time for smooth visualization.
+                    # Only active when a live viewer is running; disabled by
+                    # default so headless runs finish as fast as possible.
+                    if self.pace_to_realtime and self.jps_sim.dt > 0:
                         elapsed = time.perf_counter() - step_start
                         sleep_time = self.jps_sim.dt - elapsed
                         if sleep_time > 0:
