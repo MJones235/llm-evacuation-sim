@@ -278,7 +278,7 @@ class ObservationGenerator:
         #    the visible list — they appear instead as blocked visual observations
         #    once the agent is within discovery range.
         visible_exits = self.spatial_analyzer.get_visible_exits(
-            position, agent_level=agent_level, jps_sim=self.jps_sim,
+            position, agent_level=agent_level, agent_zone=zone, jps_sim=self.jps_sim,
             inactive_exits=inactive_exits,
             blocked_exits=blocked_exits if blocked_exits else None,
         )

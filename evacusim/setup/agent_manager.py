@@ -18,6 +18,8 @@ from evacusim.jps.simulation_interface import PedestrianSimulation
 from evacusim.setup.agent_factory import AgentFactory
 from evacusim.setup.spawn_manager import SpawnManager
 
+import math
+
 logger = get_logger(__name__)
 
 
@@ -51,6 +53,29 @@ class AgentManager:
 
         # Generate spawn positions
         spawn_positions = SpawnManager.generate_spawn_positions(jps_sim, num_agents)
+
+        # Remove any candidate position that falls too close to a pre-spawned
+        # director agent (fire marshal, RCI staff, etc.).  The position
+        # generation algorithm (jps.distribute_by_number) knows nothing about
+        # existing simulation agents, so without this filter JuPedSim will raise
+        # a RuntimeError when we try to add a passenger on top of a fire marshal.
+        existing_positions = list(jps_sim.get_all_agent_positions().values())
+        if existing_positions:
+            _MIN_SEP = 0.6  # slightly above JuPedSim's physical minimum (~0.24 m)
+            before = len(spawn_positions)
+            spawn_positions = [
+                pos for pos in spawn_positions
+                if all(
+                    math.hypot(pos[0] - ex[0], pos[1] - ex[1]) >= _MIN_SEP
+                    for ex in existing_positions
+                )
+            ]
+            removed = before - len(spawn_positions)
+            if removed:
+                logger.info(
+                    f"Filtered {removed} spawn position(s) too close to "
+                    f"pre-placed director agents (min separation {_MIN_SEP} m)."
+                )
 
         # Warn and cap if fewer positions were generated than requested
         # (e.g. some rejected because they fell inside escalator corridors).

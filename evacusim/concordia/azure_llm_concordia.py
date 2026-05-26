@@ -135,9 +135,11 @@ class AzureLLMConcordia:
         if max_tokens is None:
             max_tokens = self.max_completion_tokens
         else:
-            # Use the caller's requested limit when it is lower than the default;
-            # previously this was max() which silently ignored smaller requests.
-            max_tokens = min(max_tokens, self.max_completion_tokens)
+            # Concordia components hardcode max_tokens=2200 which is insufficient
+            # for reasoning models (gpt-5-nano uses chain-of-thought tokens before
+            # producing output, exhausting the budget before any JSON appears).
+            # Always use our configured budget; never let an upstream default starve it.
+            max_tokens = max(max_tokens, self.max_completion_tokens)
 
         # Build the API URL
         url = f"{self.endpoint}/chat/completions?api-version={self.api_version}"

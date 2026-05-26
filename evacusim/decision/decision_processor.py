@@ -70,6 +70,9 @@ class DecisionProcessor:
         agent_configs: list[dict] | None = None,
         enable_group_decisions: bool = False,
         group_decision_min_size: int = 3,
+        llm_semaphore_limit: int = 10,
+        per_agent_timeout_secs: float | None = 30.0,
+        wait_nudge_enabled: bool = False,
     ):
         """
         Initialize decision processor.
@@ -116,13 +119,16 @@ class DecisionProcessor:
         self._state_lock: asyncio.Lock | None = None
         self._llm_semaphore: asyncio.Semaphore | None = None
         # Configurable concurrency cap — alter before running if needed.
-        self._llm_semaphore_limit: int = 20
+        self._llm_semaphore_limit: int = max(1, int(llm_semaphore_limit))
         # Per-agent wall-clock timeout (seconds).  If an agent's full decision
         # pipeline (including the LLM call) exceeds this limit the task is
         # cancelled and a warning is logged.  The agent keeps their existing
         # JuPedSim waypoint so the simulation is not blocked.
         # Set to None to disable (matches old behaviour).
-        self._per_agent_timeout_secs: float | None = 30.0
+        self._per_agent_timeout_secs: float | None = per_agent_timeout_secs
+
+        # Optional wait-duration nudge in prompt context.
+        self._wait_nudge_enabled: bool = wait_nudge_enabled
 
         # Initialize prompt cache for intelligent LLM call reduction
         self.prompt_cache = PromptCache(enable_detailed_logging=True)
@@ -536,27 +542,11 @@ class DecisionProcessor:
         else:
             self._group_followers = set()
 
-        # Process all agents concurrently, with an optional per-agent timeout
-        # so that one slow or retrying LLM call cannot stall the whole cycle.
-        if self._per_agent_timeout_secs is not None:
-            timeout_secs = self._per_agent_timeout_secs
-
-            async def _guarded(coro, aid: str):
-                try:
-                    async with asyncio.timeout(timeout_secs):
-                        await coro
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        f"{aid}: decision timed out after {timeout_secs:.0f}s — "
-                        "keeping existing waypoint"
-                    )
-
-            guarded_tasks = [_guarded(task, aid) for task, aid in zip(tasks, agents_to_process)]
-            with self.perf_timer.measure("parallel_agent_processing"):
-                await asyncio.gather(*guarded_tasks, return_exceptions=True)
-        else:
-            with self.perf_timer.measure("parallel_agent_processing"):
-                await asyncio.gather(*tasks, return_exceptions=True)
+        # Process all agents concurrently. Per-agent timeout is applied around
+        # the LLM call itself in _process_single_agent, not while waiting for
+        # semaphore queue slots.
+        with self.perf_timer.measure("parallel_agent_processing"):
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         # No need to check for abandonment - it's handled naturally in action execution
         # Agents who choose move/wait over help automatically end relationships
@@ -617,14 +607,14 @@ class DecisionProcessor:
             # fresh prompt hash each minute, busting the cache and forcing the LLM
             # to reconsider rather than repeating the same wait decision forever.
             wait_start = self._agent_wait_since.get(agent_id)
-            if wait_start is not None:
+            if self._wait_nudge_enabled and wait_start is not None:
                 wait_secs = current_sim_time - wait_start
                 if wait_secs >= 60:
                     wait_mins = int(wait_secs / 60)
                     goal_lines.append(
                         f"\u26a0\ufe0f You have been stationary for {wait_mins} minute(s) "
                         f"while the evacuation alarm is active. "
-                        f"Staying put any longer is dangerous \u2014 you must decide to move now."
+                        f"Reassess whether to continue waiting or move."
                     )
 
             # Get observation for this agent and prepend goal context
@@ -762,12 +752,23 @@ class DecisionProcessor:
                     agent.observe(observation)
 
                 # Acquire semaphore before the LLM call to prevent burst overload.
-                # At most 20 concurrent requests are sent to Azure at any one time.
                 async with self._llm_semaphore:
-                    with self.perf_timer.measure("agent_act_llm", is_parallel=True):
-                        llm_current_agent_id.set(agent_id)
-                        llm_current_sim_time.set(current_sim_time)
-                        action = await asyncio.to_thread(agent.act, action_spec)
+                    try:
+                        with self.perf_timer.measure("agent_act_llm", is_parallel=True):
+                            llm_current_agent_id.set(agent_id)
+                            llm_current_sim_time.set(current_sim_time)
+                            if self._per_agent_timeout_secs is not None:
+                                async with asyncio.timeout(self._per_agent_timeout_secs):
+                                    action = await asyncio.to_thread(agent.act, action_spec)
+                            else:
+                                action = await asyncio.to_thread(agent.act, action_spec)
+                    except asyncio.TimeoutError:
+                        timeout_secs = self._per_agent_timeout_secs
+                        logger.warning(
+                            f"{agent_id}: decision timed out after {timeout_secs:.0f}s — "
+                            "keeping existing waypoint"
+                        )
+                        return
 
                 # Cache the decision for future reuse
                 self.prompt_cache.cache_decision(agent_id, action)

@@ -48,6 +48,10 @@ class EventManager:
         # _train_departure_times: exit_name -> sim time when the train departs (doors close).
         self.active_train_exits: set[str] = set()
         self._train_departure_times: dict[str, float] = {}
+        # Optional per-exit departure announcement config copied from train_arrival events.
+        self._train_departure_messages: dict[str, str] = {}
+        self._train_departure_sender_labels: dict[str, str] = {}
+        self._train_departure_announce: dict[str, bool] = {}
 
     def check_and_trigger_events(
         self,
@@ -84,6 +88,9 @@ class EventManager:
               type: train_arrival
               platforms: [1, 2, 3, 4]         # platform numbers with waiting trains
               message: "A train is waiting at all platforms."
+                            departure_announce: true         # optional, default true
+                            departure_message: "..."        # optional custom departure text
+                            departure_sender_label: "PA"    # optional custom departure sender
 
         Exit blocking event (marks exits as blocked in observations + routing)::
 
@@ -225,6 +232,15 @@ class EventManager:
             exit_name = f"train_platform_{platform_id}"
             self.active_train_exits.add(exit_name)
             self._train_departure_times[exit_name] = departure_time
+            self._train_departure_messages[exit_name] = event.get(
+                "departure_message",
+                "The train doors have closed and the train has departed. "
+                "If you are still on the platform, please use the escalators to leave.",
+            )
+            self._train_departure_sender_labels[exit_name] = event.get(
+                "departure_sender_label", event.get("sender_label", "PA system")
+            )
+            self._train_departure_announce[exit_name] = bool(event.get("departure_announce", True))
             logger.info(
                 f"Train arrived at platform {platform_id} — exit '{exit_name}' activated; "
                 f"departs at t={departure_time:.0f}s (dwell={dwell_seconds:.0f}s)."
@@ -282,25 +298,29 @@ class EventManager:
                 f"— exit '{exit_name}' deactivated."
             )
 
-        # Broadcast a departure announcement so agents know the train has gone.
-        departure_msg = (
-            "The train doors have closed and the train has departed. "
-            "If you are still on the platform, please use the escalators to leave."
-        )
-        if message_system is not None and agents:
-            message_system.deliver_pa(
-                sender_label="PA system",
-                message_text=departure_msg,
-                current_sim_time=current_sim_time,
-                all_agent_ids=list(agents.keys()),
-                exited_agents=exited_agents or set(),
-                messages_by_zone=None,
-                zone_id_for_agent_fn=zone_id_for_agent_fn,
+            # Broadcast a departure announcement only when enabled by the arrival event.
+            should_announce = self._train_departure_announce.pop(exit_name, True)
+            departure_msg = self._train_departure_messages.pop(
+                exit_name,
+                "The train doors have closed and the train has departed. "
+                "If you are still on the platform, please use the escalators to leave.",
             )
-        elif agents:
-            self.broadcast_event(departure_msg, current_sim_time, agents)
+            sender_label = self._train_departure_sender_labels.pop(exit_name, "PA system")
+            if should_announce and departure_msg:
+                if message_system is not None and agents:
+                    message_system.deliver_pa(
+                        sender_label=sender_label,
+                        message_text=departure_msg,
+                        current_sim_time=current_sim_time,
+                        all_agent_ids=list(agents.keys()),
+                        exited_agents=exited_agents or set(),
+                        messages_by_zone=None,
+                        zone_id_for_agent_fn=zone_id_for_agent_fn,
+                    )
+                elif agents:
+                    self.broadcast_event(departure_msg, current_sim_time, agents)
 
-        self.event_history.append({"time": current_sim_time, "message": departure_msg})
+                self.event_history.append({"time": current_sim_time, "message": departure_msg})
         return True
 
     def block_exit(self, exit_name: str) -> None:

@@ -29,6 +29,8 @@ class SimulationRunnerFactory:
         decisions_file: Path,
         config: dict,
         pace_to_realtime: bool = False,
+        pre_built_systems: list | None = None,
+        pre_built_agent_roles: dict | None = None,
     ) -> HybridSimulationRunner:
         """
         Create and configure a HybridSimulationRunner.
@@ -59,6 +61,9 @@ class SimulationRunnerFactory:
         # Monitoring settings
         monitoring_config = config.get("monitoring", {})
 
+        # Performance settings
+        performance_config = config.get("performance", {})
+
         # Rule-based director systems (staff, firefighters, etc.)
         systems_config = config.get("systems", {})
 
@@ -76,8 +81,11 @@ class SimulationRunnerFactory:
                 output_file=decisions_file,
                 enable_video=enable_video,
                 monitoring_config=monitoring_config,
+                performance_config=performance_config,
                 systems_config=systems_config,
                 pace_to_realtime=pace_to_realtime,
+                pre_built_systems=pre_built_systems,
+                pre_built_agent_roles=pre_built_agent_roles,
             )
             logger.info("HybridSimulationRunner initialized")
         except Exception as e:

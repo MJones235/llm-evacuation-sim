@@ -61,6 +61,33 @@ class HybridSimulationRunner:
     5. Simulation state is converted to observations for agents
     """
 
+    @staticmethod
+    def build_systems_for_pre_spawn(
+        systems_config: dict[str, Any],
+        jps_sim: Any,
+        station_layout: dict[str, Any],
+    ) -> tuple[list, dict]:
+        """
+        Create and set up director systems independently of runner init so that
+        director agents occupy JuPedSim positions *before* random passengers are
+        spawned.  This prevents spawn-position collisions where a passenger lands
+        on top of a fire-marshal spawn point.
+
+        Returns:
+            (systems_list, agent_roles_dict) — pass these as ``pre_built_systems``
+            and ``pre_built_agent_roles`` to ``HybridSimulationRunner.__init__()``.
+        """
+        systems: list = []
+        agent_roles: dict = {}
+        for name, cfg in systems_config.items():
+            if not cfg.get("enabled", False):
+                continue
+            system = DirectorSystem(name, cfg)
+            system.setup(jps_sim, station_layout, agent_roles)
+            systems.append(system)
+            logger.info(f"[pre-spawn] System '{name}' set up ({len(system.agent_ids)} director agent(s))")
+        return systems, agent_roles
+
     def __init__(
         self,
         jupedsim_simulation: PedestrianSimulation,
@@ -73,8 +100,11 @@ class HybridSimulationRunner:
         output_file: Path | None = None,
         enable_video: bool = False,
         monitoring_config: dict[str, Any] | None = None,
+        performance_config: dict[str, Any] | None = None,
         systems_config: dict[str, Any] | None = None,
         pace_to_realtime: bool = False,
+        pre_built_systems: list | None = None,
+        pre_built_agent_roles: dict | None = None,
     ):
         """
         Initialize the hybrid simulation runner.
@@ -92,6 +122,9 @@ class HybridSimulationRunner:
             monitoring_config: Optional monitoring configuration dict with keys
                 ``interval_seconds`` and ``zones`` (list of zone spec dicts).
                 If ``None``, PopulationMonitor defaults are used.
+            performance_config: Optional performance tuning config dict.
+                Supported keys include ``max_parallel_agents``,
+                ``decision_timeout_seconds``, and ``wait_nudge_enabled``.
             systems_config: Optional ``systems`` block from the scenario config.
                 Each key is a system name (e.g. ``"staff"``); the value is the
                 system configuration dict.  Systems with ``enabled: true`` are
@@ -110,6 +143,7 @@ class HybridSimulationRunner:
         self.output_file = output_file
         self.enable_video = enable_video
         self.pace_to_realtime = pace_to_realtime
+        self.performance_config = performance_config or {}
 
         # Roles map: agent_id → human-readable role label.
         # Populated during setup (e.g. by StaffSystem) before the simulation loop.
@@ -119,8 +153,15 @@ class HybridSimulationRunner:
         # Initialise and setup any configured rule-based systems (e.g. staff)
         # BEFORE Concordia agents are built so that system agents are already in
         # JuPedSim and registered in agent_roles when the first observations fire.
+        # When pre_built_systems is provided the systems were already set up (and
+        # their director agents already added to JuPedSim) before random passengers
+        # were spawned, preventing spawn-position collisions.
         self._staff_systems: list[StaffSystem] = []
-        self._init_systems(systems_config or {}, jupedsim_simulation, station_layout)
+        if pre_built_systems is not None:
+            self._staff_systems = list(pre_built_systems)
+            self.agent_roles.update(pre_built_agent_roles or {})
+        else:
+            self._init_systems(systems_config or {}, jupedsim_simulation, station_layout)
 
         # Simulation state queries
         self.state_queries = SimulationStateQueries(jupedsim_simulation)
@@ -231,6 +272,9 @@ class HybridSimulationRunner:
             perf_timer=self.perf_timer,
             jps_sim=self.jps_sim,
             agent_configs=agents_config,
+            llm_semaphore_limit=int(self.performance_config.get("max_parallel_agents", 10)),
+            per_agent_timeout_secs=self.performance_config.get("decision_timeout_seconds", 30.0),
+            wait_nudge_enabled=bool(self.performance_config.get("wait_nudge_enabled", False)),
         )
 
         # Observation coordination

@@ -22,6 +22,9 @@ class CrowdAnalyzer:
     - Crowd density classification
     """
 
+    # Do not label a crowd as "mostly moving" based on just one or two people.
+    MIN_MAJORITY_MOVERS = 3
+
     @staticmethod
     def _classify_destination(target_exit: str | None) -> str | None:
         """
@@ -88,6 +91,12 @@ class CrowdAnalyzer:
 
         # Classify where moving agents are actually heading
         moving_agents = [a for a in independent_agents if a.get("is_moving", True)]
+        moving_count = len(moving_agents)
+        total_count = len(independent_agents)
+        moving_pct = (moving_count / total_count * 100) if total_count else 0.0
+        majority_moving = (
+            moving_pct > 70 and moving_count >= self.MIN_MAJORITY_MOVERS
+        )
         waiting_count = len(independent_agents) - len(moving_agents)
 
         dest_counts: dict[str, int] = {}
@@ -98,7 +107,7 @@ class CrowdAnalyzer:
 
         if dest_counts:
             top_dest = max(dest_counts, key=dest_counts.__getitem__)
-            if len(moving_agents) > waiting_count:
+            if majority_moving:
                 if len(dest_counts) == 1:
                     parts.append(f"Most people nearby are heading toward {top_dest}.")
                 else:
@@ -106,7 +115,7 @@ class CrowdAnalyzer:
                     parts.append(f"People nearby are heading toward {' and '.join(dest_list[:2])}.")
             else:
                 parts.append(f"Some people are heading toward {top_dest}; others are waiting.")
-        elif moving_agents and len(moving_agents) > waiting_count:
+        elif moving_agents and majority_moving:
             parts.append("Most people nearby are moving.")
         elif independent_agents:
             parts.append("Many people are waiting or stationary.")
@@ -199,6 +208,9 @@ class CrowdAnalyzer:
 
         moving_count = sum(1 for a in nearby_agents if a.get("is_moving", True))
         moving_pct = (moving_count / len(nearby_agents)) * 100
+        majority_moving = (
+            moving_pct > 70 and moving_count >= CrowdAnalyzer.MIN_MAJORITY_MOVERS
+        )
 
         dest_counts: dict[str, int] = {}
         for agent in nearby_agents:
@@ -207,7 +219,7 @@ class CrowdAnalyzer:
                 if dest:
                     dest_counts[dest] = dest_counts.get(dest, 0) + 1
 
-        if moving_pct > 70:
+        if majority_moving:
             if dest_counts:
                 top_dest = max(dest_counts, key=dest_counts.__getitem__)
                 if len(dest_counts) == 1:
