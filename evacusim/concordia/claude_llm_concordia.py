@@ -114,12 +114,10 @@ class ClaudeLLMConcordia:
         Extra Concordia kwargs (top_p, top_k, seed) are accepted and ignored for
         cross-provider compatibility.
         """
+        # Respect a caller-provided budget (e.g. sample_choice passes a small one);
+        # only fall back to the configured budget when none is given.
         if max_tokens is None:
             max_tokens = self.max_completion_tokens
-        else:
-            # Concordia components hardcode small max_tokens; never let an upstream
-            # default starve the budget for a full JSON decision response.
-            max_tokens = max(max_tokens, self.max_completion_tokens)
 
         temp = self.temperature if temperature is None else max(0.0, min(1.0, temperature))
         req_timeout = self.timeout if timeout is None else timeout

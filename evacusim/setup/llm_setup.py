@@ -44,7 +44,7 @@ class LLMSetup:
             import sentence_transformers
 
             # Pick the provider. Explicit LLM_PROVIDER wins; otherwise infer from
-            # whichever credentials are present (Claude preferred when both exist).
+            # whichever credentials are present (precedence: blablador, claude, azure).
             model = LLMSetup._build_provider(llm_config)
 
             # Setup embedder (force CPU to avoid GPU compatibility issues).
@@ -61,7 +61,10 @@ class LLMSetup:
             return model, embedder
 
         except ImportError as e:
-            logger.error(f"Failed to import LLM provider: {e}")
+            logger.error(
+                f"Failed to import the LLM provider adapter or the embedder "
+                f"(sentence_transformers): {e}"
+            )
             raise
 
     @staticmethod
@@ -112,8 +115,9 @@ class LLMSetup:
             if not azure_endpoint or not azure_key:
                 raise ValueError(
                     "No LLM configured. Set Azure credentials in .env "
-                    "(AZURE_LLM_ENDPOINT, AZURE_LLM_API_KEY) or set ANTHROPIC_API_KEY "
-                    "to use Claude."
+                    "(AZURE_LLM_ENDPOINT, AZURE_LLM_API_KEY), or set BLABLADOR_API_KEY "
+                    "(free) or ANTHROPIC_API_KEY to use another provider. You can also "
+                    "select one explicitly with LLM_PROVIDER=blablador|claude|azure."
                 )
             azure_model = os.getenv("AZURE_LLM_MODEL")
             logger.info(f"Using Azure LLM: {azure_model or 'serverless'}")
