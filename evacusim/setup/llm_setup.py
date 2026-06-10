@@ -38,29 +38,67 @@ class LLMSetup:
         # Load .env file
         load_dotenv()
 
-        azure_endpoint = os.getenv("AZURE_LLM_ENDPOINT")
-        azure_key = os.getenv("AZURE_LLM_API_KEY")
-        azure_model = os.getenv("AZURE_LLM_MODEL")
-
-        if not azure_endpoint or not azure_key:
-            raise ValueError(
-                "No LLM configured. Set Azure credentials in .env "
-                "(AZURE_LLM_ENDPOINT, AZURE_LLM_API_KEY)"
-            )
-
-        logger.info(f"Using Azure LLM: {azure_model or 'serverless'}")
+        llm_config = config.get("llm", {})
 
         try:
             import sentence_transformers
 
-            from evacusim.concordia.azure_llm_concordia import (
-                AzureLLMConcordia,
-            )
+            # Pick the provider. Explicit LLM_PROVIDER wins; otherwise infer from
+            # whichever credentials are present (Claude preferred when both exist).
+            model = LLMSetup._build_provider(llm_config)
 
-            # Create Azure LLM client designed for Concordia
-            # Uses synchronous REST API calls to avoid async/sync conflicts
-            llm_config = config.get("llm", {})
-            model = AzureLLMConcordia(
+            # Setup embedder (force CPU to avoid GPU compatibility issues).
+            # The embedder is local and provider-independent.
+            embedder_name = llm_config.get("embedder", "sentence-transformers/all-mpnet-base-v2")
+            logger.info(f"Loading embedder: {embedder_name}...")
+            st_model = sentence_transformers.SentenceTransformer(embedder_name, device="cpu")
+
+            def embedder(x):
+                return st_model.encode(x, show_progress_bar=False, device="cpu")
+
+            logger.info("Embedder loaded successfully")
+            logger.info("LLM for Concordia initialized successfully")
+            return model, embedder
+
+        except ImportError as e:
+            logger.error(f"Failed to import LLM provider: {e}")
+            raise
+
+    @staticmethod
+    def _build_provider(llm_config: dict) -> object:
+        """Construct the Concordia language model for the selected provider."""
+        provider = os.getenv("LLM_PROVIDER", "").strip().lower()
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        azure_endpoint = os.getenv("AZURE_LLM_ENDPOINT")
+        azure_key = os.getenv("AZURE_LLM_API_KEY")
+
+        if not provider:
+            provider = "claude" if anthropic_key else "azure"
+
+        if provider == "claude":
+            from evacusim.concordia.claude_llm_concordia import ClaudeLLMConcordia
+
+            model = ClaudeLLMConcordia.from_env(
+                temperature=llm_config.get("temperature", 0.7),
+                max_retries=llm_config.get("max_retries", 3),
+                max_completion_tokens=llm_config.get("max_completion_tokens", 8000),
+                timeout=llm_config.get("timeout", 90.0),
+            )
+            logger.info(f"Using Claude LLM: {model.model}")
+            return model
+
+        if provider == "azure":
+            from evacusim.concordia.azure_llm_concordia import AzureLLMConcordia
+
+            if not azure_endpoint or not azure_key:
+                raise ValueError(
+                    "No LLM configured. Set Azure credentials in .env "
+                    "(AZURE_LLM_ENDPOINT, AZURE_LLM_API_KEY) or set ANTHROPIC_API_KEY "
+                    "to use Claude."
+                )
+            azure_model = os.getenv("AZURE_LLM_MODEL")
+            logger.info(f"Using Azure LLM: {azure_model or 'serverless'}")
+            return AzureLLMConcordia(
                 endpoint=azure_endpoint,
                 api_key=azure_key,
                 model=azure_model,
@@ -72,18 +110,6 @@ class LLMSetup:
                 response_format=llm_config.get("response_format", "json_object"),
             )
 
-            # Setup embedder (force CPU to avoid GPU compatibility issues)
-            embedder_name = llm_config.get("embedder", "sentence-transformers/all-mpnet-base-v2")
-            logger.info(f"Loading embedder: {embedder_name}...")
-            st_model = sentence_transformers.SentenceTransformer(embedder_name, device="cpu")
-
-            def embedder(x):
-                return st_model.encode(x, show_progress_bar=False, device="cpu")
-
-            logger.info("Embedder loaded successfully")
-            logger.info("Azure LLM for Concordia initialized successfully")
-            return model, embedder
-
-        except ImportError as e:
-            logger.error(f"Failed to import Azure provider: {e}")
-            raise
+        raise ValueError(
+            f"Unknown LLM_PROVIDER '{provider}'. Use 'claude' or 'azure'."
+        )
