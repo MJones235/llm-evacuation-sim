@@ -68,12 +68,31 @@ class LLMSetup:
     def _build_provider(llm_config: dict) -> object:
         """Construct the Concordia language model for the selected provider."""
         provider = os.getenv("LLM_PROVIDER", "").strip().lower()
+        blablador_key = os.getenv("BLABLADOR_API_KEY")
         anthropic_key = os.getenv("ANTHROPIC_API_KEY")
         azure_endpoint = os.getenv("AZURE_LLM_ENDPOINT")
         azure_key = os.getenv("AZURE_LLM_API_KEY")
 
         if not provider:
-            provider = "claude" if anthropic_key else "azure"
+            # Prefer the free Blablador endpoint when its key is present.
+            if blablador_key:
+                provider = "blablador"
+            elif anthropic_key:
+                provider = "claude"
+            else:
+                provider = "azure"
+
+        if provider == "blablador":
+            from evacusim.concordia.blablador_llm_concordia import BlabladorLLMConcordia
+
+            model = BlabladorLLMConcordia.from_env(
+                temperature=llm_config.get("temperature", 0.7),
+                max_retries=llm_config.get("max_retries", 3),
+                max_completion_tokens=llm_config.get("max_completion_tokens", 8000),
+                timeout=llm_config.get("timeout", 90.0),
+            )
+            logger.info(f"Using Blablador LLM: {model.model}")
+            return model
 
         if provider == "claude":
             from evacusim.concordia.claude_llm_concordia import ClaudeLLMConcordia
@@ -111,5 +130,5 @@ class LLMSetup:
             )
 
         raise ValueError(
-            f"Unknown LLM_PROVIDER '{provider}'. Use 'claude' or 'azure'."
+            f"Unknown LLM_PROVIDER '{provider}'. Use 'blablador', 'claude' or 'azure'."
         )
