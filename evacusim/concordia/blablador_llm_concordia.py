@@ -67,6 +67,7 @@ class BlabladorLLMConcordia:
         max_retries: int = 3,
         max_completion_tokens: int = 8000,
         timeout: float = 90.0,
+        disable_thinking: bool = True,
     ):
         """
         Initialize the Blablador / OpenAI-compatible client for Concordia.
@@ -79,6 +80,10 @@ class BlabladorLLMConcordia:
             max_retries: Maximum retry attempts on failure.
             max_completion_tokens: Maximum tokens in completion.
             timeout: Request timeout in seconds.
+            disable_thinking: When True, append the Qwen3 ``/no_think`` switch to
+                the system message so reasoning models answer directly instead of
+                emitting (and being billed/timed-out on) a long hidden chain of
+                thought. Harmless plain text for non-Qwen models.
         """
         self.api_key = api_key
         self.model = model
@@ -87,6 +92,10 @@ class BlabladorLLMConcordia:
         self.max_retries = max_retries
         self.max_completion_tokens = max_completion_tokens
         self.timeout = timeout
+        self.disable_thinking = disable_thinking
+        self._system_message = (
+            f"{_SYSTEM_MESSAGE} /no_think" if disable_thinking else _SYSTEM_MESSAGE
+        )
 
         # Token usage tracking
         self.total_prompt_tokens = 0
@@ -115,10 +124,15 @@ class BlabladorLLMConcordia:
         Extra Concordia kwargs (top_p, top_k, seed) are accepted and ignored for
         cross-provider compatibility.
         """
-        # Respect a caller-provided budget (e.g. sample_choice passes a small one);
-        # only fall back to the configured budget when none is given.
+        # max_tokens is an upper *cap*, not a target — the model stops at
+        # finish_reason="stop" when it is done. Concordia components hardcode
+        # small caps; enforce a floor so a reasoning model (e.g. Qwen3) is never
+        # truncated mid-thought (which yields an empty, finish_reason="length"
+        # response). For Qwen3 we also disable thinking via /no_think below.
         if max_tokens is None:
             max_tokens = self.max_completion_tokens
+        else:
+            max_tokens = max(max_tokens, self.max_completion_tokens)
 
         temp = self.temperature if temperature is None else temperature
         req_timeout = self.timeout if timeout is None else timeout
@@ -138,7 +152,7 @@ class BlabladorLLMConcordia:
                     "max_tokens": max_tokens,
                     "temperature": temp,
                     "messages": [
-                        {"role": "system", "content": _SYSTEM_MESSAGE},
+                        {"role": "system", "content": self._system_message},
                         {"role": "user", "content": prompt},
                     ],
                 }
@@ -286,10 +300,20 @@ class BlabladorLLMConcordia:
             - BLABLADOR_API_KEY
             - BLABLADOR_MODEL (optional; defaults to alias-large)
             - BLABLADOR_BASE_URL (optional; defaults to the Helmholtz endpoint)
+            - BLABLADOR_DISABLE_THINKING (optional; defaults to true)
         """
         api_key = os.getenv("BLABLADOR_API_KEY")
         model = os.getenv("BLABLADOR_MODEL", DEFAULT_MODEL)
         base_url = os.getenv("BLABLADOR_BASE_URL", DEFAULT_BASE_URL)
+        disable_thinking = os.getenv("BLABLADOR_DISABLE_THINKING", "true").strip().lower() in (
+            "1", "true", "yes", "on"
+        )
         if not api_key:
             raise ValueError("Missing required environment variable: BLABLADOR_API_KEY")
-        return cls(api_key=api_key, model=model, base_url=base_url, **kwargs)
+        return cls(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            disable_thinking=disable_thinking,
+            **kwargs,
+        )

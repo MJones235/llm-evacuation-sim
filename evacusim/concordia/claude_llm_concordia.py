@@ -114,10 +114,14 @@ class ClaudeLLMConcordia:
         Extra Concordia kwargs (top_p, top_k, seed) are accepted and ignored for
         cross-provider compatibility.
         """
-        # Respect a caller-provided budget (e.g. sample_choice passes a small one);
-        # only fall back to the configured budget when none is given.
+        # max_tokens is an upper *cap*, not a target — the model stops at
+        # finish_reason="stop" when it is done. Concordia components hardcode
+        # small caps; enforce a floor so a reasoning model is never truncated
+        # mid-thought (which yields an empty, finish_reason="length" response).
         if max_tokens is None:
             max_tokens = self.max_completion_tokens
+        else:
+            max_tokens = max(max_tokens, self.max_completion_tokens)
 
         temp = self.temperature if temperature is None else max(0.0, min(1.0, temperature))
         req_timeout = self.timeout if timeout is None else timeout
