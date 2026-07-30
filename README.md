@@ -43,3 +43,14 @@ pip install git+https://github.com/your-org/evacusim.git
 
 See the [monument-evacuation](https://github.com/your-org/monument-evacuation) study repo for
 a worked example of how to use this framework for a real experiment series.
+
+## Detailed technical documentation
+
+Comprehensive implementation and design documentation is available in
+[docs/evacusim/README.md](docs/evacusim/README.md), including:
+
+- architecture and runtime lifecycle
+- package/module responsibilities
+- deep dives on escalators, speed, line-of-sight, and decision triggering
+- full function reference generated from source AST across all package files
+- design decisions, tradeoffs, and prioritized risk register
