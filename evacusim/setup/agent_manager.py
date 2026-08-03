@@ -40,6 +40,13 @@ class AgentManager:
         - Creating agent configurations
         - Adding agents to the simulation with appropriate walking speeds
 
+        Snapshot support
+        ----------------
+        Set ``agents.snapshot_load_path`` in the scenario config to skip
+        generation entirely and restore a previously saved population.
+        Set ``agents.snapshot_save_path`` to persist the generated population
+        so future runs can load it instead of regenerating.
+
         Args:
             jps_sim: Pedestrian simulation instance (implements PedestrianSimulation)
             config: Configuration dictionary
@@ -47,8 +54,29 @@ class AgentManager:
         Returns:
             List of agent configuration dictionaries
         """
-        # Determine number of agents
         agent_config = config.get("agents", {})
+        snapshot_load_path = agent_config.get("snapshot_load_path")
+        snapshot_save_path = agent_config.get("snapshot_save_path")
+
+        # ------------------------------------------------------------------
+        # Fast path: restore population from a previously saved snapshot.
+        # Skips spawn-position generation, Shapely zone inference, and random
+        # attribute sampling — only re-adds agents to the freshly constructed
+        # JuPedSim simulation instance.
+        # ------------------------------------------------------------------
+        if snapshot_load_path:
+            from evacusim.setup.population_snapshot import load_snapshot
+            agents_config = load_snapshot(snapshot_load_path)
+            AgentManager._add_agents_to_jupedsim_from_snapshot(jps_sim, agents_config)
+            logger.info(
+                f"Agent population restored from snapshot: {len(agents_config)} agents"
+            )
+            return agents_config
+
+        # ------------------------------------------------------------------
+        # Normal path: generate fresh population.
+        # ------------------------------------------------------------------
+        # Determine number of agents
         num_agents = agent_config.get("count", 1)
 
         # Generate spawn positions
@@ -111,6 +139,12 @@ class AgentManager:
         )
 
         logger.info(f"Agent population complete: {num_agents} agents ready")
+
+        # Optionally persist the generated population for future runs.
+        if snapshot_save_path:
+            from evacusim.setup.population_snapshot import save_snapshot
+            save_snapshot(agents_config, snapshot_save_path)
+
         return agents_config
 
     @staticmethod
@@ -240,16 +274,64 @@ class AgentManager:
 
             is_injured = i in injured_agents
             walking_speed = sample_walking_speed() if not is_injured else 0.5
+            # Persist walking_speed in agent_cfg so it is available in population
+            # snapshots and can be restored without re-sampling on subsequent runs.
+            agent_cfg["walking_speed"] = walking_speed
 
-            # Add agent with level_id for multi-level simulations
+            # Add agent with level_id for multi-level simulations.
+            # assign_default_destination=False: agents hold at their spawn point
+            # so the t=0 bootstrap LLM decision determines their first destination
+            # instead of having every agent walk toward the same arbitrary default exit.
             if hasattr(jps_sim, "simulations"):
                 # Multi-level simulation
                 jps_sim.add_agent(
-                    agent_id, start_pos, walking_speed=walking_speed, level_id=level_id
+                    agent_id, start_pos, walking_speed=walking_speed, level_id=level_id,
+                    assign_default_destination=False,
                 )
             else:
                 # Single-level simulation
-                jps_sim.add_agent(agent_id, start_pos, walking_speed=walking_speed)
+                jps_sim.add_agent(
+                    agent_id, start_pos, walking_speed=walking_speed,
+                    assign_default_destination=False,
+                )
+
+    @staticmethod
+    def _add_agents_to_jupedsim_from_snapshot(
+        jps_sim: PedestrianSimulation,
+        agents_config: list[dict[str, Any]],
+    ) -> None:
+        """
+        Re-add a snapshot-restored population to a freshly constructed JuPedSim
+        simulation instance.
+
+        All agent attributes (position, speed, level) are taken directly from the
+        saved agent-config dicts, so no spawn generation or zone inference is
+        performed.  Agents are spawned without a default JuPedSim journey
+        (``assign_default_destination=False``) exactly as in the normal path.
+
+        Args:
+            jps_sim: Freshly initialised simulation (single- or multi-level).
+            agents_config: List of agent-config dicts loaded from a snapshot.
+        """
+        for agent_cfg in agents_config:
+            agent_id = agent_cfg["id"]
+            start_pos: tuple[float, float] = agent_cfg["start_position"]
+            level_id: str = str(agent_cfg.get("level_id", "0"))
+            walking_speed: float = float(agent_cfg.get("walking_speed", 1.34))
+
+            if hasattr(jps_sim, "simulations"):
+                jps_sim.add_agent(
+                    agent_id, start_pos,
+                    walking_speed=walking_speed,
+                    level_id=level_id,
+                    assign_default_destination=False,
+                )
+            else:
+                jps_sim.add_agent(
+                    agent_id, start_pos,
+                    walking_speed=walking_speed,
+                    assign_default_destination=False,
+                )
 
     @staticmethod
     def _assign_role(initial_zone: str, roles_config: dict) -> str:

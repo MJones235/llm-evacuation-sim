@@ -391,13 +391,15 @@ class HybridSimulationRunner:
         # before their group's turn fires.
         self._pending_immediate_decisions: set[str] = set()
 
-        # Optional bootstrap: full all-agent decision at t=0. This can be very
-        # expensive for large populations, so it is off by default.
+        # Bootstrap: run a full all-agent decision cycle at t=0 so every agent
+        # has an LLM-chosen destination before physics starts.  Agents are spawned
+        # without a default destination (assign_default_destination=False) so they
+        # hold at their spawn point until this fires.  Can be disabled via
+        # performance.bootstrap_initial_decisions: false if needed.
         self._bootstrap_initial_decisions_enabled = bool(
-            self.performance_config.get("bootstrap_initial_decisions", False)
+            self.performance_config.get("bootstrap_initial_decisions", True)
         )
         if self._bootstrap_initial_decisions_enabled:
-            # Preserve old behavior: run a full initial cycle immediately.
             self.last_decision_time = -self._group_decision_interval
             self._bootstrap_initial_decisions()
         else:
