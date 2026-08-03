@@ -311,6 +311,18 @@ class ActionExecutor:
         new_exit_name = extract_exit_name(translated_action, self.station_layout)
 
         if new_exit_name:
+            # Skip redundant switch_agent_journey calls when the destination is
+            # unchanged.  Re-issuing the same JuPedSim journey for an agent that
+            # is already routing to this exit (e.g. a queued agent whose cached
+            # decision is re-applied each cycle) triggers a crowd-force
+            # recalculation burst that can push agents sideways inside narrow
+            # escalator corridors and eject agents from transfer zones.
+            current_dest = self.agent_destinations.get(agent_id)
+            if current_dest == new_exit_name:
+                logger.debug(
+                    f"[MOVE] {agent_id} already routing to '{new_exit_name}' — skip journey reset"
+                )
+                return
             # Track destination and commit the selected exit directly.
             # Do not substitute with fallback waypoint routing on failure.
             self.agent_destinations[agent_id] = new_exit_name
