@@ -742,6 +742,11 @@ class HybridSimulationRunner:
                             self.agent_decisions,
                             self.event_manager.blocked_exits,
                             active_train_exits=self.event_manager.active_train_exits,
+                            agent_levels=(
+                                dict(self.jps_sim.agent_levels)
+                                if hasattr(self.jps_sim, "agent_levels")
+                                else None
+                            ),
                         )
 
                     # Lightweight positions sidecar — every 10 steps (0.5 s).

@@ -192,6 +192,7 @@ class VideoGenerator:
                         "blocked_exits": frame.get("blocked_exits", []),
                         "agent_states": frame.get("agent_states", {}),
                         "active_train_exits": frame.get("active_train_exits", []),
+                        "agent_levels": frame.get("agent_levels"),
                     }
                 )
         else:
@@ -582,14 +583,21 @@ class VideoGenerator:
         positions = frame_data.get("positions", {})
         # Per-frame roles override (future support); fall back to self.agent_roles
         frame_roles = frame_data.get("agent_roles", self.agent_roles)
+        # Per-frame agent_levels (accurate for this timestep); fall back to static final-state.
+        frame_agent_levels: dict[str, str] | None = frame_data.get("agent_levels")
         for agent_id, pos in positions.items():
             if pos and len(pos) >= 2:
                 x, y = pos[0], pos[1]
 
-                # Determine which level this agent is on
-                level_name = self._determine_agent_level(agent_id, pos)
-                # Convert from "level_0" or "level_-1" to key "0" or "-1"
-                level_key = level_name.replace("level_", "")
+                # Determine which level this agent is on — prefer the per-frame
+                # snapshot so agents that transferred mid-simulation appear on the
+                # correct panel at every point in time.
+                if frame_agent_levels is not None and agent_id in frame_agent_levels:
+                    raw_level = str(frame_agent_levels[agent_id])
+                    level_key = raw_level  # already "-1" or "0"
+                else:
+                    level_name = self._determine_agent_level(agent_id, pos)
+                    level_key = level_name.replace("level_", "")
 
                 if level_key not in axes_dict:
                     # Fallback: default to level 0

@@ -72,6 +72,7 @@ class PositionHistoryTracker:
         agent_decisions: dict[str, Any],
         blocked_exits: set[str],
         active_train_exits: set[str] | None = None,
+        agent_levels: dict[str, str] | None = None,
     ) -> None:
         """
         Save a frame of agent positions and state.
@@ -82,6 +83,7 @@ class PositionHistoryTracker:
             agent_decisions: Agent decision history
             blocked_exits: Currently blocked exits
             active_train_exits: Set of train exit names currently open for boarding
+            agent_levels: Per-agent level at this frame (multi-level simulations)
         """
         if not self.should_save(current_time):
             return
@@ -105,6 +107,8 @@ class PositionHistoryTracker:
             "blocked_exits": list(blocked_exits),
             "active_train_exits": list(active_train_exits) if active_train_exits is not None else [],
         }
+        if agent_levels is not None:
+            frame["agent_levels"] = dict(agent_levels)
 
         if self._stream_file is not None:
             # Streaming mode: write one JSON line per frame, no in-memory accumulation.
