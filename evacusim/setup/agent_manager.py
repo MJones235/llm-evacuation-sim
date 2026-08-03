@@ -77,6 +77,21 @@ class AgentManager:
                     f"pre-placed director agents (min separation {_MIN_SEP} m)."
                 )
 
+        # Enforce inter-passenger spawn spacing to avoid JuPedSim insertion
+        # failures from near-overlapping sampled points.
+        spawn_min_sep = float(config.get("agents", {}).get("spawn_min_separation", 0.35))
+        before_sep = len(spawn_positions)
+        spawn_positions = AgentManager._filter_positions_by_min_separation(
+            spawn_positions,
+            min_separation=spawn_min_sep,
+        )
+        removed_sep = before_sep - len(spawn_positions)
+        if removed_sep:
+            logger.info(
+                f"Filtered {removed_sep} spawn position(s) below {spawn_min_sep:.2f} m "
+                "minimum separation."
+            )
+
         # Warn and cap if fewer positions were generated than requested
         # (e.g. some rejected because they fell inside escalator corridors).
         actual_count = len(spawn_positions)
@@ -97,6 +112,38 @@ class AgentManager:
 
         logger.info(f"Agent population complete: {num_agents} agents ready")
         return agents_config
+
+    @staticmethod
+    def _filter_positions_by_min_separation(
+        positions: list[tuple],
+        min_separation: float,
+    ) -> list[tuple]:
+        """Greedily keep positions that satisfy a minimum pairwise spacing."""
+        accepted: list[tuple] = []
+        for pos in positions:
+            if len(pos) == 3:
+                px, py, plevel = float(pos[0]), float(pos[1]), str(pos[2])
+            else:
+                px, py, plevel = float(pos[0]), float(pos[1]), None
+
+            too_close = False
+            for kept in accepted:
+                if len(kept) == 3:
+                    kx, ky, klevel = float(kept[0]), float(kept[1]), str(kept[2])
+                else:
+                    kx, ky, klevel = float(kept[0]), float(kept[1]), None
+
+                if plevel is not None and klevel is not None and plevel != klevel:
+                    continue
+
+                if math.hypot(px - kx, py - ky) < min_separation:
+                    too_close = True
+                    break
+
+            if not too_close:
+                accepted.append(pos)
+
+        return accepted
 
     @staticmethod
     def _add_agents_to_jupedsim(jps_sim, agents_config, spawn_positions, injured_agents, config):
@@ -127,6 +174,19 @@ class AgentManager:
             # Store level_id in agent config for use during agent initialization
             agent_cfg["level_id"] = level_id
             agent_cfg["start_position"] = start_pos
+
+            roles_config = config["agents"].get("roles", {})
+            geometry_zone = AgentManager._infer_zone_from_geometry(
+                jps_sim=jps_sim,
+                position=start_pos,
+                level_id=str(level_id),
+                preferred_zone_names={
+                    z
+                    for role_cfg in roles_config.values()
+                    for z in role_cfg.get("spawn_zones", [])
+                },
+            )
+
             # Assign initial_zone from coordinate-based rules defined in
             # config under station.zone_boundaries.
             zone_boundaries = config.get("station", {}).get("zone_boundaries", {})
@@ -150,16 +210,18 @@ class AgentManager:
                 ):
                     assigned_zone = zone_name
                     break
-            agent_cfg["initial_zone"] = assigned_zone or default_zone or "station"
+            agent_cfg["initial_zone"] = geometry_zone or assigned_zone or default_zone or "station"
 
             # Assign role from config: find roles whose spawn_zones include this zone.
             initial_zone = agent_cfg["initial_zone"]
-            roles_config = config["agents"].get("roles", {})
             agent_cfg["agent_role"] = AgentManager._assign_role(initial_zone, roles_config)
-
-            # Format goal and memory templates now that role, target, and purpose are known.
             role = agent_cfg["agent_role"]
             role_cfg = roles_config.get(role, {})
+            role_targets = role_cfg.get("target", [])
+            if role_targets:
+                agent_cfg["target"] = random.choice(role_targets)
+
+            # Format goal and memory templates now that role, target, and purpose are known.
             subs = {
                 "target": agent_cfg.get("target", ""),
                 "purpose": agent_cfg.get("purpose", "their destination"),
@@ -204,6 +266,7 @@ class AgentManager:
             for role, cfg in roles_config.items()
             if initial_zone in cfg.get("spawn_zones", [])
         ]
+
         if not matching:
             matching = list(roles_config.items())
         if not matching:
@@ -211,3 +274,45 @@ class AgentManager:
         roles_list = [r for r, _ in matching]
         weights = [float(cfg.get("weight", 1.0)) for _, cfg in matching]
         return random.choices(roles_list, weights=weights, k=1)[0]
+
+    @staticmethod
+    def _infer_zone_from_geometry(
+        jps_sim: PedestrianSimulation,
+        position: tuple[float, float],
+        level_id: str,
+        preferred_zone_names: set[str] | None = None,
+    ) -> str | None:
+        """Infer initial zone from geometry polygons at spawn position.
+
+        Chooses the smallest containing polygon, optionally restricted to known
+        spawn-zone names from config.
+        """
+        try:
+            from shapely.geometry import Point as _Point
+
+            if hasattr(jps_sim, "simulations"):
+                level_sim = jps_sim.simulations.get(str(level_id))
+                if level_sim is None:
+                    return None
+                areas = level_sim.geometry_manager.walkable_areas_with_obstacles
+            else:
+                areas = jps_sim.geometry_manager.walkable_areas_with_obstacles
+
+            pt = _Point(position)
+            best_name = None
+            best_area = float("inf")
+            for name, poly in areas.items():
+                if preferred_zone_names and name not in preferred_zone_names:
+                    continue
+                try:
+                    if not (poly.covers(pt) or poly.contains(pt)):
+                        continue
+                    area = float(poly.area)
+                    if area < best_area:
+                        best_area = area
+                        best_name = name
+                except Exception:
+                    continue
+            return best_name
+        except Exception:
+            return None

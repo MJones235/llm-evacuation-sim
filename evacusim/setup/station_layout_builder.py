@@ -125,13 +125,17 @@ class StationLayoutBuilder:
 
             level_0_areas = all_walkable_by_level.get("0", {})
             for esc_zone, platforms in esc_to_platforms.items():
+                if esc_zone not in level_0_areas:
+                    m_legacy = _re.match(r"^L[^_]+_esc_([a-f])_down$", esc_zone)
+                    if m_legacy:
+                        esc_zone = f"esc.{m_legacy.group(1).upper()}.zone.concourse.departure"
                 if esc_zone in level_0_areas:
                     poly = level_0_areas[esc_zone]
                     down_access_exits[esc_zone] = (poly.centroid.x, poly.centroid.y)
 
-                    m = _re.match(r"L[^_]+_esc_([a-f])_down", esc_zone)
+                    m = _re.match(r"^esc\.([A-F])\.zone\.concourse\.departure$", esc_zone)
                     if m:
-                        letter = m.group(1).upper()
+                        letter = m.group(1)
                         # Only include specific-numbered platforms (platform_N) in the label.
                         # Strip any parenthetical suffix from the zone label so we get a
                         # short name like "Platform 3" rather than the full
@@ -161,27 +165,26 @@ class StationLayoutBuilder:
             for level_id, level_sim in jps_sim.simulations.items():
                 gm = level_sim.geometry_manager
                 for corr_name, corr_poly in gm.escalator_corridors.items():
-                    import re as _re2
-                    m = _re2.match(r"L([^_]+)_esc_corridor_([a-f])", corr_name)
-                    if m:
-                        corr_level, esc_letter = m.group(1), m.group(2)
-                        # Find the matching transfer zone polygon.
-                        # Use the pre-blockage snapshot (escalator_transfer_zones)
-                        # so that positions remain correct even for pre-blocked exits
-                        # whose TZ has been removed from walkable_areas.
-                        tz_source = getattr(gm, "escalator_transfer_zones", gm.walkable_areas)
-                        tz_key = next(
-                            (k for k in tz_source if _re2.match(
-                                rf"L{_re2.escape(corr_level)}_esc_{esc_letter}_", k
-                            )),
-                            None,
-                        )
-                        tz_poly = tz_source.get(tz_key) if tz_key else None
-                        pos = StationLayoutBuilder._escalator_entrance_position(
-                            corr_poly, tz_poly, offset=1.5
-                        )
-                        zone_key = f"escalator_{esc_letter}_entrance_L{corr_level}"
-                        all_zone_polygons[zone_key] = Point(pos).buffer(0.3)
+                    parts = corr_name.split(".")
+                    if len(parts) != 4 or parts[0] != "esc" or parts[2] != "corridor":
+                        continue
+                    esc_letter = parts[1].lower()
+
+                    tz_source = getattr(gm, "escalator_transfer_zones", gm.walkable_areas)
+                    tz_key = next(
+                        (
+                            k
+                            for k in tz_source
+                            if k.startswith(f"esc.{parts[1]}.zone.") and k.endswith((".departure", ".arrival"))
+                        ),
+                        None,
+                    )
+                    tz_poly = tz_source.get(tz_key) if tz_key else None
+                    pos = StationLayoutBuilder._escalator_entrance_position(
+                        corr_poly, tz_poly, offset=1.5
+                    )
+                    zone_key = f"escalator_{esc_letter}_entrance_L{level_id}"
+                    all_zone_polygons[zone_key] = Point(pos).buffer(0.3)
 
         station_layout = {
             **config.get("station", {}),

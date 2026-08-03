@@ -103,16 +103,10 @@ class AgentFactory:
         gender = random.choice(["man", "woman"])
         risk_tolerance = random.choice(["low", "moderate", "high"])
 
-        # Sample purpose from config; sample target from all role target options
+        # Sample purpose from config. Target is assigned later by AgentManager
+        # after role assignment so it stays role-consistent.
         purposes = agents_section.get("purposes", ["their destination"])
         purpose = random.choice(purposes)
-
-        all_targets = [
-            v
-            for role_cfg in agents_section.get("roles", {}).values()
-            for v in role_cfg.get("target", [])
-        ]
-        target = random.choice(all_targets) if all_targets else ""
 
         return {
             "id": agent_id,
@@ -126,7 +120,7 @@ class AgentFactory:
             "destination": "exit",
             "is_injured": is_injured,
             "purpose": purpose,
-            "target": target,
+            "target": "",
             # agent_role, goal_state, purpose_memories and initial_goal are assigned
             # later by AgentManager once the spawn zone is known
         }

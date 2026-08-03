@@ -123,13 +123,13 @@ class PedestrianSimulation(Protocol):
         """
         ...
 
-    def set_agent_evacuation_exit(self, agent_id: str, exit_name: str) -> None:
+    def set_agent_destination_exit(self, agent_id: str, exit_name: str) -> None:
         """
-        Direct an agent to a specific evacuation exit.
+        Direct an agent to a specific named exit.
 
         Args:
             agent_id: Concordia agent ID
-            exit_name: Name of the evacuation exit
+            exit_name: Name of the destination exit
 
         Raises:
             KeyError: If agent or exit is not found

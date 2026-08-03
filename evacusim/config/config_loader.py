@@ -102,7 +102,12 @@ class ConfigLoader:
         result = dict(base)
         for key, value in override.items():
             if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-                result[key] = ConfigLoader._deep_merge(result[key], value)
+                # Explicit empty mapping in child config means "clear inherited mapping".
+                # This is especially useful for top-level sections like `systems`.
+                if not value:
+                    result[key] = {}
+                else:
+                    result[key] = ConfigLoader._deep_merge(result[key], value)
             else:
                 result[key] = value
         return result
@@ -162,6 +167,7 @@ class ConfigLoader:
             raise ValueError("agents.count is required in configuration")
 
         ConfigLoader._validate_knowledge_profiles(config)
+        ConfigLoader._validate_goal_semantic_policies(config)
 
         # Validate spawn_schedule (optional)
         if "spawn_schedule" in agents_config:
@@ -284,3 +290,60 @@ class ConfigLoader:
 
         if total_weight <= 0:
             raise ValueError("agents.knowledge_profiles weights must sum to a positive value")
+
+    @staticmethod
+    def _validate_goal_semantic_policies(config: dict[str, Any]) -> None:
+        """Validate optional goal-to-exit semantic routing policy schema."""
+        station_config = config.get("station")
+        if not isinstance(station_config, dict):
+            return
+
+        exit_tags = station_config.get("exit_semantic_tags")
+        if exit_tags is not None:
+            if not isinstance(exit_tags, dict):
+                raise ValueError("station.exit_semantic_tags must be a dictionary")
+            for exit_id, tags in exit_tags.items():
+                if not isinstance(exit_id, str) or not exit_id.strip():
+                    raise ValueError(
+                        "station.exit_semantic_tags keys must be non-empty strings"
+                    )
+                if not isinstance(tags, list) or not all(
+                    isinstance(tag, str) and tag.strip() for tag in tags
+                ):
+                    raise ValueError(
+                        f"station.exit_semantic_tags.{exit_id} must be a list of non-empty strings"
+                    )
+
+        policies = station_config.get("goal_semantic_policies")
+        if policies is None:
+            return
+        if not isinstance(policies, list):
+            raise ValueError("station.goal_semantic_policies must be a list")
+
+        for idx, policy in enumerate(policies):
+            base = f"station.goal_semantic_policies[{idx}]"
+            if not isinstance(policy, dict):
+                raise ValueError(f"{base} must be a dictionary")
+
+            keywords = policy.get("when_goal_contains_any")
+            if not isinstance(keywords, list) or not keywords or not all(
+                isinstance(k, str) and k.strip() for k in keywords
+            ):
+                raise ValueError(
+                    f"{base}.when_goal_contains_any must be a non-empty list of strings"
+                )
+
+            for field in ("applies_in_zones", "prefer_exit_tags", "avoid_exit_tags"):
+                value = policy.get(field)
+                if value is None:
+                    continue
+                if not isinstance(value, list) or not all(
+                    isinstance(item, str) and item.strip() for item in value
+                ):
+                    raise ValueError(f"{base}.{field} must be a list of non-empty strings")
+
+            instruction = policy.get("instruction")
+            if instruction is not None and (
+                not isinstance(instruction, str) or not instruction.strip()
+            ):
+                raise ValueError(f"{base}.instruction must be a non-empty string when provided")

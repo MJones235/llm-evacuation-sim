@@ -25,6 +25,9 @@ logger = get_logger(__name__)
 # Precompiled regex to normalise geometry zone names (e.g. "L0_esc_a_down") to
 # canonical escalator exit IDs ("escalator_a_down") at translation time.
 _ESC_ZONE_RE = re.compile(r"^L[^_]+_esc_([a-f])_(up|down)$")
+_ESC_ZONE_DOTTED_RE = re.compile(
+    r"^esc\.([A-F])\.zone\.(concourse|platform)\.(departure|arrival)$"
+)
 
 
 class ActionTranslator:
@@ -166,9 +169,16 @@ class ActionTranslator:
                     # finds them in the level's evacuation_exits dict.
                     _raw_resolved = resolved_id or exit_name
                     _m = re.match(r"^L[^_]+_esc_([a-f])_(up|down)$", _raw_resolved)
-                    _canonical_resolved = (
-                        f"escalator_{_m.group(1)}_{_m.group(2)}" if _m else _raw_resolved
-                    )
+                    if _m:
+                        _canonical_resolved = f"escalator_{_m.group(1)}_{_m.group(2)}"
+                    else:
+                        _m2 = _ESC_ZONE_DOTTED_RE.match(_raw_resolved)
+                        if _m2:
+                            _letter, _location, _role = _m2.groups()
+                            _direction = "down" if (_location == "concourse" and _role == "departure") else "up"
+                            _canonical_resolved = f"escalator_{_letter.lower()}_{_direction}"
+                        else:
+                            _canonical_resolved = _raw_resolved
                     # Log successful resolution if display name was converted
                     if _canonical_resolved and _canonical_resolved != exit_name:
                         logger.debug(
@@ -333,9 +343,16 @@ class ActionTranslator:
         nearest_coords = candidates[nearest_name]
 
         _m = re.match(r"^L[^_]+_esc_([a-f])_(up|down)$", nearest_name)
-        canonical_name = (
-            f"escalator_{_m.group(1)}_{_m.group(2)}" if _m else nearest_name
-        )
+        if _m:
+            canonical_name = f"escalator_{_m.group(1)}_{_m.group(2)}"
+        else:
+            _m2 = _ESC_ZONE_DOTTED_RE.match(nearest_name)
+            if _m2:
+                _letter, _location, _role = _m2.groups()
+                _direction = "down" if (_location == "concourse" and _role == "departure") else "up"
+                canonical_name = f"escalator_{_letter.lower()}_{_direction}"
+            else:
+                canonical_name = nearest_name
 
         logger.info(
             f"Agent {agent_id} on level {agent_level} requested '{resolved_exit_id}' "
@@ -408,6 +425,10 @@ class ActionTranslator:
             m = _re.match(r"^escalator_([a-f])_(?:up|down)$", resolved_id) or _re.match(
                 r"^L[^_]+_esc_([a-f])_(?:up|down)$", resolved_id
             )
+            if m is None:
+                m2 = _ESC_ZONE_DOTTED_RE.match(resolved_id)
+                if m2:
+                    m = re.match(r"^([a-f])$", m2.group(1).lower())
             if m:
                 letter = m.group(1)
                 for key, coords in level_exits.items():

@@ -19,6 +19,29 @@ Mechanisms:
 - [DecisionProcessor._get_valid_exits_section](../function-reference/decision__decision_processor.md)
 - [DecisionProcessor._get_following_constraint_text](../function-reference/decision__decision_processor.md)
 
+Prompt construction details:
+
+- Prompt text is rendered from an external template file at runtime.
+- Default template: `evacusim/decision/templates/decision_prompt.template.txt`
+- Override path via scenario config: `prompts.decision_prompt_template_path`
+- Role-specific additions (`agents.roles.<role>.decision_prompt_extra`) are still
+	injected through `$role_prefix`.
+- The Azure system prompt is also file-backed:
+	- Default: `evacusim/concordia/templates/system_prompt.txt`
+	- Override: `prompts.system_prompt_path` (or `llm.system_prompt_path`)
+	- Environment override: `AZURE_LLM_SYSTEM_PROMPT_PATH`
+	- Fallback behavior: configured file -> packaged default file -> fail fast with explicit error
+
+Runtime-injected template variables:
+
+- `$role_prefix`
+- `$zone_target_type_line`
+- `$zone_name_example`
+- `$zone_constraint_line`
+- `$zones_section`
+- `$following_constraint_text`
+- `$valid_exits_text`
+
 ## Cache Gate and LLM Invocation
 
 - [PromptCache.should_call_llm](../function-reference/decision__prompt_cache.md)

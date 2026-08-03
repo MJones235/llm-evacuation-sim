@@ -56,6 +56,7 @@ class AzureLLMConcordia:
         timeout: float = 90.0,
         reasoning_effort: str | None = None,
         response_format: str | None = "json_object",
+        system_prompt_path: str | None = None,
     ):
         """
         Initialize Azure OpenAI client for Concordia.
@@ -77,6 +78,8 @@ class AzureLLMConcordia:
                 This eliminates the prefix-stripping hack in _parse_json_response
                 and may slightly reduce reasoning overhead because the output
                 schema is pre-declared.  Set to None to disable.
+            system_prompt_path: Optional path to the system prompt text file.
+                If omitted, a packaged default is loaded.
         """
         self.endpoint = endpoint.rstrip("/")
         self.api_key = api_key
@@ -87,6 +90,8 @@ class AzureLLMConcordia:
         self.timeout = timeout
         self.reasoning_effort = reasoning_effort
         self.response_format = response_format
+        self.system_prompt_path = system_prompt_path
+        self.system_message = self._load_system_prompt(system_prompt_path)
 
         # Token usage tracking
         self.total_prompt_tokens = 0
@@ -108,6 +113,42 @@ class AzureLLMConcordia:
         logger.info(
             f"Initialized AzureLLMConcordia with model: {self.model}, timeout: {self.timeout}s"
         )
+
+    def _load_system_prompt(self, prompt_path: str | None) -> str:
+        """Load system prompt text from disk and fail fast if unavailable."""
+        default_path = Path(__file__).with_name("templates") / "system_prompt.txt"
+        chosen_path = Path(prompt_path).expanduser() if prompt_path else default_path
+
+        def _read_prompt(path: Path) -> str:
+            text = path.read_text(encoding="utf-8").strip()
+            if not text:
+                raise ValueError("system prompt file is empty")
+            return text
+
+        try:
+            text = _read_prompt(chosen_path)
+            logger.info(f"Loaded system prompt from {chosen_path}")
+            return text
+        except Exception as primary_error:
+            if chosen_path != default_path:
+                logger.warning(
+                    "Could not load configured system prompt from "
+                    f"{chosen_path}: {primary_error}. Trying packaged default {default_path}."
+                )
+                try:
+                    text = _read_prompt(default_path)
+                    logger.info(f"Loaded system prompt from packaged default {default_path}")
+                    return text
+                except Exception as default_error:
+                    raise RuntimeError(
+                        "Failed to load both configured and packaged system prompts: "
+                        f"configured='{chosen_path}' error={primary_error}; "
+                        f"default='{default_path}' error={default_error}"
+                    ) from default_error
+
+            raise RuntimeError(
+                f"Failed to load packaged system prompt '{default_path}': {primary_error}"
+            ) from primary_error
 
     def sample_text(
         self, prompt: str, max_tokens: int | None = None, temperature: float | None = None, **kwargs
@@ -150,24 +191,13 @@ class AzureLLMConcordia:
             "api-key": self.api_key,
         }
 
-        system_message = (
-            "You are a simulation engine for everyday station scenarios. "
-            "Generate realistic behavioral responses for simulated agents based on their personality profiles, "
-            "situational context, and normal station routines. "
-            "When a fire alarm is sounding with no clear visible fire or additional instructions from authorities, use this empirical prior for initial behavior: "
-            "about 10% evacuate immediately, about 15% decide to leave but delay, and about 75% initially hesitate, "
-            "wait for others, or ignore at first. "
-            "Use this as a population-level prior while still adapting each individual response to local observations, "
-            "social cues, and personal goals."
-        )
-
         # Retry logic
         last_error = None
         base_prompt = prompt
         for attempt in range(1, self.max_retries + 1):
             try:
                 messages = [
-                    {"role": "system", "content": system_message},
+                    {"role": "system", "content": self.system_message},
                     {"role": "user", "content": prompt},
                 ]
 
@@ -388,8 +418,14 @@ def create_concordia_llm_from_config(config: dict) -> AzureLLMConcordia:
     load_dotenv()
 
     llm_config = config.get("llm", {})
+    prompts_config = config.get("prompts", {})
+    system_prompt_path = prompts_config.get("system_prompt_path") or llm_config.get(
+        "system_prompt_path"
+    )
+    env_system_prompt_path = os.getenv("AZURE_LLM_SYSTEM_PROMPT_PATH")
 
     return AzureLLMConcordia.from_env(
         temperature=llm_config.get("temperature", 0.7),
         max_retries=llm_config.get("max_retries", 3),
+        system_prompt_path=env_system_prompt_path or system_prompt_path,
     )

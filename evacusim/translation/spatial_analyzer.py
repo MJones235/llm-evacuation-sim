@@ -42,7 +42,6 @@ class SpatialAnalyzer:
         self.down_access_exits: dict[str, tuple[float, float]] = station_layout.get(
             "down_access_exits", {}
         )
-        self.zone_boundaries: dict[str, Any] = station_layout.get("zone_boundaries", {})
         # Cache of per-level walkable-area unions for boundary-aware LOS checks.
         # Keyed by level_id string; populated lazily on first use.
         self._walkable_union_cache: dict[str, Any] = {}
@@ -50,81 +49,6 @@ class SpatialAnalyzer:
     @staticmethod
     def _is_platform_level(level_id: str | None) -> bool:
         return bool(level_id and str(level_id).startswith("-"))
-
-    def _infer_platform_side(
-        self,
-        position: tuple[float, float],
-        agent_level: str | None,
-        agent_zone: str | None,
-    ) -> str | None:
-        """Infer whether the agent is on platform_abc or platform_def side."""
-        zone = (agent_zone or "").lower()
-        if zone in {"platform_abc", "platform_def"}:
-            return zone
-        if zone in {"platform_1", "platform_2"}:
-            return "platform_def"
-        if zone in {"platform_3", "platform_4"}:
-            return "platform_abc"
-
-        lvl_bounds = self.zone_boundaries.get(str(agent_level or ""), {})
-        x, y = position
-        for candidate in ("platform_abc", "platform_def"):
-            cfg = lvl_bounds.get(candidate)
-            if not isinstance(cfg, dict):
-                continue
-            if cfg.get("default"):
-                continue
-            ok = True
-            if "x_lt" in cfg and not (x < float(cfg["x_lt"])):
-                ok = False
-            if "x_lte" in cfg and not (x <= float(cfg["x_lte"])):
-                ok = False
-            if "x_gt" in cfg and not (x > float(cfg["x_gt"])):
-                ok = False
-            if "x_gte" in cfg and not (x >= float(cfg["x_gte"])):
-                ok = False
-            if "y_lt" in cfg and not (y < float(cfg["y_lt"])):
-                ok = False
-            if "y_lte" in cfg and not (y <= float(cfg["y_lte"])):
-                ok = False
-            if "y_gt" in cfg and not (y > float(cfg["y_gt"])):
-                ok = False
-            if "y_gte" in cfg and not (y >= float(cfg["y_gte"])):
-                ok = False
-            if ok:
-                return candidate
-
-        if isinstance(lvl_bounds.get("platform_abc"), dict) and lvl_bounds["platform_abc"].get("default"):
-            return "platform_abc"
-        if isinstance(lvl_bounds.get("platform_def"), dict) and lvl_bounds["platform_def"].get("default"):
-            return "platform_def"
-        return None
-
-    @staticmethod
-    def _belongs_to_platform_side(canonical_exit_id: str, platform_side: str) -> bool:
-        """Return True if a canonical exit logically belongs to the given platform side."""
-        if canonical_exit_id.startswith("escalator_"):
-            if platform_side == "platform_abc":
-                return canonical_exit_id in {
-                    "escalator_a_down",
-                    "escalator_b_up",
-                    "escalator_c_up",
-                }
-            if platform_side == "platform_def":
-                return canonical_exit_id in {
-                    "escalator_d_down",
-                    "escalator_e_up",
-                    "escalator_f_up",
-                }
-
-        if canonical_exit_id.startswith("train_platform_"):
-            if platform_side == "platform_abc":
-                return canonical_exit_id in {"train_platform_3", "train_platform_4"}
-            if platform_side == "platform_def":
-                return canonical_exit_id in {"train_platform_1", "train_platform_2"}
-
-        # Non-platform-specific exits are not expected on level -1 prompts.
-        return False
 
     def identify_zone(self, position: tuple[float, float]) -> str:
         """
@@ -260,6 +184,19 @@ class SpatialAnalyzer:
                                     zone_poly.centroid.y,
                                 )
                                 break
+                            m = re.match(
+                                r"^esc\.([A-F])\.zone\.(concourse|platform)\.(departure|arrival)$",
+                                zone_name,
+                            )
+                            if m:
+                                letter, location, role = m.groups()
+                                direction = "down" if (location == "concourse" and role == "departure") else "up"
+                                if esc_id == f"{letter.lower()}_{direction}":
+                                    level_exits[exit_name] = (
+                                        zone_poly.centroid.x,
+                                        zone_poly.centroid.y,
+                                    )
+                                    break
                     elif exit_name in level_sim.geometry_manager.entrance_areas:
                         poly = level_sim.geometry_manager.entrance_areas[exit_name]
                         level_exits[exit_name] = (poly.centroid.x, poly.centroid.y)
@@ -398,20 +335,6 @@ class SpatialAnalyzer:
                 name: pos for name, pos in exits_to_check.items()
                 if _keep_exit(name, pos)
             }
-
-        # On underground platform levels, restrict visibility to exits on the
-        # same platform side. This prevents seeing opposite-bank escalators
-        # around corners/corridors and restores local-bank realism.
-        if self._is_platform_level(agent_level):
-            platform_side = self._infer_platform_side(position, agent_level, agent_zone)
-            if platform_side:
-                exits_to_check = {
-                    name: pos
-                    for name, pos in exits_to_check.items()
-                    if self._belongs_to_platform_side(
-                        self._canonical_visible_exit_key(name), platform_side
-                    )
-                }
 
         # Prefer level-specific obstacles for line-of-sight checks.
         # NOTE: On underground platform levels (level_id starting with "-"),
@@ -555,6 +478,15 @@ class SpatialAnalyzer:
         if zone_escalator_match:
             letter, direction = zone_escalator_match.groups()
             return f"escalator_{letter}_{direction}"
+
+        zone_dotted_match = re.match(
+            r"^esc\.([A-Z])\.zone\.(concourse|platform)\.(departure|arrival)$",
+            exit_name,
+        )
+        if zone_dotted_match:
+            letter, location, role = zone_dotted_match.groups()
+            direction = "down" if (location == "concourse" and role == "departure") else "up"
+            return f"escalator_{letter.lower()}_{direction}"
 
         return exit_name
 

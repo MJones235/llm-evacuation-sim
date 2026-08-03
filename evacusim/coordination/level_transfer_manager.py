@@ -1,23 +1,11 @@
-"""
-Level transfer manager for multi-level station simulations.
+"""Level transfer manager for multi-level station simulations.
 
-Handles agent teleportation between levels via escalators/stairs.
-Automatically builds transfer mappings from geometry file naming conventions.
-
-Naming convention:
-  L{level}_esc_{id}_{direction}
-  Examples: L0_esc_a_down, L-1_esc_a_down, L0_esc_b_up
-
-Transfer logic:
-  - Agents entering escalator zone on one level
-  - Teleport to matching escalator zone on other level
-  - Maintain relative position within zone
-  - Apply optional traversal delay
+Maintains transfer-zone polygons and explicit departure->arrival links declared
+by ``jupedsim.escalator_endpoint`` metadata in level geometry XML files.
 """
 
-import re
-import xml.etree.ElementTree as ET
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 from shapely.geometry import Point, Polygon
 
@@ -30,34 +18,26 @@ class LevelTransferManager:
     """Manages escalator/stair transfers between levels."""
 
     def __init__(self, network_path: Path, levels: list[str]):
-        """
-        Initialize transfer manager.
-
-        Args:
-            network_path: Path to network geometry folder (contains level_*.xml files)
-            levels: List of level IDs to load (e.g., ["0", "-1"])
-        """
         self.network_path = Path(network_path)
-        self.levels = levels
-        self.escalator_zones: dict[str, Polygon] = {}  # zone_name -> polygon
-        self.transfer_mappings: dict[str, tuple[str, str]] = (
-            {}
-        )  # source_zone -> (target_zone, target_level)
-        self.transfer_history: dict[str, float] = (
-            {}
-        )  # agent_id -> last_transfer_time (for cooldown)
+        self.levels = [str(level) for level in levels]
+        self.escalator_zones: dict[str, Polygon] = {}
+        self.escalator_zones_by_level: dict[str, dict[str, Polygon]] = {}
+        self.transfer_mappings: dict[str, tuple[str, str]] = {}
+        self.transfer_history: dict[str, float] = {}
 
         self._load_escalator_zones()
         self._build_transfer_mappings()
 
+    @staticmethod
+    def _parse_shape_string(shape_str: str) -> list[tuple[float, float]]:
+        coords: list[tuple[float, float]] = []
+        for point_str in shape_str.strip().split():
+            x, y = point_str.split(",")
+            coords.append((float(x), float(y)))
+        return coords
+
     def _load_escalator_zones(self):
-        """
-        Load all escalator zones from geometry files.
-
-        Searches for polygons matching pattern: L{level}_esc_{id}_{direction}
-        """
-        escalator_pattern = re.compile(r"^L([^_]+)_esc_([a-f])_(up|down)$")
-
+        """Load transfer-zone polygons referenced by endpoint metadata."""
         for level in self.levels:
             level_file = self.network_path / f"level_{level}.xml"
 
@@ -68,86 +48,74 @@ class LevelTransferManager:
             try:
                 tree = ET.parse(level_file)
                 root = tree.getroot()
-
-                for poly in root.findall(".//poly"):
-                    zone_name = poly.get("name")
-                    if not zone_name:
-                        continue
-
-                    # Check if this is an escalator zone
-                    match = escalator_pattern.match(zone_name)
-                    if not match:
-                        continue
-
-                    # Parse shape
-                    shape_str = poly.get("shape")
-                    if not shape_str:
-                        continue
-
-                    coords = self._parse_shape_string(shape_str)
-                    polygon = Polygon(coords)
-
-                    self.escalator_zones[zone_name] = polygon
-                    logger.debug(f"  Loaded escalator zone: {zone_name}")
-
             except Exception as e:
                 logger.error(f"Error loading escalator zones from {level_file}: {e}")
+                continue
+
+            walkable_areas: dict[str, Polygon] = {}
+            for poly in root.findall('.//poly[@type="jupedsim.walkable_area"]'):
+                zone_name = (poly.get("name") or "").strip()
+                shape_str = (poly.get("shape") or "").strip()
+                if not zone_name or not shape_str:
+                    continue
+                walkable_areas[zone_name] = Polygon(self._parse_shape_string(shape_str))
+
+            level_zones: dict[str, Polygon] = {}
+            for ep in root.findall('.//poly[@type="jupedsim.escalator_endpoint"]'):
+                zone_name = (ep.get("transfer_zone") or "").strip()
+                if not zone_name:
+                    continue
+                zone_poly = walkable_areas.get(zone_name)
+                if zone_poly is None:
+                    continue
+                self.escalator_zones[zone_name] = zone_poly
+                level_zones[zone_name] = zone_poly
+                logger.debug(f"  Loaded escalator zone: {zone_name}")
+
+            self.escalator_zones_by_level[str(level)] = level_zones
 
         logger.info(
             f"Loaded {len(self.escalator_zones)} escalator zones: {list(self.escalator_zones.keys())}"
         )
 
     def _build_transfer_mappings(self):
-        """
-        Build automatic transfer mappings from escalator zones.
-
-        Escalators are matched by ID AND direction. An escalator with the same
-        ID and direction on different levels represents the top/bottom of the
-        same physical escalator.
-
-        Example:
-          L-1_esc_a_up + L0_esc_a_up → same escalator (bottom to top)
-          L-1_esc_a_down + L0_esc_a_down → different escalator (going down)
-        """
-        escalator_pattern = re.compile(r"^L([^_]+)_esc_([a-f])_(up|down)$")
-        # Group by (esc_id, direction) -> {level -> zone_name}
-        escalators_by_key: dict[tuple[str, str], dict[str, str]] = {}
-
-        # Group zones by escalator ID + direction
-        for zone_name in self.escalator_zones.keys():
-            match = escalator_pattern.match(zone_name)
-            if not match:
+        """Build transfer mappings from endpoint departure metadata."""
+        for level in self.levels:
+            level_file = self.network_path / f"level_{level}.xml"
+            if not level_file.exists():
                 continue
 
-            level, esc_id, direction = match.groups()
-            key = (esc_id, direction)  # Match by both ID and direction
-
-            if key not in escalators_by_key:
-                escalators_by_key[key] = {}
-            escalators_by_key[key][level] = zone_name
-
-        # Create bidirectional transfers for each escalator
-        for (esc_id, direction), levels_dict in escalators_by_key.items():
-            if len(levels_dict) < 2:
-                logger.warning(
-                    f"Escalator {esc_id}_{direction} found on only {len(levels_dict)} level(s). "
-                    f"Need at least 2 levels for transfer. Zones: {list(levels_dict.values())}"
-                )
+            try:
+                tree = ET.parse(level_file)
+                root = tree.getroot()
+            except Exception as e:
+                logger.error(f"Error building transfer mappings from {level_file}: {e}")
                 continue
 
-            # Create transfers between all level pairs
-            level_list = sorted(levels_dict.keys(), key=lambda x: float(x))
-            for i in range(len(level_list) - 1):
-                from_level = level_list[i]
-                to_level = level_list[i + 1]
-                from_zone = levels_dict[from_level]
-                to_zone = levels_dict[to_level]
+            for ep in root.findall('.//poly[@type="jupedsim.escalator_endpoint"]'):
+                role = (ep.get("role") or "").strip().lower()
+                if role != "departure":
+                    continue
 
-                # Bidirectional
+                from_zone = (ep.get("transfer_zone") or "").strip()
+                to_zone = (ep.get("transfer_to_zone") or "").strip()
+                if not from_zone or not to_zone:
+                    continue
+
+                to_level = ""
+                for candidate_level, zones in self.escalator_zones_by_level.items():
+                    if to_zone in zones:
+                        to_level = candidate_level
+                        break
+
+                if not to_level:
+                    logger.warning(
+                        f"Transfer mapping target zone '{to_zone}' not found for source '{from_zone}'"
+                    )
+                    continue
+
                 self.transfer_mappings[from_zone] = (to_zone, to_level)
-                self.transfer_mappings[to_zone] = (from_zone, from_level)
-
-                logger.info(f"  Created transfer: {from_zone} ↔ {to_zone}")
+                logger.info(f"  Created transfer: {from_zone} -> {to_zone} (L{to_level})")
 
         logger.info(f"Built {len(self.transfer_mappings)} transfer mappings")
 
@@ -159,64 +127,32 @@ class LevelTransferManager:
         current_level: str,
         current_time: float,
     ) -> tuple[str, str, tuple[float, float]] | None:
-        """
-        Check if agent should transfer to another level.
-
-        Args:
-            agent_id: Agent ID
-            position: (x, y) position in current level
-            current_zone: Current zone name
-            current_level: Current level ID
-            current_time: Simulation time
-
-        Returns:
-            (target_zone, target_level, new_position) if transfer should occur, else None
-        """
-        # Check cooldown (prevent oscillation)
-        cooldown_time = 2.0  # seconds
+        """Check if an agent in a transfer zone should move to another level."""
+        cooldown_time = 2.0
         if agent_id in self.transfer_history:
             if current_time - self.transfer_history[agent_id] < cooldown_time:
                 return None
 
-        # Check if current zone is in transfer mappings
         if current_zone not in self.transfer_mappings:
             return None
 
-        # Get target zone and level
         target_zone, target_level = self.transfer_mappings[current_zone]
-
-        # Get source and target polygons
         source_poly = self.escalator_zones[current_zone]
         target_poly = self.escalator_zones[target_zone]
 
-        # Check if agent is in source polygon or near it (within 3.0m buffer)
-        # This accounts for waypoint distance tolerance (2.0m) plus safety margin
         point = Point(position)
-        buffered_source = source_poly.buffer(3.0)  # Generous buffer for waypoint detection
-
+        buffered_source = source_poly.buffer(3.0)
         is_inside = source_poly.contains(point)
         is_near = buffered_source.contains(point) if not is_inside else False
-
         if not (is_inside or is_near):
-            # Agent not in or near escalator zone
             return None
 
-        if is_near:
-            logger.debug(
-                f"{agent_id} near (but not in) escalator zone {current_zone}, "
-                f"triggering transfer to {target_zone}"
-            )
-
-        # Map relative position from source to target polygon
-        # Use centroid with small offset to avoid geometry boundary issues
         new_position = self._map_position_safe(source_poly, target_poly, position)
-
-        # Record transfer for cooldown
         self.transfer_history[agent_id] = current_time
 
         logger.debug(
-            f"Transfer {agent_id}: {current_zone} (L{current_level}) → "
-            f"{target_zone} (L{target_level}) at pos {position} → {new_position}"
+            f"Transfer {agent_id}: {current_zone} (L{current_level}) -> "
+            f"{target_zone} (L{target_level}) at pos {position} -> {new_position}"
         )
 
         return target_zone, target_level, new_position
@@ -224,77 +160,36 @@ class LevelTransferManager:
     def _map_position_safe(
         self, source_poly: Polygon, target_poly: Polygon, source_pos: tuple[float, float]
     ) -> tuple[float, float]:
-        """
-        Map agent position from source escalator polygon to target escalator polygon.
-
-        Since escalator zones represent the same physical location on different levels,
-        we preserve the relative position within the polygon.
-
-        Args:
-            source_poly: Source polygon (escalator on current level)
-            target_poly: Target polygon (escalator on destination level)
-            source_pos: Position within source polygon
-
-        Returns:
-            Corresponding position in target polygon
-        """
-        from shapely.geometry import Point
-
-        # Get bounding boxes
-        source_bounds = source_poly.bounds  # (minx, miny, maxx, maxy)
+        """Map source transfer-zone relative position into target zone."""
+        source_bounds = source_poly.bounds
         target_bounds = target_poly.bounds
 
-        # Normalize position within source bounds
         sx_min, sy_min, sx_max, sy_max = source_bounds
         tx_min, ty_min, tx_max, ty_max = target_bounds
 
-        # Handle zero-width/height cases
         sx_range = sx_max - sx_min if sx_max > sx_min else 1.0
         sy_range = sy_max - sy_min if sy_max > sy_min else 1.0
         tx_range = tx_max - tx_min if tx_max > tx_min else 1.0
         ty_range = ty_max - ty_min if ty_max > ty_min else 1.0
 
-        # Normalized position (0.0 to 1.0)
         norm_x = (source_pos[0] - sx_min) / sx_range
         norm_y = (source_pos[1] - sy_min) / sy_range
 
-        # Map to target polygon with same relative position
         target_x = tx_min + norm_x * tx_range
         target_y = ty_min + norm_y * ty_range
 
-        # Erode target polygon slightly to ensure we're away from boundaries
-        # JuPedSim requires 0.2m clearance from boundaries
         eroded_target = target_poly.buffer(-0.3)
-
-        # Check if mapped position is inside eroded polygon
         test_point = Point(target_x, target_y)
 
         if not eroded_target.is_empty and eroded_target.contains(test_point):
-            # Position is safe
-            logger.debug(f"Mapped position ({target_x:.2f}, {target_y:.2f}) is safe")
             return (target_x, target_y)
 
-        # If not safe, use eroded polygon centroid instead
         if not eroded_target.is_empty:
             centroid = eroded_target.centroid
-            logger.debug(
-                f"Mapped position unsafe, using eroded centroid: "
-                f"({centroid.x:.2f}, {centroid.y:.2f})"
-            )
             return (centroid.x, centroid.y)
 
-        # Last resort: use original target centroid
         centroid = target_poly.centroid
-        logger.debug(f"Using target centroid: ({centroid.x:.2f}, {centroid.y:.2f})")
         return (centroid.x, centroid.y)
-
-    def _parse_shape_string(self, shape_str: str) -> list[tuple[float, float]]:
-        """Parse SUMO shape string into coordinate list."""
-        coords = []
-        for point_str in shape_str.strip().split():
-            x, y = point_str.split(",")
-            coords.append((float(x), float(y)))
-        return coords
 
     def get_transfer_info(self) -> dict:
         """Get debugging info about transfers."""
@@ -304,3 +199,7 @@ class LevelTransferManager:
             "zones": list(self.escalator_zones.keys()),
             "transfers": {k: f"{v[0]} (L{v[1]})" for k, v in self.transfer_mappings.items()},
         }
+
+    def get_level_zones(self, level_id: str) -> dict[str, Polygon]:
+        """Return transfer-zone polygons for one level."""
+        return self.escalator_zones_by_level.get(str(level_id), {})

@@ -511,6 +511,15 @@ class ObservationGenerator:
             letter, direction = zone_escalator_match.groups()
             return f"escalator_{letter}_{direction}"
 
+        zone_dotted_match = re.match(
+            r"^esc\.([A-Z])\.zone\.(concourse|platform)\.(departure|arrival)$",
+            exit_id,
+        )
+        if zone_dotted_match:
+            letter, location, role = zone_dotted_match.groups()
+            direction = "down" if (location == "concourse" and role == "departure") else "up"
+            return f"escalator_{letter.lower()}_{direction}"
+
         return exit_id
 
     def _prefer_exit_label(self, current_label: str, candidate_label: str) -> str:

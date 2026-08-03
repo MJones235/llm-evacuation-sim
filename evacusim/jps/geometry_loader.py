@@ -260,6 +260,31 @@ def load_escalator_corridors(xml_path: str) -> dict[str, Polygon]:
     return corridors
 
 
+def load_escalator_endpoints(xml_path: str) -> list[dict[str, str]]:
+    """Load explicit escalator endpoint metadata records from geometry XML."""
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+
+    endpoints: list[dict[str, str]] = []
+    for poly in root.findall('.//poly[@type="jupedsim.escalator_endpoint"]'):
+        endpoints.append(
+            {
+                "endpoint_id": (poly.get("endpoint_id") or poly.get("name") or poly.get("id") or "").strip(),
+                "role": (poly.get("role") or "").strip().lower(),
+                "transfer_zone": (poly.get("transfer_zone") or "").strip(),
+                "corridor": (poly.get("corridor") or "").strip(),
+                "exit_name": (poly.get("exit_name") or "").strip(),
+                "transfer_to_zone": (poly.get("transfer_to_zone") or "").strip(),
+                "spawn_x": (poly.get("spawn_x") or "").strip(),
+                "spawn_y": (poly.get("spawn_y") or "").strip(),
+                "egress_x": (poly.get("egress_x") or "").strip(),
+                "egress_y": (poly.get("egress_y") or "").strip(),
+            }
+        )
+
+    return endpoints
+
+
 def combine_walkable_geometry(
     walkable_areas: dict[str, Polygon], obstacles: list[Polygon] | None = None
 ) -> tuple:

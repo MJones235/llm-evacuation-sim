@@ -140,7 +140,7 @@ class AgentBuilder:
         knowledge_config = self.station_layout["knowledge"]
         profile_name = config["knowledge_profile"]
         level_id = str(config.get("level_id", "0"))
-        initial_zone = config.get("initial_zone", "platform_def")
+        initial_zone = config.get("initial_zone", "station")
 
         base_memories = knowledge_config["base_memories"]
         profile_memories = knowledge_config["profiles"][profile_name]

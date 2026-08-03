@@ -22,6 +22,15 @@ Core mechanics include:
 - stable hash comparisons,
 - cached decision reuse on hits.
 
+Because the full rendered action-spec text is part of the cache key input,
+editing the external decision prompt template invalidates prior cache hits for
+affected agents and forces fresh LLM calls until a new steady state is reached.
+
+The Azure system prompt is externalized too, but it is not part of the
+PromptCache hash gate. Changing the system prompt influences subsequent LLM
+calls, while cache-hit decisions continue to reuse their previously cached
+actions until another cache-miss trigger occurs.
+
 This strategy is one of the most important design choices for cost control.
 
 ## Concurrency Model

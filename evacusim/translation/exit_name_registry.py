@@ -295,9 +295,21 @@ def build_registry_from_station_layout(
     # "Escalator A (down to Platform 3 & Platform 4)" resolve to the exit name
     # that JuPedSim actually has registered, preventing routing failures.
     _esc_zone_re = re.compile(r"^L[^_]+_esc_([a-f])_(up|down)$")
+    _esc_zone_dotted_re = re.compile(
+        r"^esc\.([A-F])\.zone\.(concourse|platform)\.(departure|arrival)$"
+    )
     for zone_key in station_layout.get("down_access_exits", {}).keys():
         m = _esc_zone_re.match(zone_key)
-        canonical_id = f"escalator_{m.group(1)}_{m.group(2)}" if m else zone_key
+        if m:
+            canonical_id = f"escalator_{m.group(1)}_{m.group(2)}"
+        else:
+            m2 = _esc_zone_dotted_re.match(zone_key)
+            if m2:
+                letter, location, role = m2.groups()
+                direction = "down" if (location == "concourse" and role == "departure") else "up"
+                canonical_id = f"escalator_{letter.lower()}_{direction}"
+            else:
+                canonical_id = zone_key
         if canonical_id not in registry._id_to_display:
             # Prefer the custom display name keyed by zone_key, then by canonical_id.
             display = custom_names.get(zone_key) or custom_names.get(canonical_id)

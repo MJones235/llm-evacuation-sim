@@ -14,6 +14,7 @@ from evacusim.utils.logger import get_logger
 from evacusim.jps.geometry_processor import GeometryProcessor
 from evacusim.jps.geometry_loader import (
     load_entrance_areas,
+    load_escalator_endpoints,
     load_escalator_corridors,
     load_exit_thresholds,
     load_obstacles,
@@ -73,17 +74,31 @@ class GeometryManager:
             self.platform_areas,
             self.obstacles,
             self.escalator_corridors,
+            self.escalator_endpoints,
             self.exit_thresholds,
             self.train_entrance_areas,
         ) = self._load_geometry()
 
+        self.escalator_exit_bindings: dict[str, dict[str, str]] = {}
+        for ep in self.escalator_endpoints:
+            if ep.get("role") != "departure":
+                continue
+            exit_name = ep.get("exit_name")
+            if not exit_name:
+                continue
+            self.escalator_exit_bindings[exit_name] = {
+                "transfer_zone": ep.get("transfer_zone", ""),
+                "corridor": ep.get("corridor", ""),
+                "endpoint_id": ep.get("endpoint_id", ""),
+            }
+
         # Snapshot of escalator transfer-zone polygons taken before any blockage
         # removal so that StationLayoutBuilder can still compute entrance positions
         # for blocked escalators (whose TZ is popped from walkable_areas below).
-        import re as _re_tz
         self.escalator_transfer_zones: dict[str, object] = {
-            k: v for k, v in self.walkable_areas.items()
-            if _re_tz.match(r"^L[^_]+_esc_[a-f]_", k)
+            ep.get("transfer_zone", ""): self.walkable_areas.get(ep.get("transfer_zone", ""))
+            for ep in self.escalator_endpoints
+            if ep.get("transfer_zone", "") in self.walkable_areas
         }
 
         # Remove corridor + transfer-zone polygons for pre-blocked escalators so
@@ -139,6 +154,7 @@ class GeometryManager:
         platform_areas = load_platform_areas(str(geom_file))
         obstacles = load_obstacles(str(geom_file))
         escalator_corridors = load_escalator_corridors(str(geom_file))
+        escalator_endpoints = load_escalator_endpoints(str(geom_file))
         exit_thresholds = load_exit_thresholds(str(geom_file))
         train_entrance_areas = load_train_entrance_areas(str(geom_file))
         if exit_thresholds:
@@ -157,6 +173,7 @@ class GeometryManager:
         logger.info(f"  Loaded {len(obstacles)} obstacles")
         logger.info(f"  Integrated {len(fixed_obstacles)} obstacles into walkable areas")
         logger.info(f"  Loaded {len(escalator_corridors)} escalator corridors")
+        logger.info(f"  Loaded {len(escalator_endpoints)} escalator endpoints")
 
         return (
             walkable_areas,
@@ -165,6 +182,7 @@ class GeometryManager:
             platform_areas,
             fixed_obstacles,
             escalator_corridors,
+            escalator_endpoints,
             exit_thresholds,
             train_entrance_areas,
         )
@@ -217,21 +235,17 @@ class GeometryManager:
 
         level = str(self.level_id)
         for exit_name in self._initially_blocked_exits:
-            parts = exit_name.split("_")  # e.g. ["escalator", "d", "down"]
-            if len(parts) < 2 or parts[0] != "escalator":
+            binding = self.escalator_exit_bindings.get(exit_name)
+            if binding is None:
                 continue
-            esc_letter = parts[1]
 
             # Collect corridor + transfer-zone polygons for this escalator on this level.
             shapes = []
-            corr_key = f"L{level}_esc_corridor_{esc_letter}"
+            corr_key = binding.get("corridor", "")
             if corr_key in self.escalator_corridors:
                 shapes.append(self.escalator_corridors[corr_key])
-            tz_key = next(
-                (k for k in self.walkable_areas if k.startswith(f"L{level}_esc_{esc_letter}_")),
-                None,
-            )
-            if tz_key:
+            tz_key = binding.get("transfer_zone", "")
+            if tz_key and tz_key in self.walkable_areas:
                 tz_polygon = self.walkable_areas[tz_key]
                 shapes.append(tz_polygon)
                 # Record the platform-level entrance of this escalator corridor

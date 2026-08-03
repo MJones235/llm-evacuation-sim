@@ -59,6 +59,10 @@ _RE_TIMESTAMP = re.compile(r"\bat t=[\d.]+s\b")
 _RE_MOVEMENT_ADVERBS = re.compile(
     r"\b(purposefully|quickly|slowly|calmly|briskly)\b", re.IGNORECASE
 )
+_RE_PEOPLE_FLOW = re.compile(
+    r"\b(?:Most people nearby are|People nearby are|Many people are)\s+[^\.\n]+\.?",
+    re.IGNORECASE,
+)
 _RE_MULTI_SPACE = re.compile(r"[ \t]+")
 _RE_MULTI_NEWLINE = re.compile(r"\n\s*\n")
 
@@ -350,6 +354,10 @@ class PromptCache:
 
         # 8. Normalise movement adverbs.
         filtered = _RE_MOVEMENT_ADVERBS.sub("", filtered)
+
+        # 8b. Remove volatile crowd-flow narration that changes frequently but
+        # rarely alters route choice semantics.
+        filtered = _RE_PEOPLE_FLOW.sub("", filtered)
 
         # 9. Collapse whitespace left by removals.
         filtered = _RE_MULTI_SPACE.sub(" ", filtered)

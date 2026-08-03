@@ -240,6 +240,54 @@ class ActionExecutor:
         logger.debug(f"[FOLLOW] {agent_id}: nearest-point snap failed; using fallback {fallback}")
         return fallback
 
+    def _is_in_escalator_context(
+        self, agent_id: str, position: tuple[float, float] | None
+    ) -> bool:
+        """Return True when an agent is inside an escalator corridor or transfer zone."""
+        if position is None:
+            return False
+
+        from shapely.geometry import Point
+
+        p = Point(position)
+
+        # Multi-level: check per-level corridors + named transfer zones
+        if hasattr(self.jps_sim, "simulations") and hasattr(self.jps_sim, "agent_levels"):
+            level_id = self.jps_sim.agent_levels.get(agent_id)
+            if level_id is None:
+                return False
+
+            level_sim = self.jps_sim.simulations.get(level_id)
+            if level_sim is None:
+                return False
+
+            corridors = getattr(level_sim.geometry_manager, "escalator_corridors", {})
+            for poly in corridors.values():
+                if poly.covers(p) or poly.contains(p):
+                    return True
+
+            controller = getattr(self.jps_sim, "escalator_controller", None)
+            if controller is not None:
+                for zone_name in controller.get_level_zone_names(level_id):
+                    zone_poly = controller.get_zone_polygon(zone_name)
+                    if zone_poly is not None and (zone_poly.covers(p) or zone_poly.contains(p)):
+                        return True
+            else:
+                transfer_manager = getattr(self.jps_sim, "transfer_manager", None)
+                zones = getattr(transfer_manager, "escalator_zones", {}) if transfer_manager else {}
+                for zone_poly in zones.values():
+                    if zone_poly.covers(p) or zone_poly.contains(p):
+                        return True
+            return False
+
+        # Single-level fallback: only corridor detection is available
+        geometry_manager = getattr(self.jps_sim, "geometry_manager", None)
+        corridors = getattr(geometry_manager, "escalator_corridors", {}) if geometry_manager else {}
+        for poly in corridors.values():
+            if poly.covers(p) or poly.contains(p):
+                return True
+        return False
+
     def _handle_move_action(self, agent_id: str, translated_action: dict[str, Any], target):
         """Handle move action: agent moving to exit, waypoint, or toward another agent."""
         # Update action state
@@ -263,37 +311,14 @@ class ActionExecutor:
         new_exit_name = extract_exit_name(translated_action, self.station_layout)
 
         if new_exit_name:
-            # Track destination and commit the JuPedSim journey regardless of whether
-            # the exit is currently blocked.  Realism requires that agents navigate
-            # toward their chosen exit and discover the blockage through observation
-            # (line-of-sight) rather than having their decision silently overridden.
-            # If they reach a blocked escalator the multi-level simulation will bounce
-            # them back and trigger an immediate re-decision.
+            # Track destination and commit the selected exit directly.
+            # Do not substitute with fallback waypoint routing on failure.
             self.agent_destinations[agent_id] = new_exit_name
             logger.debug(
-                f"[MOVE] {agent_id} set_agent_evacuation_exit({agent_id}, {new_exit_name})"
+                f"[MOVE] {agent_id} set_agent_destination_exit({agent_id}, {new_exit_name})"
             )
-            try:
-                self.jps_sim.set_agent_evacuation_exit(agent_id, new_exit_name)
-                logger.debug(f"Switched {agent_id} to journey for {new_exit_name}")
-            except KeyError as exc:
-                # Pre-blocked or absent exit: navigate via waypoint so the agent
-                # walks toward the blocked position and discovers the blockage
-                # through observation at close range, then redecides.
-                logger.debug(f"[MOVE] {agent_id} exit routing failed: {exc}")
-                if target is not None:
-                    agent_pos = self.state_queries.get_agent_position(agent_id)
-                    snapped = self._safe_follow_target(agent_id, agent_pos, target)
-                    logger.info(
-                        f"[MOVE] {agent_id} → blocked/absent exit '{new_exit_name}'; "
-                        f"using waypoint navigation to {snapped}"
-                    )
-                    self.jps_sim.set_agent_target(agent_id, snapped)
-                else:
-                    logger.warning(
-                        f"[MOVE] {agent_id} → blocked exit '{new_exit_name}' has no "
-                        f"known position; cannot navigate toward it"
-                    )
+            self.jps_sim.set_agent_destination_exit(agent_id, new_exit_name)
+            logger.debug(f"Switched {agent_id} to journey for {new_exit_name}")
         else:
             # Not moving to an exit, just a waypoint — snap to walkable area first so
             # that zone centroids landing on obstacles or outside the geometry don't
@@ -311,12 +336,17 @@ class ActionExecutor:
         self, agent_id: str, translated_action: dict[str, Any], current_sim_time: float
     ):
         """Handle wait action: agent staying in place or seeking information."""
-        # Update action state
-        self.agent_action[agent_id] = "waiting"
-
         wait_reason = translated_action.get("wait_reason", "unspecified")
 
         current_position = self.state_queries.get_agent_position(agent_id)
+
+        if self._is_in_escalator_context(agent_id, current_position):
+            logger.warning(
+                f"[WAIT] {agent_id} chose wait in escalator context; no automatic reroute applied"
+            )
+
+        # Update action state (normal wait handling outside escalator contexts)
+        self.agent_action[agent_id] = "waiting"
 
         # Different behavior based on wait reason
         if wait_reason == "seeking_information":

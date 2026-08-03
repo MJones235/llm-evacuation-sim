@@ -682,61 +682,57 @@ class DirectorSystem:
         avoids routing the agent into arrival-only zones which would trigger a
         direction-violation and reroute them back via an evacuation exit.
         """
-        if not hasattr(jps_sim, "transfer_manager"):
+        controller = getattr(jps_sim, "escalator_controller", None)
+        if controller is None:
             logger.debug(
                 f"[{self.system_name}] {agent_id}: cross-level patrol requested but "
-                "sim has no transfer_manager — cannot route to escalator."
+                "sim has no escalator_controller — cannot route to escalator."
             )
             return
 
-        # Determine travel direction
-        going_down = float(target_level) < float(current_level)
-        direction_suffix = "_down" if going_down else "_up"
-
-        prefix = f"L{current_level}_esc_"
-        esc_zones = {
-            name: poly
-            for name, poly in jps_sim.transfer_manager.escalator_zones.items()
-            if name.startswith(prefix) and name.endswith(direction_suffix)
-        }
-        if not esc_zones:
+        candidate_edges = [
+            edge
+            for edge in controller.registry.edges
+            if edge.from_level == str(current_level) and edge.to_level == str(target_level)
+        ]
+        if not candidate_edges:
             logger.warning(
-                f"[{self.system_name}] {agent_id}: no '{direction_suffix}' escalator zones "
+                f"[{self.system_name}] {agent_id}: no escalator transfer edges "
                 f"found on level {current_level} — cannot route to next patrol waypoint."
             )
             return
 
-        # Pick the nearest zone and derive the exit name from the zone name.
-        # Zone naming: L{level}_esc_{letter}_{direction}
-        # Exit naming: escalator_{letter}_{direction}
+        # Pick the nearest departure transfer zone and route to its explicit exit.
         # JuPedSim only removes an agent from a level (triggering the transfer)
         # when they reach a registered *exit* stage, not a plain waypoint.  We
         # must use set_agent_evacuation_exit so the agent is properly processed
         # by _process_escalator_exits on the next step.
-        best_zone: str | None = None
+        best_edge = None
         best_dist = float("inf")
-        for zone_name, poly in esc_zones.items():
+        for edge in candidate_edges:
+            poly = controller.get_zone_polygon(edge.from_zone_name)
+            if poly is None:
+                continue
             c = poly.centroid
             d = (position[0] - c.x) ** 2 + (position[1] - c.y) ** 2
             if d < best_dist:
                 best_dist = d
-                best_zone = zone_name
+                best_edge = edge
 
-        if best_zone is not None:
-            # L{level}_esc_{letter}_{direction} → escalator_{letter}_{direction}
-            parts = best_zone.split("_esc_", 1)
-            exit_name = f"escalator_{parts[1]}" if len(parts) == 2 else None
+        if best_edge is not None:
+            exit_name = best_edge.from_exit_name
             try:
-                if exit_name and hasattr(jps_sim, "set_agent_evacuation_exit"):
-                    jps_sim.set_agent_evacuation_exit(agent_id, exit_name)
+                if exit_name and hasattr(jps_sim, "set_agent_destination_exit"):
+                    jps_sim.set_agent_destination_exit(agent_id, exit_name)
                     logger.debug(
                         f"[{self.system_name}] {agent_id} routed to escalator exit "
                         f"'{exit_name}' (level {current_level} → {target_level})"
                     )
                 else:
-                    # Fallback: single-level sim — use waypoint
-                    c = esc_zones[best_zone].centroid
-                    jps_sim.set_agent_target(agent_id, (c.x, c.y))
+                    logger.warning(
+                        f"[{self.system_name}] {agent_id}: destination-exit routing "
+                        f"API unavailable; no fallback applied for '{exit_name}'"
+                    )
             except Exception as exc:
                 logger.warning(
                     f"[{self.system_name}] {agent_id}: could not route to escalator "

@@ -75,6 +75,7 @@ class ConcordiaJuPedSimulation:
             level_id=self.level_id,
             exit_thresholds=self.geometry_manager.exit_thresholds,
             train_entrance_areas=self.geometry_manager.train_entrance_areas,
+            escalator_endpoints=self.geometry_manager.escalator_endpoints,
             initially_blocked_exits=initially_blocked_exits,
         )
 
@@ -92,18 +93,20 @@ class ConcordiaJuPedSimulation:
     def add_geometry_obstacle_for_exit(self, exit_name: str) -> None:
         """Add a physical barrier that prevents agent access to a blocked exit.
 
-        Removes the entire escalator shaft volume — corridor polygon unioned with
-        its transfer-zone walkable area — from the navmesh in one operation.
-        This keeps the navmesh topologically connected (single Polygon) on both
-        levels: agents simply cannot path into space that no longer exists.
+        Runtime blocking should allow agents to approach an exit and discover the
+        obstruction, but prevent crossing into the transfer zone. We therefore
+        place a narrow barrier strip at the corridor/transfer-zone threshold.
+
+        For robust startup pre-blocking (t<=0), GeometryManager._apply_initial_blockages
+        still removes the full shaft from navmesh. This method is for runtime
+        block_exit events where discovery behavior matters.
         """  # noqa: D401
         from shapely.ops import unary_union as _union
 
-        parts = exit_name.split("_")  # ["escalator", "d", "down"]
-        if len(parts) < 3:
+        binding = getattr(self.geometry_manager, "escalator_exit_bindings", {}).get(exit_name)
+        if binding is None:
             return
-        esc_letter = parts[1]
-        corridor_name = f"L{self.level_id}_esc_corridor_{esc_letter}"
+        corridor_name = binding.get("corridor", "")
         corridor_poly = self.geometry_manager.escalator_corridors.get(corridor_name)
         if corridor_poly is None:
             logger.warning(
@@ -111,53 +114,83 @@ class ConcordiaJuPedSimulation:
             )
             return
 
-        # Find the matching transfer-zone walkable area (e.g. L0_esc_d_down,
-        # L-1_esc_d_down, etc.) and union it with the corridor polygon.
-        tz_key = next(
-            (
-                k
-                for k in self.geometry_manager.walkable_areas
-                if k.startswith(f"L{self.level_id}_esc_{esc_letter}_")
-            ),
-            None,
-        )
-        shapes = [corridor_poly]
-        if tz_key:
-            shapes.append(self.geometry_manager.walkable_areas[tz_key])
-        else:
-            logger.warning(
-                f"No transfer-zone walkable area found for '{corridor_name}' — "
-                f"using corridor polygon only"
-            )
+        # Find the matching transfer-zone walkable area.
+        tz_key = binding.get("transfer_zone", "")
+        tz_poly = self.geometry_manager.walkable_areas.get(tz_key) if tz_key else None
 
-        # Small buffer ensures a clean union even when polygons only touch.
-        full_block = _union(shapes).buffer(0.02)
-        self.geometry_manager.add_obstacle_polygon(full_block)
+        # Preferred: barrier along the shared corridor↔transfer-zone boundary.
+        barrier_poly = None
+        if tz_poly is not None:
+            shared_boundary = corridor_poly.boundary.intersection(tz_poly.boundary)
+            if not shared_boundary.is_empty:
+                # Cap style 2 gives squared ends, better for doorway-style sealing.
+                barrier_poly = shared_boundary.buffer(0.35, cap_style=2, join_style=2)
+                # Keep the strip local to the escalator mouth.
+                mouth_region = corridor_poly.buffer(0.15).union(tz_poly.buffer(0.15))
+                barrier_poly = barrier_poly.intersection(mouth_region)
+
+            # Fallback if boundary topology is imperfect in source geometry.
+            if (barrier_poly is None or barrier_poly.is_empty):
+                overlap = corridor_poly.intersection(tz_poly.buffer(0.6))
+                if not overlap.is_empty:
+                    barrier_poly = overlap.buffer(0.05)
+
+        # Last resort: if transfer-zone metadata is missing, create a short strip
+        # near the corridor centroid instead of deleting the entire shaft.
+        if barrier_poly is None or barrier_poly.is_empty:
+            c = corridor_poly.centroid
+            fallback_strip = c.buffer(0.45)
+            barrier_poly = fallback_strip.intersection(corridor_poly.buffer(0.15))
+
+        if barrier_poly is None or barrier_poly.is_empty:
+            logger.warning(
+                f"Could not construct runtime barrier for '{exit_name}' on '{corridor_name}'"
+            )
+            return
+
+        # Small cleanup buffer to avoid sliver/topology issues.
+        barrier_poly = _union([barrier_poly]).buffer(0.01)
+        self.geometry_manager.add_obstacle_polygon(barrier_poly)
         logger.info(
-            f"🚧 Escalator '{corridor_name}' sealed "
-            f"(removed {full_block.area:.2f} m² from navmesh)"
+            f"🚧 Escalator '{corridor_name}' runtime-blocked with threshold barrier "
+            f"({barrier_poly.area:.2f} m² removed)"
         )
 
     def add_agent(
-        self, agent_id: str, position: tuple[float, float], walking_speed: float = 1.34
+        self,
+        agent_id: str,
+        position: tuple[float, float],
+        walking_speed: float = 1.34,
+        assign_default_destination: bool = True,
     ) -> None:
         """
         Add an agent to the simulation.
 
-        Agent is placed at position with a valid default evacuation journey.
-        The LLM can immediately switch this journey when making its first decision.
+        Agent is placed at position with either:
+        - a default destination-exit journey (normal spawn), or
+        - a local hold waypoint at the spawn point (transfer/bounce reinsertions).
 
         Args:
             agent_id: Concordia agent ID
             position: Initial (x, y) position
             walking_speed: Desired walking speed in m/s (default: 1.34 m/s)
+            assign_default_destination: If True, assign the level's default
+                destination exit. If False, assign a local hold waypoint so the
+                next movement comes from an explicit decision.
 
         Raises:
             Exception: If JuPedSim fails to add the agent
         """
         # JuPedSim requires integer journey_id and stage_id at agent creation.
-        # Assign a valid default journey immediately; LLM can override on first decision.
-        exit_name, stage_id, journey_id = self.exit_manager.get_default_exit()
+        # For transfer/bounce reinsertions we intentionally avoid assigning any
+        # implicit destination exit to prevent non-decision-driven movement.
+        exit_name: str | None = None
+        if assign_default_destination:
+            exit_name, stage_id, journey_id = self.exit_manager.get_default_exit()
+        else:
+            stage_id = self.simulation.add_waypoint_stage(position, distance=0.5)
+            journey = jps.JourneyDescription([stage_id])
+            journey_id = self.simulation.add_journey(journey)
 
         jps_id = self.simulation.add_agent(
             jps.CollisionFreeSpeedModelAgentParameters(
@@ -170,11 +203,15 @@ class ConcordiaJuPedSimulation:
 
         # Register in agent tracker
         self.agent_tracker.add_agent(agent_id, jps_id)
-        self.agent_assigned_exits[agent_id] = exit_name
+        if exit_name is not None:
+            self.agent_assigned_exits[agent_id] = exit_name
+        else:
+            self.agent_assigned_exits.pop(agent_id, None)
 
         logger.info(
             f"Added agent {agent_id} at {position} "
-            f"with speed {walking_speed:.2f} m/s (JPS ID: {jps_id})"
+            f"with speed {walking_speed:.2f} m/s (JPS ID: {jps_id}, "
+            f"default_destination={assign_default_destination})"
         )
 
     def step(self) -> bool:
@@ -246,13 +283,13 @@ class ConcordiaJuPedSimulation:
 
         logger.info(f"Set target for agent {agent_id} to {target}")
 
-    def set_agent_evacuation_exit(self, agent_id: str, exit_name: str) -> None:
+    def set_agent_destination_exit(self, agent_id: str, exit_name: str) -> None:
         """
-        Direct an agent to a specific evacuation exit.
+        Direct an agent to a specific named exit.
 
         Args:
             agent_id: Concordia agent ID
-            exit_name: Name of the evacuation exit
+            exit_name: Name of the destination exit
 
         Raises:
             KeyError: If agent or exit is not found

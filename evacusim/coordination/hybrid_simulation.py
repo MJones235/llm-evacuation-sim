@@ -63,7 +63,7 @@ class HybridSimulationRunner:
 
     @staticmethod
     def build_systems_for_pre_spawn(
-        systems_config: dict[str, Any],
+        systems_config: dict[str, Any] | None,
         jps_sim: Any,
         station_layout: dict[str, Any],
     ) -> tuple[list, dict]:
@@ -79,6 +79,7 @@ class HybridSimulationRunner:
         """
         systems: list = []
         agent_roles: dict = {}
+        systems_config = HybridSimulationRunner._normalize_systems_config(systems_config)
         for name, cfg in systems_config.items():
             if not cfg.get("enabled", False):
                 continue
@@ -87,6 +88,22 @@ class HybridSimulationRunner:
             systems.append(system)
             logger.info(f"[pre-spawn] System '{name}' set up ({len(system.agent_ids)} director agent(s))")
         return systems, agent_roles
+
+    @staticmethod
+    def _normalize_systems_config(systems_config: Any) -> dict[str, Any]:
+        """Return a safe systems config mapping.
+
+        ``systems: null`` (or missing systems) is valid and treated as no systems.
+        """
+        if systems_config is None:
+            return {}
+        if not isinstance(systems_config, dict):
+            logger.warning(
+                "Invalid 'systems' config type %s; expected mapping. Ignoring systems.",
+                type(systems_config).__name__,
+            )
+            return {}
+        return systems_config
 
     def __init__(
         self,
@@ -102,6 +119,7 @@ class HybridSimulationRunner:
         monitoring_config: dict[str, Any] | None = None,
         performance_config: dict[str, Any] | None = None,
         systems_config: dict[str, Any] | None = None,
+        decision_prompt_template_path: str | None = None,
         pace_to_realtime: bool = False,
         pre_built_systems: list | None = None,
         pre_built_agent_roles: dict | None = None,
@@ -129,6 +147,9 @@ class HybridSimulationRunner:
                 Each key is a system name (e.g. ``"staff"``); the value is the
                 system configuration dict.  Systems with ``enabled: true`` are
                 initialised and stepped each simulation cycle.
+            decision_prompt_template_path: Optional path to a text template used
+                to build each agent decision prompt. If omitted, the built-in
+                default template file is used.
             pace_to_realtime: When True each simulation step sleeps until
                 ``jps_sim.dt`` seconds have elapsed, matching wall-clock to
                 simulation time (useful for live viewers).  When False the
@@ -204,9 +225,8 @@ class HybridSimulationRunner:
         self.agent_injured = injured_agents
 
         # Tracking
-        self.last_decision_time = (
-            -decision_interval
-        )  # Start negative so first decision happens immediately
+        # Seeded below once group cadence is known.
+        self.last_decision_time = 0.0
         self.current_sim_time = 0.0
         self.current_step = 0  # Track current simulation step for logging
         self.agent_decisions: dict[str, dict[str, Any]] = {}
@@ -272,9 +292,19 @@ class HybridSimulationRunner:
             perf_timer=self.perf_timer,
             jps_sim=self.jps_sim,
             agent_configs=agents_config,
+            enable_group_decisions=bool(
+                self.performance_config.get("enable_group_decisions", False)
+            ),
+            group_decision_min_size=max(
+                2, int(self.performance_config.get("group_decision_min_size", 3))
+            ),
             llm_semaphore_limit=int(self.performance_config.get("max_parallel_agents", 10)),
             per_agent_timeout_secs=self.performance_config.get("decision_timeout_seconds", 30.0),
+            min_redecision_interval_secs=float(
+                self.performance_config.get("min_redecision_interval_seconds", 0.0)
+            ),
             wait_nudge_enabled=bool(self.performance_config.get("wait_nudge_enabled", False)),
+            decision_prompt_template_path=decision_prompt_template_path,
         )
 
         # Observation coordination
@@ -327,28 +357,53 @@ class HybridSimulationRunner:
         # Agents are divided into N_GROUPS groups; only one group is processed each
         # decision cycle.  This spreads LLM requests evenly across time, reducing
         # peak concurrency and preventing Azure rate-limit bursts.
-        # Set _decision_groups = 1 to restore the original all-at-once behaviour.
-        self._decision_groups: int = 3
+        # Configure via performance.decision_groups (default 3). Set to 1 for
+        # all-at-once behaviour each decision tick.
+        self._decision_groups: int = max(
+            1, int(self.performance_config.get("decision_groups", 3))
+        )
         agent_ids_sorted = sorted(self.concordia_agents.keys())
         n = len(agent_ids_sorted)
         self._agent_groups: list[list[str]] = [
             agent_ids_sorted[i::self._decision_groups]
             for i in range(self._decision_groups)
         ]
+        # Decision ticks happen every decision_interval / groups so each individual
+        # agent still re-decides roughly every decision_interval.
+        self._group_decision_interval: float = (
+            self.decision_interval / self._decision_groups
+            if self._decision_groups > 1
+            else self.decision_interval
+        )
+        # Without bootstrap we still want the first staggered batch at t=0.
+        self.last_decision_time = -self._group_decision_interval
         self._current_group_index: int = 0
         logger.info(
             f"Staggered decision groups: {self._decision_groups} groups "
-            f"of ~{n // self._decision_groups} agents each"
+            f"of ~{n // self._decision_groups} agents each "
+            f"(group tick {self._group_decision_interval:.2f}s, "
+            f"per-agent cadence ~{self.decision_interval:.1f}s)"
         )
 
         # Agents that need a decision at the *next* scheduled cycle regardless of
         # which rotation group they belong to.  Populated when agents transfer
-        # between levels so they don't wait up to (decision_interval × N_GROUPS)
-        # seconds frozen at the arrival waypoint before their group's turn fires.
+        # between levels so they don't wait up to one full per-agent cadence
+        # before their group's turn fires.
         self._pending_immediate_decisions: set[str] = set()
 
-        # Bootstrap decisions at t=0 so agents choose initial journeys before first sim step
-        self._bootstrap_initial_decisions()
+        # Optional bootstrap: full all-agent decision at t=0. This can be very
+        # expensive for large populations, so it is off by default.
+        self._bootstrap_initial_decisions_enabled = bool(
+            self.performance_config.get("bootstrap_initial_decisions", False)
+        )
+        if self._bootstrap_initial_decisions_enabled:
+            # Preserve old behavior: run a full initial cycle immediately.
+            self.last_decision_time = -self._group_decision_interval
+            self._bootstrap_initial_decisions()
+        else:
+            logger.info(
+                "Skipping t=0 all-agent bootstrap decisions; using staggered runtime decisions."
+            )
 
     # ------------------------------------------------------------------
     # System management
@@ -356,11 +411,12 @@ class HybridSimulationRunner:
 
     def _init_systems(
         self,
-        systems_config: dict[str, Any],
+        systems_config: dict[str, Any] | None,
         jps_sim: Any,
         station_layout: dict[str, Any],
     ) -> None:
         """Initialise and setup all enabled rule-based systems from config."""
+        systems_config = self._normalize_systems_config(systems_config)
         for name, cfg in systems_config.items():
             if not cfg.get("enabled", False):
                 continue
@@ -454,6 +510,7 @@ class HybridSimulationRunner:
                 for step in range(self.max_steps):
                     step_start = time.perf_counter()
                     self.current_step = step
+                    force_immediate_decision_cycle = False
 
                     # Advance JuPedSim simulation
                     with self.perf_timer.measure("jupedsim_step"):
@@ -498,8 +555,13 @@ class HybridSimulationRunner:
                     if hasattr(self.jps_sim, "consume_recently_transferred_agents"):
                         transferred_agents = self.jps_sim.consume_recently_transferred_agents()
                         if transferred_agents:
+                            immediate_transfer_redecision = bool(
+                                self.performance_config.get(
+                                    "immediate_redecision_on_transfer", True
+                                )
+                            )
                             logger.info(
-                                f"Transferred agents will decide at next decision cycle: "
+                                f"Transferred agents queued for immediate decision cycle: "
                                 f"{transferred_agents}"
                             )
                             for _tid in transferred_agents:
@@ -507,6 +569,14 @@ class HybridSimulationRunner:
                                 self.decision_processor.agent_goals.pop(_tid, None)
                                 self.decision_processor.prompt_cache.clear_agent(_tid)
                                 self._pending_immediate_decisions.add(_tid)
+                            if immediate_transfer_redecision:
+                                force_immediate_decision_cycle = True
+                            else:
+                                logger.info(
+                                    "Deferring transferred-agent re-decisions to next "
+                                    "scheduled cycle for better batching "
+                                    "(performance.immediate_redecision_on_transfer=false)"
+                                )
 
                     # Consume agents that were bounced back from a blocked escalator.
                     # Clear their stale route commitments and schedule an immediate
@@ -522,6 +592,7 @@ class HybridSimulationRunner:
                             self.decision_processor.agent_goals.pop(_bid, None)
                             self.decision_processor.prompt_cache.clear_agent(_bid)
                             self._pending_immediate_decisions.add(_bid)
+                        force_immediate_decision_cycle = True
                     # decisions, meaning the alarm was missed for the entire
                     # decision cycle that coincided with the alarm time).
                     with self.perf_timer.measure("event_checking"):
@@ -532,6 +603,12 @@ class HybridSimulationRunner:
                             exited_agents=self.exited_agents,
                             zone_id_for_agent_fn=self._get_zone_id_for_agent,
                         )
+                    fired_event_types = set(
+                        getattr(self.event_manager, "last_fired_event_types", set())
+                    )
+                    critical_event_fired = bool(
+                        fired_event_types.intersection({"block_exit", "train_departure"})
+                    )
 
                     # When a train departs its exits are removed from active_train_exits.
                     # Clear any agent destination commitments that now point at a
@@ -563,15 +640,34 @@ class HybridSimulationRunner:
                     # Check if it's time for Concordia decisions (normal schedule) or
                     # if a critical event just fired (immediate all-agent override).
                     should_decide = self._should_make_decisions()
-                    if new_event_fired or should_decide:
+                    should_run_decisions = (
+                        should_decide or force_immediate_decision_cycle or critical_event_fired
+                    )
+                    if new_event_fired and not critical_event_fired and not should_run_decisions:
+                        logger.info(
+                            "Informational event(s) fired (%s) — deferring broad "
+                            "re-decisions to scheduled staggered cycle",
+                            ", ".join(sorted(fired_event_types)) or "unknown",
+                        )
+                    if should_run_decisions:
                         with self.perf_timer.measure("agent_decisions_total"):
-                            if new_event_fired:
-                                # Critical event: bypass group scheduling so every
-                                # agent hears about the event without delay.
+                            if critical_event_fired:
+                                # Critical events bypass grouping so everyone can
+                                # re-route promptly (e.g., blocked exits/closures).
                                 current_group = None  # None → process all agents
                                 logger.info(
-                                    "🚨 Critical event fired — triggering "
-                                    "immediate all-agent decision cycle"
+                                    "Critical event(s) fired (%s) — triggering "
+                                    "immediate all-agent decision cycle",
+                                    ", ".join(sorted(fired_event_types)),
+                                )
+                            elif force_immediate_decision_cycle:
+                                # Targeted immediate cycle: process only pending
+                                # out-of-group agents (e.g. transferred/bounced)
+                                # without disturbing the normal staggered cadence.
+                                current_group = []
+                                logger.info(
+                                    "Immediate targeted decision cycle for pending "
+                                    "transferred/re-routed agents"
                                 )
                             else:
                                 # Normal scheduled cycle: rotate through groups.
@@ -625,13 +721,16 @@ class HybridSimulationRunner:
                                 )
                             # Process the current group's decisions in parallel
                             with self.perf_timer.measure("decision_processing"):
-                                self.last_decision_time = (
-                                    self.decision_processor.process_all_agents(
-                                        observations,
-                                        self.current_sim_time,
-                                        agent_ids=current_group,
-                                    )
+                                cycle_time = self.decision_processor.process_all_agents(
+                                    observations,
+                                    self.current_sim_time,
+                                    agent_ids=current_group,
                                 )
+                                # Preserve global cadence on targeted immediate
+                                # cycles; only update last_decision_time for
+                                # normal schedule ticks or global event overrides.
+                                if new_event_fired or should_decide:
+                                    self.last_decision_time = cycle_time
 
                     # Track position history for video generation (every 0.5s)
                     if self.position_tracker and step % 10 == 0:
@@ -829,4 +928,4 @@ class HybridSimulationRunner:
 
     def _should_make_decisions(self) -> bool:
         """Check if it's time for agents to make decisions."""
-        return (self.current_sim_time - self.last_decision_time) >= self.decision_interval
+        return (self.current_sim_time - self.last_decision_time) >= self._group_decision_interval

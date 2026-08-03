@@ -9,8 +9,9 @@ This module is responsible for:
 """
 
 from pathlib import Path
+import logging
 
-from evacusim.utils.logger import get_logger
+from evacusim.utils.logger import get_logger, setup_logger
 from evacusim.coordination.hybrid_simulation import HybridSimulationRunner
 
 logger = get_logger(__name__)
@@ -66,8 +67,20 @@ class SimulationRunnerFactory:
 
         # Rule-based director systems (staff, firefighters, etc.)
         systems_config = config.get("systems", {})
+        prompts_config = config.get("prompts", {})
+        decision_prompt_template_path = prompts_config.get("decision_prompt_template_path")
 
         logger.info("Creating HybridSimulationRunner...")
+
+        # Persist full debug logs alongside run artifacts so transfer/discharge
+        # traces can be inspected after the run without relying on terminal output.
+        log_file = decisions_file.parent / "simulation.log"
+        setup_logger(
+            log_file=log_file,
+            console_level=logging.INFO,
+            file_level=logging.DEBUG,
+        )
+        logger.info(f"Per-run log file: {log_file}")
 
         try:
             runner = HybridSimulationRunner(
@@ -83,6 +96,7 @@ class SimulationRunnerFactory:
                 monitoring_config=monitoring_config,
                 performance_config=performance_config,
                 systems_config=systems_config,
+                decision_prompt_template_path=decision_prompt_template_path,
                 pace_to_realtime=pace_to_realtime,
                 pre_built_systems=pre_built_systems,
                 pre_built_agent_roles=pre_built_agent_roles,
@@ -110,6 +124,14 @@ class SimulationRunnerFactory:
             config: Configuration dictionary
         """
         events_config = config.get("events", [])
+        if events_config is None:
+            events_config = []
+        elif not isinstance(events_config, list):
+            logger.warning(
+                "Invalid 'events' config type %s; expected list. Ignoring events.",
+                type(events_config).__name__,
+            )
+            events_config = []
         for event in events_config:
             # Preserve all event fields (type, pa_announcement, zone_messages, etc.)
             # so that the EventManager can handle PA announcements, zone routing, etc.

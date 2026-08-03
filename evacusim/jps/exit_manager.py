@@ -5,7 +5,6 @@ Handles creation and management of evacuation exits and journey routing
 to exits in the station environment.
 """
 
-import re
 from typing import Any
 
 from evacusim.utils.logger import get_logger
@@ -35,6 +34,7 @@ class ExitManager:
         level_id: str | int = "0",
         exit_thresholds: dict[str, Any] | None = None,
         train_entrance_areas: dict[str, Any] | None = None,
+        escalator_endpoints: list[dict[str, str]] | None = None,
         initially_blocked_exits: set[str] | None = None,
     ):
         """
@@ -57,6 +57,7 @@ class ExitManager:
         self.level_id = str(level_id)
         self.exit_thresholds = exit_thresholds or {}
         self.train_entrance_areas = train_entrance_areas or {}
+        self.escalator_endpoints = escalator_endpoints or []
         # Escalator letters that are pre-blocked — skip registering their stages.
         blocked = set(initially_blocked_exits or [])
         self._blocked_esc_letters: set[str] = {
@@ -70,7 +71,11 @@ class ExitManager:
         self.train_exits: set[str] = set()
 
         # Setup evacuation exits and routes
-        escalable_zones = [z for z in (walkable_areas or {}).keys() if f"L{self.level_id}_esc" in z]
+        escalable_zones = [
+            ep.get("transfer_zone", "")
+            for ep in self.escalator_endpoints
+            if ep.get("transfer_zone")
+        ]
         logger.info(
             f"Setting up evacuation exits for level {self.level_id}: "
             f"entrance_areas={list(entrance_areas.keys()) if entrance_areas else 'None'}, "
@@ -118,7 +123,9 @@ class ExitManager:
             logger.info(
                 f"No entrance areas found. Checking for escalators in walkable_areas: {list(self.walkable_areas.keys())}"
             )
-            escalator_exits, escalator_journeys = self._create_escalator_exits(walkable_geometry)
+            escalator_exits, escalator_journeys = self._create_escalator_departure_exits(
+                walkable_geometry
+            )
             if escalator_exits:
                 logger.info(
                     f"Created {len(escalator_exits)} escalator exits on this level: {list(escalator_exits.keys())}"
@@ -168,109 +175,74 @@ class ExitManager:
                 f"entrance areas overlap with walkable areas."
             )
 
-        # Also register down-escalator exits on levels that have street exits (e.g. level 0).
-        # These escalator zones are not JPS entrance areas, but agents must be able to
-        # exit through them to trigger the level transfer down to the platform level.
-        # Only register "down" direction escalators to avoid polluting the exit set
-        # with the UP escalators that are merely arrival zones on this level.
-        escalator_pattern = re.compile(r"^L([^_]+)_esc_([a-f])_(down)$")
-        for zone_name, zone_polygon in self.walkable_areas.items():
-            match = escalator_pattern.match(zone_name)
-            if not match:
-                continue
-            level, esc_id, _direction = match.groups()
-            if level != self.level_id:
-                continue
-            exit_name = f"escalator_{esc_id}_down"
-            if exit_name in evacuation_exits:
-                continue  # Already registered (shouldn't happen, but be safe)
-            # Skip pre-blocked escalators — their corridor is not in the navmesh.
-            if esc_id in self._blocked_esc_letters:
-                logger.info(f"Skipping pre-blocked escalator exit '{exit_name}' on level {self.level_id}")
-                continue
-            try:
-                coords = list(zone_polygon.exterior.coords)[:-1]
-                if len(coords) < 3:
-                    continue
-                exit_id = self.stage_manager.create_exit_at_coordinates(
-                    exit_name=exit_name, coords=coords
-                )
-                journey_id = self.stage_manager.create_simple_exit_journey(
-                    journey_name=f"journey_to_{exit_name}", exit_id=exit_id
-                )
-                evacuation_exits[exit_name] = exit_id
-                evacuation_journeys[exit_name] = journey_id
-                logger.info(
-                    f"Created down-escalator exit '{exit_name}' on level {self.level_id} "
-                    f"(from {zone_name}, exit={exit_id})"
-                )
-            except Exception as e:
-                logger.warning(f"Failed to create down-escalator exit '{exit_name}': {e}")
+        dep_exits, dep_journeys = self._create_escalator_departure_exits(walkable_geometry)
+        evacuation_exits.update(dep_exits)
+        evacuation_journeys.update(dep_journeys)
 
         return evacuation_exits, evacuation_journeys
 
-    def _create_escalator_exits(
+    def _create_escalator_departure_exits(
         self, walkable_geometry: Any
     ) -> tuple[dict[str, int], dict[str, int]]:
-        """
-        Create real terminal exits at escalator locations for levels without street exits.
-
-        Escalators are real exits from one level. When agents reach an escalator exit,
-        they exit the level and can be transferred to the other level.
-
-        In multi-level simulations, each escalator is accessible from both levels:
-        - L-1 agents exit through escalator zones to reach level 0
-        - L0 agents exit through corresponding escalator zones to reach level -1
-
-        Escalators are identified by naming pattern: L{level}_esc_{id}_{direction}
-        Example: L-1_esc_a_up, L0_esc_b_down
-
-        Args:
-            walkable_geometry: Combined walkable geometry for validation
-
-        Returns:
-            Tuple of (evacuation_exits dict, evacuation_journeys dict)
-        """
-        escalator_pattern = re.compile(r"^L([^_]+)_esc_([a-f])_(up|down)$")
+        """Create terminal exits for explicit departure endpoints on this level."""
         evacuation_exits = {}
         evacuation_journeys = {}
 
-        for zone_name, zone_polygon in self.walkable_areas.items():
-            match = escalator_pattern.match(zone_name)
-            if not match:
+        for ep in self.escalator_endpoints:
+            if ep.get("role") != "departure":
                 continue
-
-            level, esc_id, direction = match.groups()
-
-            # Only create exits for escalators on the current level
-            if level != self.level_id:
+            zone_name = ep.get("transfer_zone", "")
+            exit_name = ep.get("exit_name", "")
+            if not zone_name or not exit_name:
+                continue
+            zone_polygon = self.walkable_areas.get(zone_name)
+            if zone_polygon is None:
                 logger.debug(f"Skipping escalator zone {zone_name} (not for level {self.level_id})")
                 continue
 
-            # Skip pre-blocked escalators — their corridor is not in the navmesh.
-            if esc_id in self._blocked_esc_letters:
-                logger.info(f"Skipping pre-blocked escalator exit 'escalator_{esc_id}_{direction}' on level {self.level_id}")
+            parts = exit_name.split("_")
+            if len(parts) >= 2 and parts[0] == "escalator" and parts[1] in self._blocked_esc_letters:
+                logger.info(f"Skipping pre-blocked escalator exit '{exit_name}' on level {self.level_id}")
                 continue
 
-            # On platform levels (no street exits), only UP escalators are departure exits.
-            # DOWN escalator zones on this level are *arrival* zones — agents spawn here
-            # after transferring from above.  Registering them as JuPedSim exit stages
-            # would immediately remove any newly-spawned agent and bounce them back up.
-            if direction == "down":
-                logger.debug(
-                    f"Skipping escalator zone {zone_name}: 'down' zones are arrival zones "
-                    f"on level {self.level_id}, not departure exits"
-                )
+            if exit_name in evacuation_exits:
                 continue
-
-            exit_name = f"escalator_{esc_id}_{direction}"
 
             try:
-                # Create a real terminal exit at the escalator zone
-                # Use the polygon coordinates directly as the exit boundary
-                coords = list(zone_polygon.exterior.coords)[:-1]  # Remove closing coord
-                if len(coords) < 3:
-                    logger.warning(f"Escalator {exit_name} has invalid polygon (<3 points)")
+                # Build a robust, interior, convex stage polygon that satisfies
+                # JuPedSim clearance constraints even for thin transfer zones.
+                region = zone_polygon.intersection(walkable_geometry)
+                if region.is_empty:
+                    logger.warning(
+                        f"Escalator {exit_name} zone does not intersect walkable geometry"
+                    )
+                    continue
+
+                safe_region = region.buffer(-0.25)
+                if safe_region.is_empty:
+                    safe_region = region.buffer(-0.15)
+                if safe_region.is_empty:
+                    safe_region = region
+
+                center = safe_region.representative_point()
+                coords: list[tuple[float, float]] | None = None
+                for half_size in (0.30, 0.24, 0.18, 0.12):
+                    candidate = [
+                        (center.x - half_size, center.y - half_size),
+                        (center.x + half_size, center.y - half_size),
+                        (center.x + half_size, center.y + half_size),
+                        (center.x - half_size, center.y + half_size),
+                    ]
+                    from shapely.geometry import Polygon
+
+                    if safe_region.contains(Polygon(candidate)):
+                        coords = candidate
+                        break
+
+                if coords is None:
+                    logger.warning(
+                        f"Could not place interior escalator exit stage for '{exit_name}'"
+                    )
                     continue
 
                 exit_id = self.stage_manager.create_exit_at_coordinates(
@@ -363,37 +335,24 @@ class ExitManager:
                     )
                 self.exit_coordinates[entrance_name] = (centroid.x, centroid.y)
 
-        # Add escalator coordinates (escalator zone centers) - ONLY for current level
-        escalator_pattern = re.compile(r"^L([^_]+)_esc_([a-f])_(up|down)$")
-        for zone_name, zone_polygon in self.walkable_areas.items():
-            match = escalator_pattern.match(zone_name)
-            if match:
-                level, esc_id, direction = match.groups()
-                # ONLY match escalators for the current level
-                if level != self.level_id:
-                    logger.debug(
-                        f"Skipping escalator zone {zone_name} (not for level {self.level_id})"
-                    )
-                    continue
-                exit_name = f"escalator_{esc_id}_{direction}"
-                if exit_name in self.evacuation_exits:
-                    centroid = zone_polygon.centroid
-                    self.exit_coordinates[exit_name] = (centroid.x, centroid.y)
-                    logger.info(
-                        f"Added escalator exit {exit_name} (from {zone_name}) at {centroid.x:.2f}, {centroid.y:.2f}"
-                    )
-                else:
-                    # Only warn if this is actually supposed to be an escalator exit on this level
-                    # For Level 0, finding L0_esc_* zones but not having them in evacuation_exits is expected
-                    # because Level 0 uses street exits, not escalator exits
-                    if level == self.level_id:
-                        logger.debug(
-                            f"Zone {zone_name} matches escalator pattern but exit_name '{exit_name}' not in evacuation_exits. Available: {list(self.evacuation_exits.keys())}"
-                        )
-                    else:
-                        logger.debug(
-                            f"Skipping escalator zone {zone_name} (not for level {self.level_id})"
-                        )
+        # Add escalator exit coordinates from departure endpoint metadata.
+        for ep in self.escalator_endpoints:
+            if ep.get("role") != "departure":
+                continue
+            zone_name = ep.get("transfer_zone", "")
+            exit_name = ep.get("exit_name", "")
+            if not zone_name or not exit_name:
+                continue
+            if exit_name not in self.evacuation_exits:
+                continue
+            zone_polygon = self.walkable_areas.get(zone_name)
+            if zone_polygon is None:
+                continue
+            centroid = zone_polygon.centroid
+            self.exit_coordinates[exit_name] = (centroid.x, centroid.y)
+            logger.info(
+                f"Added escalator exit {exit_name} (from {zone_name}) at {centroid.x:.2f}, {centroid.y:.2f}"
+            )
 
         logger.info(
             f"Populated {len(self.exit_coordinates)} exit coordinates for level {self.level_id}: {list(self.exit_coordinates.keys())}"

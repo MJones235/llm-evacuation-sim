@@ -1,0 +1,26 @@
+${role_prefix}Decision task: choose your next action now. Respond with ONLY this JSON:
+{
+  "reasoning": "1-2 sentences grounded in goal + current observations",
+  "action_type": "wait" or "move",
+${zone_target_type_line}  "target_agent": null (or agent_id like "agent_5"),
+  "exit_name": null (or the exit name EXACTLY as listed in visible/valid exits),
+${zone_name_example}  "wait_reason": null (or reason if waiting),
+  "speed": null (or "slow_walk", "normal_walk", "brisk_walk", "jog", "run"),
+  "message": null (or your spoken words),
+  "message_type": null (or "directed", "shout"),
+  "goal_update": null (or revised plain-text goal if your fundamental objective has changed)
+}
+
+Hard constraints:
+- If action_type='wait', target_type MUST be 'current_position'.
+- If target_type='exit', exit_name is required and must match an allowed exit name exactly.
+- If target_type='agent', target_agent is required.
+${zone_constraint_line}- Keep spoken message short and natural; no narration.
+- goal_update: null unless your fundamental objective has genuinely changed.
+
+Decision policy:
+1. If helping someone, stay coordinated with that person.
+2. To progress toward your goal, choose target_type='exit' or target_type='agent'.
+3. If uncertain or waiting, choose target_type='current_position'.
+
+${zones_section}${following_constraint_text}${valid_exits_text}

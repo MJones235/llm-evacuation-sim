@@ -15,6 +15,8 @@ This module coordinates the cognitive layer (Concordia) decision-making process.
 import asyncio
 import json
 import re
+from pathlib import Path
+from string import Template
 from typing import Any
 
 from concordia.typing import entity as entity_lib
@@ -72,7 +74,9 @@ class DecisionProcessor:
         group_decision_min_size: int = 3,
         llm_semaphore_limit: int = 10,
         per_agent_timeout_secs: float | None = 30.0,
+        min_redecision_interval_secs: float = 0.0,
         wait_nudge_enabled: bool = False,
+        decision_prompt_template_path: str | None = None,
     ):
         """
         Initialize decision processor.
@@ -126,9 +130,17 @@ class DecisionProcessor:
         # JuPedSim waypoint so the simulation is not blocked.
         # Set to None to disable (matches old behaviour).
         self._per_agent_timeout_secs: float | None = per_agent_timeout_secs
+        # Optional simulation-time throttle for repeated LLM decisions when
+        # observations still report no significant new information.
+        self._min_redecision_interval_secs: float = max(0.0, float(min_redecision_interval_secs))
+        self._last_llm_decision_time: dict[str, float] = {}
 
         # Optional wait-duration nudge in prompt context.
         self._wait_nudge_enabled: bool = wait_nudge_enabled
+        self._decision_prompt_template_path = decision_prompt_template_path
+        self._decision_prompt_template = self._load_decision_prompt_template(
+            decision_prompt_template_path
+        )
 
         # Initialize prompt cache for intelligent LLM call reduction
         self.prompt_cache = PromptCache(enable_detailed_logging=True)
@@ -159,8 +171,61 @@ class DecisionProcessor:
         self._zone_goal_keywords: dict[str, list[str]] = station_layout.get(
             "zone_goal_keywords", {}
         )
+        self._exit_semantic_tags: dict[str, list[str]] = station_layout.get(
+            "exit_semantic_tags", {}
+        )
+        self._goal_semantic_policies: list[dict[str, Any]] = station_layout.get(
+            "goal_semantic_policies", []
+        )
 
         logger.debug("DecisionProcessor initialized for parallel async processing")
+
+    def _load_decision_prompt_template(self, template_path: str | None) -> Template:
+        """Load the decision prompt template from disk.
+
+        Raises:
+            FileNotFoundError: If the configured template file does not exist.
+            RuntimeError: If the template file cannot be read.
+        """
+        default_path = Path(__file__).with_name("templates") / "decision_prompt.template.txt"
+        chosen_path = Path(template_path).expanduser() if template_path else default_path
+
+        if not chosen_path.exists():
+            raise FileNotFoundError(
+                f"Decision prompt template file not found: {chosen_path}"
+            )
+
+        try:
+            template_text = chosen_path.read_text(encoding="utf-8")
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to read decision prompt template from {chosen_path}: {e}"
+            ) from e
+
+        logger.info(f"Loaded decision prompt template from {chosen_path}")
+        return Template(template_text)
+
+    def _render_decision_prompt(
+        self,
+        *,
+        role_prefix: str,
+        zone_target_type_line: str,
+        zone_name_example: str,
+        zone_constraint_line: str,
+        zones_section: str,
+        following_constraint_text: str,
+        valid_exits_text: str,
+    ) -> str:
+        """Render the decision prompt text from the configured template."""
+        return self._decision_prompt_template.safe_substitute(
+            role_prefix=role_prefix,
+            zone_target_type_line=zone_target_type_line,
+            zone_name_example=zone_name_example,
+            zone_constraint_line=zone_constraint_line,
+            zones_section=zones_section,
+            following_constraint_text=following_constraint_text,
+            valid_exits_text=valid_exits_text,
+        )
 
     def _build_zones_section(self, zones: list[str], zone_id: str | None = None) -> str:
         """Build the AVAILABLE ZONES block for the prompt.
@@ -195,20 +260,54 @@ class DecisionProcessor:
         - arrival_exits_by_zone: exits that arrive INTO this zone (filtered out)
         - zone_known_exits_by_profile: exits recalled from memory per zone/profile
 
-        Commuters recall memorized exits for their current zone.
-        Novices rely on what they can see; they have a small fallback list of
-        exits they could read from signs (e.g. named street exits on the concourse).
+                Commuters recall memorized exits for their current zone.
+                Novices rely on what they can see; they have a small fallback list of
+                exits they could read from signs (e.g. named street exits on the concourse).
+
+                Goal-aware routing is handled through config-driven prompt guidance:
+                - station.exit_semantic_tags: map of exit_id -> semantic tags
+                - station.goal_semantic_policies: rules that map goal keywords to
+                    preferred/discouraged exit tags in specific zones
+                This keeps behavior reusable across geometries without hardcoded IDs.
         """
         registry = self.action_translator.exit_registry
         valid_ids = set(registry.get_all_ids())
         cfg = self._agent_cfg.get(agent_id, {})
         profile = cfg.get("knowledge_profile", "novice")
 
+        goal_text = self.agent_goals.get(agent_id, "")
+        goal_policy = self._get_goal_semantic_policy(zone_id, goal_text)
+
         # Exits that arrive INTO this zone are one-way arrivals, not departure choices.
         arrival_exits = set(self._arrival_exits_by_zone.get(zone_id or "", []))
 
         def _is_valid_departure(eid: str) -> bool:
-            return eid not in arrival_exits
+            if eid in arrival_exits:
+                return False
+            return True
+
+        # Optional goal-driven ranking preferences from station config.
+        preferred_ids: set[str] = set()
+        discouraged_ids: set[str] = set()
+        if goal_policy:
+            prefer_tags = {
+                str(tag).strip().lower()
+                for tag in goal_policy.get("prefer_exit_tags", [])
+                if str(tag).strip()
+            }
+            avoid_tags = {
+                str(tag).strip().lower()
+                for tag in goal_policy.get("avoid_exit_tags", [])
+                if str(tag).strip()
+            }
+            for eid, tags in self._exit_semantic_tags.items():
+                if eid not in valid_ids or not _is_valid_departure(eid):
+                    continue
+                tag_set = {str(tag).strip().lower() for tag in (tags or []) if str(tag).strip()}
+                if prefer_tags and (tag_set & prefer_tags):
+                    preferred_ids.add(eid)
+                if avoid_tags and (tag_set & avoid_tags):
+                    discouraged_ids.add(eid)
 
         def _extract_visible_distance_ranks(text: str) -> dict[str, int]:
             ranks: dict[str, int] = {}
@@ -232,6 +331,14 @@ class DecisionProcessor:
         for _m in _RE_BLOCKED_EXIT_LINE.finditer(observation):
             blocked_display.add(_m.group(1).strip())
 
+        display_to_id: dict[str, str] = {}
+        for _eid in valid_ids:
+            if not _is_valid_departure(_eid):
+                continue
+            _name = registry.get_display_name(_eid)
+            if _name not in display_to_id:
+                display_to_id[_name] = _eid
+
         def _sort_display_exits(display_names: list[str]) -> list[str]:
             indexed = list(enumerate(display_names))
 
@@ -239,9 +346,18 @@ class DecisionProcessor:
                 idx, name = item
                 is_visible = 0 if name in visible_distance_rank else 1
                 dist_rank = visible_distance_rank.get(name, 99)
-                return (is_visible, dist_rank, idx, name.lower())
+                eid = display_to_id.get(name)
+                preference_rank = 1
+                if eid in preferred_ids:
+                    preference_rank = 0
+                elif eid in discouraged_ids:
+                    preference_rank = 2
+                return (is_visible, dist_rank, preference_rank, idx, name.lower())
 
             return [name for _, name in sorted(indexed, key=key_fn)]
+
+        departure_ids = [eid for eid in valid_ids if _is_valid_departure(eid)]
+        semantics_text = self._build_exit_semantics_text(goal_policy, departure_ids)
 
         # ── Commuter: recall memorized exits for this zone ───────────────────
         if profile == "commuter":
@@ -256,7 +372,7 @@ class DecisionProcessor:
             exits = _sort_display_exits(exits)
             if exits:
                 bullets = "".join(f"\n  \u2022 {e}" for e in exits)
-                return "\nAllowed exits now:" f"{bullets}\n\n"
+                return "\nAllowed exits now:" f"{bullets}\n" + semantics_text
             # Fall through to visible-exit check if no memorized exits for this zone
 
         # ── Visible exits (both profiles) ────────────────────────────────────
@@ -272,7 +388,7 @@ class DecisionProcessor:
         if visible:
             visible = _sort_display_exits(visible)
             bullets = "".join(f"\n  \u2022 {n}" for n in visible)
-            return "\nVisible exits right now:" f"{bullets}\n\n"
+            return "\nVisible exits right now:" f"{bullets}\n" + semantics_text
 
         # ── No visible exits: check profile's memorized fallback ─────────────
         fallback_ids = self._zone_known_exits.get(zone_id or "", {}).get(profile, [])
@@ -285,12 +401,105 @@ class DecisionProcessor:
         ]
         if fallback:
             bullets = "".join(f"\n  \u2022 {n}" for n in fallback)
-            return "\nAllowed exits now:" f"{bullets}\n\n"
+            return "\nAllowed exits now:" f"{bullets}\n" + semantics_text
 
-        return (
+        return semantics_text + (
             "\nVisible exits right now: none.\n"
             "Do NOT use target_type='exit'. Follow someone or wait.\n\n"
         )
+
+    def _get_goal_semantic_policy(
+        self, zone_id: str | None, goal_text: str
+    ) -> dict[str, Any] | None:
+        """Return the first matching goal-to-exit semantic policy from config.
+
+        Policy schema (all keys optional except when_goal_contains_any):
+          - when_goal_contains_any: list[str]
+          - applies_in_zones: list[str]
+          - prefer_exit_tags: list[str]
+          - avoid_exit_tags: list[str]
+          - instruction: str
+        """
+        if not goal_text or not self._goal_semantic_policies:
+            return None
+
+        goal_lower = goal_text.lower()
+        zone_lower = (zone_id or "").lower()
+
+        for policy in self._goal_semantic_policies:
+            if not isinstance(policy, dict):
+                continue
+
+            keywords = [
+                str(k).strip().lower()
+                for k in policy.get("when_goal_contains_any", [])
+                if str(k).strip()
+            ]
+            if not keywords:
+                continue
+            if not any(keyword in goal_lower for keyword in keywords):
+                continue
+
+            zones = {
+                str(z).strip().lower()
+                for z in policy.get("applies_in_zones", [])
+                if str(z).strip()
+            }
+            if zones and zone_lower not in zones:
+                continue
+
+            return policy
+
+        return None
+
+    def _build_exit_semantics_text(
+        self,
+        goal_policy: dict[str, Any] | None,
+        candidate_exit_ids: list[str],
+    ) -> str:
+        """Build an optional prompt block with goal-driven exit semantics guidance."""
+        if not goal_policy:
+            return "\n"
+
+        registry = self.action_translator.exit_registry
+        candidate_ids = set(candidate_exit_ids)
+
+        prefer_tags = {
+            str(tag).strip().lower()
+            for tag in goal_policy.get("prefer_exit_tags", [])
+            if str(tag).strip()
+        }
+        avoid_tags = {
+            str(tag).strip().lower()
+            for tag in goal_policy.get("avoid_exit_tags", [])
+            if str(tag).strip()
+        }
+
+        preferred_names: list[str] = []
+        avoided_names: list[str] = []
+        for eid, tags in self._exit_semantic_tags.items():
+            if eid not in candidate_ids:
+                continue
+            tag_set = {str(tag).strip().lower() for tag in (tags or []) if str(tag).strip()}
+            if prefer_tags and (tag_set & prefer_tags):
+                preferred_names.append(registry.get_display_name(eid))
+            if avoid_tags and (tag_set & avoid_tags):
+                avoided_names.append(registry.get_display_name(eid))
+
+        instruction = str(goal_policy.get("instruction", "")).strip()
+        lines = ["\nGoal-aligned exit guidance:"]
+        if instruction:
+            lines.append(f"- {instruction}")
+        if preferred_names:
+            shown = ", ".join(sorted(set(preferred_names))[:8])
+            lines.append(f"- Prefer exits like: {shown}")
+        if avoided_names:
+            shown = ", ".join(sorted(set(avoided_names))[:8])
+            lines.append(f"- Avoid exits like: {shown} (unless your goal is to leave the station)")
+
+        if len(lines) == 1:
+            return "\n"
+        return "\n" + "\n".join(lines) + "\n\n"
 
     def _get_following_constraint_text(self, observation: str) -> str:
         """Build a hard movement constraint block when followers are detected.
@@ -371,12 +580,16 @@ class DecisionProcessor:
         return None
 
     def _agent_is_on_escalator(self, agent_id: str) -> bool:
-        """Return True if the agent is currently inside an escalator corridor polygon.
+        """Return True if the agent is actively traversing an escalator departure path.
 
-        Agents on escalators have no meaningful choices to make — direction and
-        minimum speed are enforced physically.  Skipping decision-making prevents
-        the LLM from issuing a 'wait' action mid-escalator, which would override
-        the agent's journey and leave them stationary.
+        Only **departure** zones and escalator corridors warrant deferral: an
+        agent in those areas is physically mid-journey on an escalator and
+        interrupting them would stall the flow.
+
+        **Arrival** zones are explicitly excluded: an agent in an arrival zone
+        has already completed the escalator journey and is awaiting a fresh
+        decision.  Deferring them there is the primary cause of post-transfer
+        blocking because they end up silently skipped every cycle.
         """
         if not self.jps_sim:
             return False
@@ -393,11 +606,26 @@ class DecisionProcessor:
             sim = self.jps_sim
         if sim is None:
             return False
-        corridors = getattr(getattr(sim, "geometry_manager", None), "escalator_corridors", {})
-        if not corridors:
-            return False
         p = Point(pos)
-        return any(poly.contains(p) for poly in corridors.values())
+
+        # Corridor check — any corridor is a departure path regardless of role.
+        corridors = getattr(getattr(sim, "geometry_manager", None), "escalator_corridors", {})
+        for poly in corridors.values():
+            if poly.covers(p) or poly.contains(p):
+                return True
+
+        # Transfer-zone check — departure zones only (multi-level).
+        controller = getattr(self.jps_sim, "escalator_controller", None)
+        if controller is not None and level_id is not None:
+            for ep in controller.registry.endpoints_by_level.get(str(level_id), []):
+                if ep.role != "departure":
+                    # Arrival zones are skipped: agents there need decisions, not deferral.
+                    continue
+                zone_poly = controller.get_zone_polygon(ep.transfer_zone_name)
+                if zone_poly is not None and (zone_poly.covers(p) or zone_poly.contains(p)):
+                    return True
+
+        return False
 
     def process_all_agents(
         self,
@@ -455,7 +683,6 @@ class DecisionProcessor:
             for agent_id in candidate_agents
             if agent_id in self.concordia_agents
             and agent_id not in self.exited_agents
-            and not self._agent_is_on_escalator(agent_id)
         ]
 
         # --- Per-cycle zone cache ---
@@ -578,6 +805,13 @@ class DecisionProcessor:
             if position is None:
                 logger.debug(f"{agent_id}: No position found, likely exited")
                 return
+
+            # While traversing escalator geometry, keep current movement and defer
+            # new decisions until the next regular batch after leaving that area.
+            if self._agent_is_on_escalator(agent_id):
+                logger.debug(f"{agent_id}: in escalator departure context — deferring decision")
+                return
+
             # Use the pre-computed per-cycle zone cache when available to avoid
             # repeating O(n_zones) Shapely contains-checks per agent.
             if cycle_zone_cache is not None:
@@ -657,42 +891,20 @@ class DecisionProcessor:
             role_prompt_extra = cfg.get("decision_prompt_extra", "")
             role_prefix = (f"{role_prompt_extra}\n\n") if role_prompt_extra else ""
 
-            action_spec = entity_lib.ActionSpec(
-                call_to_action=(
-                    f"{role_prefix}"
-                    "Decision task: choose your next action now. Respond with ONLY this JSON:\n"
-                    "{\n"
-                    '  "reasoning": "1-2 sentences grounded in goal + current observations",\n'
-                    '  "action_type": "wait" or "move",\n'
-                    f"{zone_target_type_line}"
-                    '  "target_agent": null (or agent_id like "agent_5"),\n'
-                    '  "exit_name": null (or the exit name EXACTLY as listed in visible/valid exits),\n'
-                    f"{zone_name_example}"
-                    '  "wait_reason": null (or reason if waiting),\n'
-                    '  "speed": null (or "slow_walk", "normal_walk", "brisk_walk", "jog", "run"),\n'
-                    '  "message": null (or your spoken words),\n'
-                    '  "message_type": null (or "directed", "shout"),\n'
-                    '  "goal_update": null (or revised plain-text goal if your fundamental objective has changed),\n'
-                    "}\n\n"
-                    "Hard constraints:\n"
-                    "- If action_type='wait', target_type MUST be 'current_position'.\n"
-                    "- If target_type='exit', exit_name is required and must match an allowed exit name exactly.\n"
-                    "- If target_type='agent', target_agent is required.\n"
-                    f"{zone_constraint_line}"
-                    "- Keep spoken message short and natural; no narration.\n"
-                    "- goal_update: null unless your fundamental objective has genuinely changed.\n\n"
-                    "Decision policy:\n"
-                    "1. If helping someone, stay coordinated with that person.\n"
-                    "2. To progress toward your goal, choose target_type='exit' or target_type='agent'.\n"
-                    "3. If uncertain or waiting, choose target_type='current_position'.\n\n"
-                    f"{zones_section}"
-                    f"{following_constraint_text}"
-                    f"{valid_exits_text}"
-                ),
-                output_type=entity_lib.OutputType.FREE,
+            prompt_text = self._render_decision_prompt(
+                role_prefix=role_prefix,
+                zone_target_type_line=zone_target_type_line,
+                zone_name_example=zone_name_example,
+                zone_constraint_line=zone_constraint_line,
+                zones_section=zones_section,
+                following_constraint_text=following_constraint_text,
+                valid_exits_text=valid_exits_text,
             )
 
-            prompt_text = action_spec.call_to_action
+            action_spec = entity_lib.ActionSpec(
+                call_to_action=prompt_text,
+                output_type=entity_lib.OutputType.FREE,
+            )
 
             # ===== INTELLIGENT PROMPT CACHING =====
             # Check if we should call LLM or reuse cached decision
@@ -747,49 +959,72 @@ class DecisionProcessor:
                     )
                     return
             else:
-                # Call LLM - significant new information detected
-                with self.perf_timer.measure("agent_observe", is_parallel=True):
-                    agent.observe(observation)
+                if should_call_llm and self._min_redecision_interval_secs > 0:
+                    if "No significant new information." in observation:
+                        previous_llm_time = self._last_llm_decision_time.get(agent_id)
+                        if previous_llm_time is not None:
+                            elapsed = current_sim_time - previous_llm_time
+                            if elapsed < self._min_redecision_interval_secs:
+                                throttled_cached = self.prompt_cache.get_cached_decision(agent_id)
+                                if throttled_cached:
+                                    action = throttled_cached
+                                    logger.info(
+                                        f"{agent_id}: ✓ Reusing cached decision "
+                                        f"(redecision throttle {elapsed:.1f}s "
+                                        f"< {self._min_redecision_interval_secs:.1f}s)"
+                                    )
+                                    async with self._state_lock:
+                                        self.llm_calls_skipped += 1
+                                    should_call_llm = False
+                                    cached_decision = throttled_cached
 
-                # Acquire semaphore before the LLM call to prevent burst overload.
-                async with self._llm_semaphore:
-                    try:
-                        with self.perf_timer.measure("agent_act_llm", is_parallel=True):
-                            llm_current_agent_id.set(agent_id)
-                            llm_current_sim_time.set(current_sim_time)
-                            if self._per_agent_timeout_secs is not None:
-                                async with asyncio.timeout(self._per_agent_timeout_secs):
-                                    action = await asyncio.to_thread(agent.act, action_spec)
-                            else:
-                                action = await asyncio.to_thread(agent.act, action_spec)
-                    except asyncio.TimeoutError:
-                        timeout_secs = self._per_agent_timeout_secs
-                        logger.warning(
-                            f"{agent_id}: decision timed out after {timeout_secs:.0f}s — "
-                            "keeping existing waypoint"
-                        )
-                        return
-
-                # Cache the decision for future reuse
-                self.prompt_cache.cache_decision(agent_id, action)
-                llm_was_called = True
-
-                if should_call_llm and messages_list:
-                    logger.info(
-                        f"{agent_id}: ✓ Calling LLM (received {len(messages_list)} message(s))"
-                    )
-                elif should_call_llm:
-                    logger.info(f"{agent_id}: ✓ Calling LLM (observation changed significantly)")
+                if not should_call_llm and cached_decision:
+                    action = cached_decision
                 else:
-                    logger.info(f"{agent_id}: ✓ Calling LLM (first decision)")
+                # Call LLM - significant new information detected
+                    with self.perf_timer.measure("agent_observe", is_parallel=True):
+                        agent.observe(observation)
 
-                async with self._state_lock:
-                    self.llm_calls_made += 1
+                    # Acquire semaphore before the LLM call to prevent burst overload.
+                    async with self._llm_semaphore:
+                        try:
+                            with self.perf_timer.measure("agent_act_llm", is_parallel=True):
+                                llm_current_agent_id.set(agent_id)
+                                llm_current_sim_time.set(current_sim_time)
+                                if self._per_agent_timeout_secs is not None:
+                                    async with asyncio.timeout(self._per_agent_timeout_secs):
+                                        action = await asyncio.to_thread(agent.act, action_spec)
+                                else:
+                                    action = await asyncio.to_thread(agent.act, action_spec)
+                        except asyncio.TimeoutError:
+                            timeout_secs = self._per_agent_timeout_secs
+                            logger.warning(
+                                f"{agent_id}: decision timed out after {timeout_secs:.0f}s — "
+                                "keeping existing waypoint"
+                            )
+                            return
 
-                # Update observation/action cache
-                async with self._state_lock:
-                    self.last_observations[agent_id] = observation
-                    self.last_actions[agent_id] = action
+                    # Cache the decision for future reuse
+                    self.prompt_cache.cache_decision(agent_id, action)
+                    llm_was_called = True
+                    self._last_llm_decision_time[agent_id] = current_sim_time
+
+                    if should_call_llm and messages_list:
+                        logger.info(
+                            f"{agent_id}: ✓ Calling LLM (received {len(messages_list)} message(s))"
+                        )
+                    elif should_call_llm:
+                        logger.info(f"{agent_id}: ✓ Calling LLM (observation changed significantly)")
+                    else:
+                        logger.info(f"{agent_id}: ✓ Calling LLM (first decision)")
+
+                    async with self._state_lock:
+                        self.llm_calls_made += 1
+
+                    # Update observation/action cache
+                    async with self._state_lock:
+                        self.last_observations[agent_id] = observation
+                        self.last_actions[agent_id] = action
 
             # Parse JSON response
             with self.perf_timer.measure("parse_json_response", is_parallel=True):

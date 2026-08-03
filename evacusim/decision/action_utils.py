@@ -47,10 +47,9 @@ def extract_exit_name(
         ):
             return exit_name
 
-    # Also check down-access escalator zones (level-0 → level -1 transfers).
-    # These are stored in station_layout["down_access_exits"] keyed by their zone
-    # name (e.g. "L0_esc_a_down"), but the JPS evacuation exit is registered as
-    # "escalator_a_down" — convert the key before returning.
+    # Also check down-access escalator zones (concourse -> platform transfers).
+    # These are stored in station_layout["down_access_exits"] keyed by transfer
+    # zone names and must be normalized to JuPedSim exit IDs.
     import re as _re
 
     for zone_key, exit_coords in station_layout.get("down_access_exits", {}).items():
@@ -58,10 +57,18 @@ def extract_exit_name(
             abs(target_coords[0] - exit_coords[0]) < 1.0
             and abs(target_coords[1] - exit_coords[1]) < 1.0
         ):
-            # Convert "L0_esc_a_down" → "escalator_a_down"
+            # Convert legacy and current zone keys to canonical exit IDs.
             m = _re.match(r"^L[^_]+_esc_([a-f])_(up|down)$", zone_key)
             if m:
                 return f"escalator_{m.group(1)}_{m.group(2)}"
+            m2 = _re.match(
+                r"^esc\.([A-F])\.zone\.(concourse|platform)\.(departure|arrival)$",
+                zone_key,
+            )
+            if m2:
+                letter, location, role = m2.groups()
+                direction = "down" if (location == "concourse" and role == "departure") else "up"
+                return f"escalator_{letter.lower()}_{direction}"
             return zone_key
 
     return None

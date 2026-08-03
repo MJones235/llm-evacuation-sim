@@ -42,6 +42,10 @@ class EventManager:
         self.event_history: list[dict[str, Any]] = []
         self.blocked_exits: set[str] = set()
         self.scheduled_events: list[dict[str, Any]] = []  # timed events from config
+        # Event types fired during the most recent check_and_trigger_events call.
+        # Used by the simulation loop to decide whether an immediate all-agent
+        # re-decision is required (critical events) or can be staggered.
+        self.last_fired_event_types: set[str] = set()
 
         # Train state — populated by train_arrival events.
         # active_train_exits: exits currently open for boarding.
@@ -109,12 +113,14 @@ class EventManager:
             True if one or more new events were fired this step, False otherwise.
         """
         fired = False
+        self.last_fired_event_types.clear()
 
         # Check whether any previously activated train exits have now departed.
         # This runs every step (not only when a scheduled event is due).
         if self._check_train_departures(current_sim_time, agents, message_system,
                                         exited_agents, zone_id_for_agent_fn):
             fired = True
+            self.last_fired_event_types.add("train_departure")
 
         for event in self.scheduled_events:
             # Determine whether this event is due to fire.
@@ -138,14 +144,18 @@ class EventManager:
 
             if is_block_exit:
                 self._fire_block_exit(event, current_sim_time)
+                self.last_fired_event_types.add("block_exit")
             elif is_train_arrival:
                 self._fire_train_arrival(event, current_sim_time, agents, message_system,
                                          exited_agents, zone_id_for_agent_fn)
+                self.last_fired_event_types.add("train_arrival")
             elif is_pa and message_system is not None:
                 self._fire_pa_announcement(event, current_sim_time, agents, message_system,
                                             exited_agents, zone_id_for_agent_fn)
+                self.last_fired_event_types.add("pa_announcement")
             elif agents and event.get("message"):
                 self.broadcast_event(event["message"], current_sim_time, agents)
+                self.last_fired_event_types.add("message")
 
             if repeat_interval:
                 event["_last_fired"] = current_sim_time
@@ -357,7 +367,9 @@ class EventManager:
             except Exception as e:
                 logger.warning(f"Could not add geometry obstacle for '{exit_name}': {e}")
 
-        logger.info(f"🚧 Exit '{exit_name}' blocked — geometry + marshals prevent entry")
+        logger.info(
+            f"🚧 Exit '{exit_name}' blocked — threshold barrier + blocked-transfer handling active"
+        )
 
     def broadcast_event(
         self, event_message: str, current_sim_time: float, agents: dict[str, Any]
