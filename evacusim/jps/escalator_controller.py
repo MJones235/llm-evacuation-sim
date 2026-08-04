@@ -468,7 +468,13 @@ class EscalatorController:
         self._agent_motion_context[agent_id] = endpoint.endpoint_id
         if endpoint.role == "departure" and endpoint.exit_name is not None:
             if endpoint.exit_name in level_sim.exit_manager.evacuation_exits:
-                level_sim.set_agent_destination_exit(agent_id, endpoint.exit_name)
+                # Avoid redundant journey resets while the agent remains inside
+                # the same corridor/zone. Reissuing identical journeys every step
+                # increases route-churn under congestion and can trap agents near
+                # transfer mouths without ever crossing the exit threshold.
+                current_exit = getattr(level_sim, "agent_assigned_exits", {}).get(agent_id)
+                if current_exit != endpoint.exit_name:
+                    level_sim.set_agent_destination_exit(agent_id, endpoint.exit_name)
 
     def set_agent_state(self, agent_id: str, state: EscalatorAgentState) -> None:
         """State primitive for later lifecycle-driven control."""

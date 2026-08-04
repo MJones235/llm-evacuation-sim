@@ -142,6 +142,13 @@ class DecisionProcessor:
             decision_prompt_template_path
         )
 
+        # Escalator deferral guardrail: if an agent stays inside escalator
+        # departure geometry without making positional progress for too long,
+        # stop deferring decisions so the agent can reconsider route choice.
+        self._escalator_deferral_timeout_secs: float = 12.0
+        self._escalator_progress_threshold_m: float = 0.4
+        self._escalator_deferral_state: dict[str, dict[str, Any]] = {}
+
         # Initialize prompt cache for intelligent LLM call reduction
         self.prompt_cache = PromptCache(enable_detailed_logging=True)
         self.llm_calls_skipped = 0  # Statistics tracking
@@ -208,20 +215,28 @@ class DecisionProcessor:
     def _render_decision_prompt(
         self,
         *,
-        role_prefix: str,
-        zone_target_type_line: str,
-        zone_name_example: str,
-        zone_constraint_line: str,
+        age: str,
+        gender: str,
+        personality_profile: str,
+        last_decision_summary: str,
+        situation_framing: str,
+        zone_option: str,
+        zone_name_hint: str,
+        zone_constraint: str,
         zones_section: str,
         following_constraint_text: str,
         valid_exits_text: str,
     ) -> str:
         """Render the decision prompt text from the configured template."""
         return self._decision_prompt_template.safe_substitute(
-            role_prefix=role_prefix,
-            zone_target_type_line=zone_target_type_line,
-            zone_name_example=zone_name_example,
-            zone_constraint_line=zone_constraint_line,
+            age=age,
+            gender=gender,
+            personality_profile=personality_profile,
+            last_decision_summary=last_decision_summary,
+            situation_framing=situation_framing,
+            zone_option=zone_option,
+            zone_name_hint=zone_name_hint,
+            zone_constraint=zone_constraint,
             zones_section=zones_section,
             following_constraint_text=following_constraint_text,
             valid_exits_text=valid_exits_text,
@@ -627,6 +642,47 @@ class DecisionProcessor:
 
         return False
 
+    def _should_defer_escalator_decision(
+        self,
+        agent_id: str,
+        current_sim_time: float,
+        position: tuple[float, float],
+    ) -> bool:
+        """Return True when escalator-context decision deferral should continue.
+
+        Agents can queue in escalator departure geometry during congestion.
+        If they are not making progress for too long, indefinite deferral causes
+        a deadlock where they never re-evaluate alternatives. This guardrail
+        allows periodic re-decisions only for stalled agents.
+        """
+        state = self._escalator_deferral_state.get(agent_id)
+        if state is None:
+            self._escalator_deferral_state[agent_id] = {
+                "entered_time": current_sim_time,
+                "last_progress_time": current_sim_time,
+                "last_position": position,
+            }
+            return True
+
+        last_pos = state.get("last_position", position)
+        moved = ((position[0] - last_pos[0]) ** 2 + (position[1] - last_pos[1]) ** 2) ** 0.5
+        if moved >= self._escalator_progress_threshold_m:
+            state["last_progress_time"] = current_sim_time
+            state["last_position"] = position
+            return True
+
+        state["last_position"] = position
+        stalled_for = current_sim_time - float(state.get("last_progress_time", current_sim_time))
+        if stalled_for < self._escalator_deferral_timeout_secs:
+            return True
+
+        # Let this cycle through so the LLM can break a potential escalator jam.
+        logger.info(
+            f"{agent_id}: escalator-context stall ({stalled_for:.1f}s) — allowing re-decision"
+        )
+        state["last_progress_time"] = current_sim_time
+        return False
+
     def process_all_agents(
         self,
         observations: dict[str, str],
@@ -809,8 +865,11 @@ class DecisionProcessor:
             # While traversing escalator geometry, keep current movement and defer
             # new decisions until the next regular batch after leaving that area.
             if self._agent_is_on_escalator(agent_id):
-                logger.debug(f"{agent_id}: in escalator departure context — deferring decision")
-                return
+                if self._should_defer_escalator_decision(agent_id, current_sim_time, position):
+                    logger.debug(f"{agent_id}: in escalator departure context — deferring decision")
+                    return
+            else:
+                self._escalator_deferral_state.pop(agent_id, None)
 
             # Use the pre-computed per-cycle zone cache when available to avoid
             # repeating O(n_zones) Shapely contains-checks per agent.
@@ -869,33 +928,40 @@ class DecisionProcessor:
             zones_section = self._build_zones_section(zones, zone_id) if include_zones else ""
             has_zones = bool(zones_section.strip())
 
-            # The 'zone' target_type is only valid when AVAILABLE ZONES is non-empty.
-            zone_target_type_line = (
-                '  "target_type": ONE OF: "current_position", "exit", "agent", "zone",\n'
-                if has_zones
-                else '  "target_type": ONE OF: "current_position", "exit", "agent",\n'
-            )
-            zone_name_example = (
-                '  "zone_name": null (or zone name EXACTLY as shown in AVAILABLE ZONES),\n'
-                if has_zones
-                else '  "zone_name": null,\n'
-            )
-            zone_constraint_line = (
-                "- If target_type='zone', zone_name is required.\n" if has_zones else ""
-            )
-
             # Build the action spec with prompt text
             # Per-role extra text injected verbatim before the JSON schema.
             # Configured via agents.roles.<role>.decision_prompt_extra in the scenario YAML.
             cfg = self._agent_cfg.get(agent_id, {})
             role_prompt_extra = cfg.get("decision_prompt_extra", "")
-            role_prefix = (f"{role_prompt_extra}\n\n") if role_prompt_extra else ""
+            situation_framing = (f"{role_prompt_extra}\n\n") if role_prompt_extra else ""
+
+            age = str(cfg.get("age", "unknown"))
+            gender = str(cfg.get("gender", "person"))
+            personality_profile = str(
+                cfg.get("personality_anchor")
+                or cfg.get("personality_type", "unknown")
+            )
+            last_decision_summary = self._build_last_decision_summary(agent_id, current_sim_time)
+
+            # Compute minimal inline suffixes for zone-related placeholders.
+            # zone_option:    appends ', "zone"' to the target_type line when zones are available.
+            # zone_name_hint: appends the zone_name description when zones are available.
+            # zone_constraint: adds the zone constraint bullet when zones are available.
+            zone_option = ', "zone"' if has_zones else ""
+            zone_name_hint = (
+                " (or zone name EXACTLY as shown in Available Zones)" if has_zones else ""
+            )
+            zone_constraint = "- If target_type='zone', zone_name is required.\n" if has_zones else ""
 
             prompt_text = self._render_decision_prompt(
-                role_prefix=role_prefix,
-                zone_target_type_line=zone_target_type_line,
-                zone_name_example=zone_name_example,
-                zone_constraint_line=zone_constraint_line,
+                age=age,
+                gender=gender,
+                personality_profile=personality_profile,
+                last_decision_summary=last_decision_summary,
+                situation_framing=situation_framing,
+                zone_option=zone_option,
+                zone_name_hint=zone_name_hint,
+                zone_constraint=zone_constraint,
                 zones_section=zones_section,
                 following_constraint_text=following_constraint_text,
                 valid_exits_text=valid_exits_text,
@@ -1058,7 +1124,9 @@ class DecisionProcessor:
             # Inject the LLM's own reasoning text into the translated dict so that
             # the previous-decision memory shown to the agent next turn uses the
             # agent's actual words rather than the translator's description.
-            llm_reasoning = reasoning.get("reasoning", "") if isinstance(reasoning, dict) else ""
+            llm_reasoning = self._reasoning_to_str(
+                reasoning.get("reasoning", "") if isinstance(reasoning, dict) else ""
+            )
             if llm_reasoning:
                 translated["reasoning"] = llm_reasoning
 
@@ -1106,7 +1174,7 @@ class DecisionProcessor:
                         decision_record["route_change"] = {
                             "from_exit": old_exit,
                             "to_exit": new_exit,
-                            "reason": reasoning.get("reasoning", ""),
+                            "reason": self._reasoning_to_str(reasoning.get("reasoning", "")),
                         }
 
                     # Store decision — cap history to avoid unbounded RAM growth.
@@ -1140,19 +1208,82 @@ class DecisionProcessor:
 
             data = json.loads(response)
             return {
-                "situation": data.get("situation", ""),
-                "risk_level": data.get("risk_level", ""),
-                "risk_assessment": data.get("risk_assessment", ""),
-                "social_context": data.get("social_context", ""),
                 "reasoning": data.get("reasoning", ""),
                 "goal_update": data.get("goal_update", ""),
             }
         except json.JSONDecodeError:
             logger.warning(f"Failed to parse JSON response: {response[:200]}")
             return {
-                "situation": "Parse error",
                 "reasoning": response[:200],
             }
+
+    @staticmethod
+    def _reasoning_to_str(reasoning_val) -> str:
+        """Convert a reasoning value (PADM dict or plain string) to a readable string.
+
+        For PADM responses, combines risk_identification and protective_action_assessment
+        as the most decision-relevant fields.  Plain strings are returned unchanged.
+        """
+        if isinstance(reasoning_val, str):
+            return reasoning_val
+        if isinstance(reasoning_val, dict):
+            parts = []
+            for key in ("risk_identification", "protective_action_assessment"):
+                val = reasoning_val.get(key, "")
+                if val and isinstance(val, str):
+                    parts.append(val.strip().rstrip("."))
+            return ". ".join(parts) if parts else ""
+        return str(reasoning_val) if reasoning_val else ""
+
+    @staticmethod
+    def _summarize_text(text: str, max_len: int = 220) -> str:
+        """Return a compact single-line summary suitable for header context."""
+        compact = " ".join(str(text).split())
+        if len(compact) <= max_len:
+            return compact
+        return compact[: max_len - 3].rstrip() + "..."
+
+    def _build_last_decision_summary(self, agent_id: str, current_sim_time: float) -> str:
+        """Build a readable summary of the agent's previous decision."""
+        decisions = self.agent_decisions.get(agent_id, {}).get("decisions", [])
+        if not decisions:
+            return "no previous decision recorded."
+
+        last = decisions[-1]
+        last_time = float(last.get("time", current_sim_time))
+        seconds_ago = max(0.0, current_sim_time - last_time)
+
+        translated = last.get("translated", {}) if isinstance(last, dict) else {}
+        action_type = translated.get("action_type", "unknown")
+        target_type = translated.get("target_type", "")
+        target_exit = translated.get("target_exit", "")
+        target_agent = translated.get("target_agent", "")
+        zone_name = translated.get("zone_name", "")
+
+        action_desc = action_type
+        if action_type == "move":
+            if target_type == "exit" and target_exit:
+                action_desc = f"move to exit '{target_exit}'"
+            elif target_type == "agent" and target_agent:
+                action_desc = f"move toward {target_agent}"
+            elif target_type == "zone" and zone_name:
+                action_desc = f"move to zone '{zone_name}'"
+            else:
+                action_desc = "move"
+        elif action_type == "wait":
+            wait_reason = translated.get("wait_reason", "")
+            action_desc = f"wait ({wait_reason})" if wait_reason else "wait"
+
+        reasoning_payload = last.get("reasoning", "") if isinstance(last, dict) else ""
+        if isinstance(reasoning_payload, dict):
+            reason_text = self._reasoning_to_str(reasoning_payload.get("reasoning", ""))
+        else:
+            reason_text = self._reasoning_to_str(reasoning_payload)
+
+        if not reason_text:
+            reason_text = "no explicit reason was recorded"
+
+        return f"{seconds_ago:.0f}s ago you chose to {action_desc} because {reason_text}."
 
     def on_agent_exit(self, agent_id: str) -> None:
         """

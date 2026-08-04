@@ -39,12 +39,16 @@ class EvacuationAgent(prefab_lib.Prefab):
     params: Mapping[str, Any] = dataclasses.field(
         default_factory=lambda: {
             "name": "Agent",
-            "personality_type": "ISTJ",
+            "ocean_n": "medium",
+            "ocean_o": "medium",
+            "ocean_c": "medium",
+            "personality_anchor": "",
+            "personality_type": "N:medium/O:medium/C:medium",
             "age": 30,
             "gender": "neutral",
             "initial_zone": "platform",
             "destination": "exit",
-            "risk_tolerance": "moderate",  # low, moderate, high
+            "risk_tolerance": "moderate",
         }
     )
 
@@ -65,33 +69,11 @@ class EvacuationAgent(prefab_lib.Prefab):
         """
         # Extract parameters
         name = self.params.get("name", "Agent")
-        personality = self.params.get("personality_type", "ISTJ")
+        personality_anchor = self.params.get("personality_anchor", "")
         age = self.params.get("age", 30)
         gender = self.params.get("gender", "neutral")
         risk_tolerance = self.params.get("risk_tolerance", "moderate")
         goal_state = self.params.get("goal_state", "Continue your planned journey.")
-
-        # Define personality descriptions
-        personality_descriptions = {
-            "ISTJ": "Practical and fact-minded. Values order, procedures, and reliability. Prefers clear instructions.",
-            "ISFJ": "Caring and loyal. Values harmony and helping others. May prioritize group safety.",
-            "INFJ": "Idealistic and principled. Seeks meaning and authenticity. May consider ethical implications.",
-            "INTJ": "Strategic and analytical. Values competence and logic. Plans multiple steps ahead.",
-            "ISTP": "Practical and adaptable. Observant problem-solver. Handles crisis calmly.",
-            "ISFP": "Gentle and sensitive. Values personal freedom. May be spontaneous in reactions.",
-            "INFP": "Idealistic and empathetic. Guided by personal values. May help others first.",
-            "INTP": "Analytical and curious. Seeks logical understanding. May analyze before acting.",
-            "ESTP": "Energetic and pragmatic. Thrives on action. Quick to respond to emergencies.",
-            "ESFP": "Enthusiastic and sociable. Lives in the moment. May follow crowd behavior.",
-            "ENFP": "Enthusiastic and creative. Sees possibilities. May encourage others.",
-            "ENTP": "Inventive and analytical. Enjoys challenges. May find unconventional solutions.",
-            "ESTJ": "Organized and decisive. Values order and tradition. Takes charge in crisis.",
-            "ESFJ": "Warm and cooperative. Values harmony. May organize group evacuation.",
-            "ENFJ": "Charismatic and empathetic. Focused on helping others. Natural leader in crisis.",
-            "ENTJ": "Bold and strategic. Values efficiency. Commands authority in emergencies.",
-        }
-
-        personality_desc = personality_descriptions.get(personality, "Unknown personality")
 
         # Core components
         memory_key = agent_components.memory.DEFAULT_MEMORY_COMPONENT_KEY
@@ -108,38 +90,21 @@ class EvacuationAgent(prefab_lib.Prefab):
             pre_act_label="\nCurrent Situation",
         )
 
-        # Static personality (no LLM call needed)
-        self_perception_key = "SelfPerception"
-        self_perception = agent_components.constant.Constant(
-            state=(
-                f"I am {name}, a {age}-year-old {gender}. "
-                f"Personality type: {personality} - {personality_desc} "
-                f"Risk tolerance: {risk_tolerance}."
-            ),
-            pre_act_label=f"\nCharacter Profile - {name}",
-        )
-
-        # Goal component - everyday objective (no emergency framing)
-        goal_key = "Goal"
-        evacuation_goal = agent_components.constant.Constant(
-            state=goal_state,
-            pre_act_label="\nInitial intent",
-        )
-
-        # Assemble all components (removed RelevantMemories - it was making extra LLM calls)
+        # SelfPerception and Goal are intentionally omitted from components_of_agent:
+        # profile (age/gender/personality) and current goal are surfaced in the
+        # decision prompt template itself, so including them here would duplicate
+        # that content in the Concordia context block.
         components_of_agent = {
             observation_to_memory_key: observation_to_memory,
-            self_perception_key: self_perception,
-            goal_key: evacuation_goal,
             observation_key: observation,
             memory_key: memory,
         }
 
-        # Component order for prompt construction - minimal context
+        # Component order for prompt construction.
+        # Only the observation is included — profile/goal are in the decision
+        # prompt template, and memory is handled separately by ObservationToMemory.
         component_order = [
-            self_perception_key,
-            goal_key,
-            observation_key,  # Current observation only
+            observation_key,
         ]
 
         # Action component - generates final action
@@ -147,7 +112,7 @@ class EvacuationAgent(prefab_lib.Prefab):
             model=model,
             component_order=component_order,
             randomize_choices=False,  # Deterministic for evacuation
-            prefix_entity_name=True,
+            prefix_entity_name=False,  # Suppresses bare ":" / "Answer: Agent N" artifacts
         )
 
         # Create agent

@@ -10,7 +10,7 @@ This module is responsible for:
 import random
 
 from evacusim.utils.logger import get_logger
-from evacusim.utils.station_agent import PERSONALITY_TYPES
+from evacusim.utils.station_agent import OCEAN_ANCHORS, build_personality_anchor
 
 logger = get_logger(__name__)
 
@@ -95,7 +95,16 @@ class AgentFactory:
         agent_id = f"agent_{agent_index}"
 
         # Randomize agent attributes
-        personality_type = random.choice(list(PERSONALITY_TYPES.keys()))
+        # Sample OCEAN personality dimensions from configured weighted distributions.
+        # Falls back to uniform sampling when the config key is absent.
+        personalities_cfg = agents_section.get("personalities", {})
+        ocean_n = AgentFactory._sample_ocean_level(personalities_cfg.get("N", {}))
+        ocean_o = AgentFactory._sample_ocean_level(personalities_cfg.get("O", {}))
+        ocean_c = AgentFactory._sample_ocean_level(personalities_cfg.get("C", {}))
+        personality_anchor = build_personality_anchor(ocean_n, ocean_o, ocean_c)
+        # Compact summary used in analytics output (e.g. wait_behavior.txt)
+        personality_type = f"N:{ocean_n}/O:{ocean_o}/C:{ocean_c}"
+
         age_cfg = agents_section.get("age", {})
         age_min = max(18, int(age_cfg.get("min", 18)))
         age_max = int(age_cfg.get("max", 75))
@@ -111,6 +120,10 @@ class AgentFactory:
         return {
             "id": agent_id,
             "name": f"Agent {agent_index}",
+            "ocean_n": ocean_n,
+            "ocean_o": ocean_o,
+            "ocean_c": ocean_c,
+            "personality_anchor": personality_anchor,
             "personality_type": personality_type,
             "age": age,
             "gender": gender,
@@ -124,6 +137,24 @@ class AgentFactory:
             # agent_role, goal_state, purpose_memories and initial_goal are assigned
             # later by AgentManager once the spawn zone is known
         }
+
+    @staticmethod
+    def _sample_ocean_level(level_cfg: dict) -> str:
+        """Sample an OCEAN trait level (high/medium/low) from a weighted config dict.
+
+        Args:
+            level_cfg: Dict mapping level name to percentage weight, e.g.
+                       {"high": 20.0, "medium": 50.0, "low": 30.0}
+
+        Returns:
+            A level string: "high", "medium", or "low".
+            Falls back to uniform sampling when level_cfg is empty.
+        """
+        _defaults = {"high": 1.0, "medium": 1.0, "low": 1.0}
+        cfg = level_cfg if level_cfg else _defaults
+        levels = [k for k in ("high", "medium", "low") if k in cfg]
+        weights = [float(cfg[lvl]) for lvl in levels]
+        return random.choices(levels, weights=weights, k=1)[0]
 
     @staticmethod
     def _select_knowledge_profile(knowledge_distribution: dict[str, float]) -> str:
