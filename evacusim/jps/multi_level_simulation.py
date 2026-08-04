@@ -566,7 +566,7 @@ class MultiLevelJuPedSimulation:
             self.simulations[target_level].add_agent(
                 agent_id,
                 spawn_pos,
-                assign_default_destination=False,
+                assign_default_destination=True,
             )
             self.agent_levels[agent_id] = target_level
             self.recently_transferred_agents.add(agent_id)
@@ -642,7 +642,7 @@ class MultiLevelJuPedSimulation:
                 agent_id,
                 restore_pos,
                 walking_speed=1.34,
-                assign_default_destination=False,
+                assign_default_destination=True,
             )
             self.agent_levels[agent_id] = source_level
             if force_redecision:
@@ -658,7 +658,7 @@ class MultiLevelJuPedSimulation:
                         agent_id,
                         retry_pos,
                         walking_speed=1.34,
-                        assign_default_destination=False,
+                        assign_default_destination=True,
                     )
                     self.agent_levels[agent_id] = source_level
                     if force_redecision:

@@ -279,20 +279,18 @@ class AgentManager:
             agent_cfg["walking_speed"] = walking_speed
 
             # Add agent with level_id for multi-level simulations.
-            # assign_default_destination=False: agents hold at their spawn point
-            # so the t=0 bootstrap LLM decision determines their first destination
-            # instead of having every agent walk toward the same arbitrary default exit.
+            # Agents should always have an active JuPedSim destination journey at spawn.
             if hasattr(jps_sim, "simulations"):
                 # Multi-level simulation
                 jps_sim.add_agent(
                     agent_id, start_pos, walking_speed=walking_speed, level_id=level_id,
-                    assign_default_destination=False,
+                    assign_default_destination=True,
                 )
             else:
                 # Single-level simulation
                 jps_sim.add_agent(
                     agent_id, start_pos, walking_speed=walking_speed,
-                    assign_default_destination=False,
+                    assign_default_destination=True,
                 )
 
     @staticmethod
@@ -306,8 +304,8 @@ class AgentManager:
 
         All agent attributes (position, speed, level) are taken directly from the
         saved agent-config dicts, so no spawn generation or zone inference is
-        performed.  Agents are spawned without a default JuPedSim journey
-        (``assign_default_destination=False``) exactly as in the normal path.
+        performed. Agents are spawned with a default JuPedSim destination journey
+        exactly as in the normal path.
 
         Args:
             jps_sim: Freshly initialised simulation (single- or multi-level).
@@ -324,13 +322,13 @@ class AgentManager:
                     agent_id, start_pos,
                     walking_speed=walking_speed,
                     level_id=level_id,
-                    assign_default_destination=False,
+                    assign_default_destination=True,
                 )
             else:
                 jps_sim.add_agent(
                     agent_id, start_pos,
                     walking_speed=walking_speed,
-                    assign_default_destination=False,
+                    assign_default_destination=True,
                 )
 
     @staticmethod

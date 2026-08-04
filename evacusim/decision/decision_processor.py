@@ -1101,9 +1101,6 @@ class DecisionProcessor:
                             logger.info(f"🔄 {agent_id} changed route: {old_exit} → {new_exit}")
                             route_changed = True
 
-                        # Update destination tracking
-                        self.agent_destinations[agent_id] = new_exit
-
                     # Add route change metadata if it occurred
                     if route_changed:
                         decision_record["route_change"] = {
