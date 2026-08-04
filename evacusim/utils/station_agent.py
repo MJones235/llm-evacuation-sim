@@ -28,12 +28,12 @@ logger = get_logger(__name__)
 # C: Deliberation (C6) and Dutifulness (C3) facets.
 OCEAN_ANCHORS: dict[str, dict[str, str]] = {
     "N": {
-        "high":   "You tend to feel anxious and unsettled in uncertain or threatening "
-                  "situations, and find it difficult to remain composed when facing potential danger.",
+        "high":   "You tend to feel anxious and unsettled in uncertain situations, "
+                  "and find it difficult to remain composed when outcomes are unclear.",
         "medium": "You experience some unease in uncertain situations but can generally "
                   "keep it in check under moderate pressure.",
         "low":    "You tend to remain calm and emotionally stable even in uncertain "
-                  "or potentially threatening situations.",
+                  "situations.",
     },
     "O": {
         "high":   "You tend to question your initial assumptions about what is happening "
@@ -44,12 +44,12 @@ OCEAN_ANCHORS: dict[str, dict[str, str]] = {
                   "your initial interpretation of what is happening.",
     },
     "C": {
-        "high":   "You prefer to think carefully before acting and feel a strong sense "
-                  "of responsibility for doing the right thing.",
+        "high":   "You prefer to think carefully before acting, value structure, "
+                  "and stay disciplined about following your own plan.",
         "medium": "You generally consider your options before acting, though you can also "
                   "act on instinct when the situation seems to call for it.",
         "low":    "You tend to act on instinct rather than deliberating, and are less "
-                  "concerned with following rules or procedures.",
+                  "likely to stick to structured routines.",
     },
 }
 

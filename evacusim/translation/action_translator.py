@@ -104,6 +104,89 @@ class ActionTranslator:
                 action = action[json_start:]
 
             data = json.loads(action)
+
+            # v1.1 schema: action-level verbs with optional wait_reason/exit_id/pace.
+            if "action" in data:
+                verb = data.get("action")
+                wait_reason = data.get("wait_reason")
+                exit_id = data.get("exit_id")
+                pace = data.get("pace")
+
+                if verb == "continue_activity":
+                    return {
+                        "action_type": "continue",
+                        "target": None,
+                        "target_type": "journey",
+                        "confidence": 0.95,
+                        "reasoning": "Continuing assigned journey",
+                        "pace": pace,
+                    }
+
+                if verb == "wait":
+                    return {
+                        "action_type": "wait",
+                        "target": current_position,
+                        "target_type": "current_position",
+                        "confidence": 0.95,
+                        "reasoning": "Waiting at current position",
+                        "wait_reason": wait_reason,
+                        "pace": pace,
+                    }
+
+                if verb == "seek_information":
+                    return {
+                        "action_type": "seek_information",
+                        "target": current_position,
+                        "target_type": "information_source",
+                        "confidence": 0.9,
+                        "reasoning": "Seeking information from deterministic resolver",
+                        "pace": pace,
+                    }
+
+                if verb == "evacuate":
+                    requested_exit = exit_id
+                    if requested_exit:
+                        exit_coords = self._get_exit_coordinates(requested_exit, agent_level)
+                    else:
+                        exit_coords = None
+
+                    if exit_coords:
+                        return {
+                            "action_type": "move",
+                            "target": exit_coords,
+                            "target_type": "exit",
+                            "exit_name": requested_exit,
+                            "resolved_exit_id": requested_exit,
+                            "confidence": 0.95,
+                            "reasoning": f"Evacuating via {requested_exit}",
+                            "pace": pace,
+                        }
+
+                if verb == "leave_by_train":
+                    nearest_train = self._find_nearest_train_exit(current_position, agent_level)
+                    if nearest_train is not None:
+                        return {
+                            "action_type": "move",
+                            "target": nearest_train["coords"],
+                            "target_type": "exit",
+                            "exit_name": nearest_train["name"],
+                            "resolved_exit_id": nearest_train["name"],
+                            "confidence": 0.9,
+                            "reasoning": "Heading to nearest train platform for boarding",
+                            "pace": pace,
+                        }
+
+                # Invalid v1.1 payload falls through to safe wait default.
+                return {
+                    "action_type": "wait",
+                    "target": current_position,
+                    "target_type": "current_position",
+                    "confidence": 0.4,
+                    "reasoning": "Invalid v1.1 action payload; defaulting to wait",
+                    "wait_reason": "awaiting_information",
+                    "pace": None,
+                }
+
             action_type = data.get("action_type")
             target_type = data.get("target_type")
             exit_name = data.get("exit_name")
@@ -488,6 +571,38 @@ class ActionTranslator:
                 nearest = {"name": exit_name, "coords": exit_coords}
 
         return nearest if nearest else {"name": "default", "coords": (0, 0)}
+
+    def _find_nearest_train_exit(
+        self,
+        position: tuple[float, float],
+        agent_level: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Return nearest train-platform exit currently defined on the agent's level."""
+        candidates: dict[str, tuple[float, float]] = {}
+
+        if agent_level and self.jps_sim and hasattr(self.jps_sim, "simulations"):
+            level_sim = self.jps_sim.simulations.get(agent_level)
+            if level_sim and hasattr(level_sim, "exit_manager"):
+                for name, coords in level_sim.exit_manager.exit_coordinates.items():
+                    if str(name).startswith("train_platform_"):
+                        candidates[name] = coords
+
+        if not candidates:
+            for name, coords in self.exits.items():
+                if str(name).startswith("train_platform_"):
+                    candidates[name] = coords
+
+        if not candidates:
+            return None
+
+        nearest_name = min(
+            candidates,
+            key=lambda name: math.hypot(
+                position[0] - candidates[name][0],
+                position[1] - candidates[name][1],
+            ),
+        )
+        return {"name": nearest_name, "coords": candidates[nearest_name]}
 
     def _find_zone_target(self, text: str) -> tuple[str, tuple[float, float]] | None:
         """Find zone coordinates from zone name in text.

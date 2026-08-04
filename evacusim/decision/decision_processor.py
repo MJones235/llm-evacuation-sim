@@ -13,6 +13,7 @@ This module coordinates the cognitive layer (Concordia) decision-making process.
 """
 
 import asyncio
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -69,6 +70,7 @@ class DecisionProcessor:
         last_actions: dict[str, str],
         perf_timer,
         jps_sim=None,
+        event_manager=None,
         agent_configs: list[dict] | None = None,
         enable_group_decisions: bool = False,
         group_decision_min_size: int = 3,
@@ -109,6 +111,7 @@ class DecisionProcessor:
         self.last_actions = last_actions
         self.perf_timer = perf_timer
         self.jps_sim = jps_sim
+        self.event_manager = event_manager
         self._agent_cfg: dict[str, dict] = {cfg["id"]: cfg for cfg in (agent_configs or [])}
         self.enable_group_decisions = enable_group_decisions
         self.group_decision_min_size = group_decision_min_size
@@ -154,7 +157,7 @@ class DecisionProcessor:
         self.llm_calls_skipped = 0  # Statistics tracking
         self.llm_calls_made = 0
 
-        # Per-agent persistent goal text (plain string, updated via goal_update field).
+        # Per-agent persistent goal text used for journey framing.
         # Seeded from agent_cfg["initial_goal"] on first decision.
         self.agent_goals: dict[str, str] = {}
 
@@ -163,6 +166,11 @@ class DecisionProcessor:
         # that the prompt hash changes every minute, busting the cache and forcing
         # the LLM to re-evaluate agents stuck in a repetitive-wait deadlock.
         self._agent_wait_since: dict[str, float] = {}
+        self._agent_reassess_modes: dict[str, str] = {}
+        self._last_zone_by_agent: dict[str, str | None] = {}
+        self._last_route_blocked_by_agent: dict[str, bool] = {}
+        self._last_alarm_signature_by_agent: dict[str, str] = {}
+        self._last_train_hint_by_agent: dict[str, str] = {}
 
         # Config-driven exit knowledge — replaces hardcoded level-number comparisons.
         # All keys are defined in station.yaml under the station: section.
@@ -218,12 +226,14 @@ class DecisionProcessor:
         age: str,
         gender: str,
         personality_profile: str,
-        last_decision_summary: str,
+        journey_block: str,
+        new_since_last_decision: str,
+        current_surroundings: str,
+        available_actions_block: str,
+        wait_action_rule_block: str,
+        pace_field_block: str,
+        pace_validation_block: str,
         situation_framing: str,
-        zone_option: str,
-        zone_name_hint: str,
-        zone_constraint: str,
-        zones_section: str,
         following_constraint_text: str,
         valid_exits_text: str,
     ) -> str:
@@ -232,15 +242,35 @@ class DecisionProcessor:
             age=age,
             gender=gender,
             personality_profile=personality_profile,
-            last_decision_summary=last_decision_summary,
+            journey_block=journey_block,
+            new_since_last_decision=new_since_last_decision,
+            current_surroundings=current_surroundings,
+            available_actions_block=available_actions_block,
+            wait_action_rule_block=wait_action_rule_block,
+            pace_field_block=pace_field_block,
+            pace_validation_block=pace_validation_block,
             situation_framing=situation_framing,
-            zone_option=zone_option,
-            zone_name_hint=zone_name_hint,
-            zone_constraint=zone_constraint,
-            zones_section=zones_section,
             following_constraint_text=following_constraint_text,
             valid_exits_text=valid_exits_text,
         )
+
+    @staticmethod
+    def _build_pace_prompt_blocks(offered_actions: list[str]) -> tuple[str, str, str]:
+        """Build conditional wait/pace schema and validation text."""
+        offered = set(offered_actions)
+        if offered == {"wait"}:
+            return "- if action = wait: set wait_reason.", "", ""
+
+        wait_action_rule_block = "- if action = wait: set wait_reason and set pace to null."
+        pace_field_block = '  "pace": null,\n'
+        pace_validation_block = (
+            "- pace definitions: normal_pace - moving as you normally would; "
+            "hurrying - walking noticeably faster than usual, but not running; "
+            "running - running.\n"
+            '- if action = "wait": pace must be null.\n'
+            '- if action is not "wait": pace must be one of "normal_pace", "hurrying", or "running".'
+        )
+        return wait_action_rule_block, pace_field_block, pace_validation_block
 
     def _build_zones_section(self, zones: list[str], zone_id: str | None = None) -> str:
         """Build the AVAILABLE ZONES block for the prompt.
@@ -268,22 +298,16 @@ class DecisionProcessor:
         bullets = "\n".join(lines)
         return "\nAvailable zones:\n" f"{bullets}\n\n"
 
-    def _get_valid_exits_section(self, agent_id: str, observation: str, zone_id: str | None) -> str:
-        """Build a prompt section listing the valid exit names for this agent.
+    def _get_valid_exits_section(
+        self,
+        agent_id: str,
+        observation: str,
+        zone_id: str | None,
+    ) -> tuple[str, list[str], bool]:
+        """Build exit guidance text and return offered evacuation exit IDs.
 
-        Uses config-driven knowledge tables rather than hard-coded level numbers:
-        - arrival_exits_by_zone: exits that arrive INTO this zone (filtered out)
-        - zone_known_exits_by_profile: exits recalled from memory per zone/profile
-
-                Commuters recall memorized exits for their current zone.
-                Novices rely on what they can see; they have a small fallback list of
-                exits they could read from signs (e.g. named street exits on the concourse).
-
-                Goal-aware routing is handled through config-driven prompt guidance:
-                - station.exit_semantic_tags: map of exit_id -> semantic tags
-                - station.goal_semantic_policies: rules that map goal keywords to
-                    preferred/discouraged exit tags in specific zones
-                This keeps behavior reusable across geometries without hardcoded IDs.
+        Returns:
+            tuple(valid_exits_text, offered_exit_ids, has_visible_or_known_exit)
         """
         registry = self.action_translator.exit_registry
         valid_ids = set(registry.get_all_ids())
@@ -293,134 +317,80 @@ class DecisionProcessor:
         goal_text = self.agent_goals.get(agent_id, "")
         goal_policy = self._get_goal_semantic_policy(zone_id, goal_text)
 
-        # Exits that arrive INTO this zone are one-way arrivals, not departure choices.
         arrival_exits = set(self._arrival_exits_by_zone.get(zone_id or "", []))
 
         def _is_valid_departure(eid: str) -> bool:
-            if eid in arrival_exits:
-                return False
-            return True
+            return eid not in arrival_exits
 
-        # Optional goal-driven ranking preferences from station config.
-        preferred_ids: set[str] = set()
-        discouraged_ids: set[str] = set()
-        if goal_policy:
-            prefer_tags = {
-                str(tag).strip().lower()
-                for tag in goal_policy.get("prefer_exit_tags", [])
-                if str(tag).strip()
-            }
-            avoid_tags = {
-                str(tag).strip().lower()
-                for tag in goal_policy.get("avoid_exit_tags", [])
-                if str(tag).strip()
-            }
-            for eid, tags in self._exit_semantic_tags.items():
-                if eid not in valid_ids or not _is_valid_departure(eid):
-                    continue
-                tag_set = {str(tag).strip().lower() for tag in (tags or []) if str(tag).strip()}
-                if prefer_tags and (tag_set & prefer_tags):
-                    preferred_ids.add(eid)
-                if avoid_tags and (tag_set & avoid_tags):
-                    discouraged_ids.add(eid)
-
-        def _extract_visible_distance_ranks(text: str) -> dict[str, int]:
-            ranks: dict[str, int] = {}
-            _cat_rank = {"very close": 0, "nearby": 1, "visible in distance": 2}
-            line_match = _RE_VISIBLE_EXITS_LINE.search(text)
-            if line_match:
-                for m in _RE_EXITS_LINE_ENTRY.finditer(line_match.group(1)):
-                    name = m.group(1).strip()
-                    rank = _cat_rank.get(m.group(2), 99)
-                    if name and name not in ranks:
-                        ranks[name] = rank
-            return ranks
-
-        visible_distance_rank = _extract_visible_distance_ranks(observation)
-
-        # Exits the agent currently knows are blocked (could be from proximity
-        # discovery this tick, or from persistent remembered knowledge injected
-        # by ObservationCoordinator).  These are stripped from every exit list so
-        # the agent never chooses a confirmed-blocked exit regardless of profile.
         blocked_display: set[str] = set()
         for _m in _RE_BLOCKED_EXIT_LINE.finditer(observation):
             blocked_display.add(_m.group(1).strip())
 
-        display_to_id: dict[str, str] = {}
-        for _eid in valid_ids:
-            if not _is_valid_departure(_eid):
-                continue
-            _name = registry.get_display_name(_eid)
-            if _name not in display_to_id:
-                display_to_id[_name] = _eid
+        visible_names: set[str] = set()
+        line_match = _RE_VISIBLE_EXITS_LINE.search(observation)
+        if line_match:
+            for m in _RE_EXITS_LINE_ENTRY.finditer(line_match.group(1)):
+                visible_names.add(m.group(1).strip())
 
-        def _sort_display_exits(display_names: list[str]) -> list[str]:
-            indexed = list(enumerate(display_names))
+        # Candidate exit IDs by profile and visibility.
+        candidate_ids: list[str] = []
 
-            def key_fn(item: tuple[int, str]) -> tuple[int, int, int, str]:
-                idx, name = item
-                is_visible = 0 if name in visible_distance_rank else 1
-                dist_rank = visible_distance_rank.get(name, 99)
-                eid = display_to_id.get(name)
-                preference_rank = 1
-                if eid in preferred_ids:
-                    preference_rank = 0
-                elif eid in discouraged_ids:
-                    preference_rank = 2
-                return (is_visible, dist_rank, preference_rank, idx, name.lower())
-
-            return [name for _, name in sorted(indexed, key=key_fn)]
-
-        departure_ids = [eid for eid in valid_ids if _is_valid_departure(eid)]
-        semantics_text = self._build_exit_semantics_text(goal_policy, departure_ids)
-
-        # ── Commuter: recall memorized exits for this zone ───────────────────
         if profile == "commuter":
             mem_ids = self._zone_known_exits.get(zone_id or "", {}).get("commuter", [])
-            exits = [
-                registry.get_display_name(eid)
-                for eid in mem_ids
-                if eid in valid_ids
-                and _is_valid_departure(eid)
-                and registry.get_display_name(eid) not in blocked_display
-            ]
-            exits = _sort_display_exits(exits)
-            if exits:
-                bullets = "".join(f"\n  \u2022 {e}" for e in exits)
-                return "\nAllowed exits now:" f"{bullets}\n" + semantics_text
-            # Fall through to visible-exit check if no memorized exits for this zone
+            for eid in mem_ids:
+                if eid in valid_ids and _is_valid_departure(eid):
+                    disp = registry.get_display_name(eid)
+                    if disp not in blocked_display:
+                        candidate_ids.append(eid)
 
-        # ── Visible exits (both profiles) ────────────────────────────────────
-        # Restrict to explicit visual sentences to avoid false positives.
-        visual_fragments = _RE_VISUAL_FRAGMENTS.findall(observation)
-        visual_fragments += _RE_VISIBLE_EXITS_LINE.findall(observation)
-        visual_text = " ".join(visual_fragments)
+        # Visible exits are available to all profiles.
+        for eid in sorted(valid_ids):
+            if not _is_valid_departure(eid):
+                continue
+            disp = registry.get_display_name(eid)
+            if disp in blocked_display:
+                continue
+            if disp in visible_names:
+                candidate_ids.append(eid)
 
-        all_departure = [
-            registry.get_display_name(eid) for eid in valid_ids if _is_valid_departure(eid)
-        ]
-        visible = [n for n in all_departure if n in visual_text and n not in blocked_display]
-        if visible:
-            visible = _sort_display_exits(visible)
-            bullets = "".join(f"\n  \u2022 {n}" for n in visible)
-            return "\nVisible exits right now:" f"{bullets}\n" + semantics_text
+        # Profile fallback when no visible exits were extracted.
+        if not candidate_ids:
+            fallback_ids = self._zone_known_exits.get(zone_id or "", {}).get(profile, [])
+            for eid in fallback_ids:
+                if eid in valid_ids and _is_valid_departure(eid):
+                    disp = registry.get_display_name(eid)
+                    if disp not in blocked_display:
+                        candidate_ids.append(eid)
 
-        # ── No visible exits: check profile's memorized fallback ─────────────
-        fallback_ids = self._zone_known_exits.get(zone_id or "", {}).get(profile, [])
-        fallback = [
-            registry.get_display_name(eid)
-            for eid in fallback_ids
-            if eid in valid_ids
-            and _is_valid_departure(eid)
-            and registry.get_display_name(eid) not in blocked_display
-        ]
-        if fallback:
-            bullets = "".join(f"\n  \u2022 {n}" for n in fallback)
-            return "\nAllowed exits now:" f"{bullets}\n" + semantics_text
+        # De-duplicate while preserving order.
+        seen: set[str] = set()
+        offered_exit_ids: list[str] = []
+        for eid in candidate_ids:
+            if eid in seen:
+                continue
+            seen.add(eid)
+            offered_exit_ids.append(eid)
 
-        return semantics_text + (
-            "\nVisible exits right now: none.\n"
-            "Do NOT use target_type='exit'. Follow someone or wait.\n\n"
+        semantics_text = self._build_exit_semantics_text(goal_policy, offered_exit_ids)
+        if not offered_exit_ids:
+            return (
+                semantics_text + "No evacuation exits are currently available from where you are.\n",
+                [],
+                False,
+            )
+
+        bullets = []
+        for eid in offered_exit_ids:
+            disp = registry.get_display_name(eid)
+            bullets.append(f"- {eid}: {disp}")
+
+        return (
+            "Evacuation exits you can choose now (use exit_id exactly):\n"
+            + "\n".join(bullets)
+            + "\n"
+            + semantics_text,
+            offered_exit_ids,
+            True,
         )
 
     def _get_goal_semantic_policy(
@@ -513,8 +483,260 @@ class DecisionProcessor:
             lines.append(f"- Avoid exits like: {shown} (unless your goal is to leave the station)")
 
         if len(lines) == 1:
-            return "\n"
-        return "\n" + "\n".join(lines) + "\n\n"
+            return ""
+        return "\n" + "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _has_reachable_information_source(observation: str) -> bool:
+        """Heuristic reachability check for staff/board information sources."""
+        text = observation.lower()
+        return any(
+            key in text
+            for key in (
+                "staff",
+                "rci",
+                "responder",
+                "indicator board",
+                "board state",
+                "station pa",
+            )
+        )
+
+    def _has_train_service(self) -> bool:
+        """Return True if the scenario exposes train exits in the registry."""
+        try:
+            for exit_id in self.action_translator.exit_registry.get_all_ids():
+                if str(exit_id).startswith("train_platform_"):
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _is_route_blocked(self, agent_id: str, observation: str) -> bool:
+        """Return True if the agent's current routing target is flagged as blocked."""
+        current_dest = self.agent_destinations.get(agent_id)
+        if not current_dest:
+            return False
+
+        registry = getattr(self.action_translator, "exit_registry", None)
+        current_display = (
+            registry.get_display_name(current_dest) if registry is not None else current_dest
+        )
+        blocked_mentions = [_m.group(1).strip() for _m in _RE_BLOCKED_EXIT_LINE.finditer(observation)]
+        return any(name == current_display for name in blocked_mentions)
+
+    def _build_available_actions_block(
+        self,
+        offered_actions: list[str],
+        offered_wait_reasons: list[str],
+        offered_exit_ids: list[str],
+    ) -> str:
+        """Render offered-set actions with required fields."""
+        lines: list[str] = ["Choose exactly one action from this offered set:"]
+        for verb in offered_actions:
+            if verb == "wait":
+                reasons = ", ".join(offered_wait_reasons)
+                lines.append(f"- wait (required: wait_reason in {{{reasons}}})")
+            elif verb == "evacuate":
+                exits = ", ".join(offered_exit_ids) if offered_exit_ids else "none"
+                lines.append(f"- evacuate (required: exit_id from {{{exits}}})")
+            else:
+                lines.append(f"- {verb} (no extra field)")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _extract_new_information_text(observation: str) -> str:
+        """Extract the cue-derived new-information line from an observation."""
+        lines = [ln.strip() for ln in observation.splitlines() if ln.strip()]
+        for idx, line in enumerate(lines):
+            if line.startswith("What is NEW since your last decision:"):
+                if idx + 1 < len(lines):
+                    return lines[idx + 1]
+                return "No significant new information."
+        return "No significant new information."
+
+    def _detect_cues(
+        self,
+        agent_id: str,
+        observation: str,
+        zone_id: str | None,
+        route_blocked: bool,
+    ) -> list[str]:
+        """Detect cue types that should wake gated agents."""
+        cues: list[str] = []
+        obs_lower = observation.lower()
+
+        last_zone = self._last_zone_by_agent.get(agent_id)
+        if last_zone is None:
+            self._last_zone_by_agent[agent_id] = zone_id
+        elif zone_id is not None and zone_id != last_zone:
+            cues.append("zone_entry")
+            self._last_zone_by_agent[agent_id] = zone_id
+
+        prev_blocked = self._last_route_blocked_by_agent.get(agent_id)
+        if prev_blocked is None:
+            self._last_route_blocked_by_agent[agent_id] = route_blocked
+        elif prev_blocked != route_blocked:
+            cues.append("route_blocked" if route_blocked else "route_unblocked")
+            self._last_route_blocked_by_agent[agent_id] = route_blocked
+
+        if "(directing you) said:" in obs_lower:
+            if "pa" in obs_lower or "pa system" in obs_lower:
+                cues.append("pa_message")
+            else:
+                cues.append("staff_instruction")
+
+        train_hint = ""
+        if "train" in obs_lower and ("arriv" in obs_lower or "waiting" in obs_lower):
+            train_hint = "train_arrival"
+        prev_train_hint = self._last_train_hint_by_agent.get(agent_id, "")
+        if train_hint and train_hint != prev_train_hint:
+            cues.append("train_arrival")
+        self._last_train_hint_by_agent[agent_id] = train_hint
+
+        alarm_signature = ""
+        if "alarm" in obs_lower:
+            if "all clear" in obs_lower or "all-clear" in obs_lower:
+                alarm_signature = "all_clear"
+            elif "sounding" in obs_lower or "activated" in obs_lower or "onset" in obs_lower:
+                alarm_signature = "alarm_onset"
+            else:
+                alarm_signature = "alarm_state"
+        prev_alarm = self._last_alarm_signature_by_agent.get(agent_id, "")
+        if alarm_signature and alarm_signature != prev_alarm:
+            cues.append("alarm_state_change")
+        if alarm_signature:
+            self._last_alarm_signature_by_agent[agent_id] = alarm_signature
+
+        return cues
+
+    @staticmethod
+    def _extract_json_object(response: str) -> dict[str, Any] | None:
+        """Extract and decode the first JSON object in a model response."""
+        if not response:
+            return None
+        json_start = response.find("{")
+        if json_start < 0:
+            return None
+        try:
+            return json.loads(response[json_start:])
+        except json.JSONDecodeError:
+            return None
+
+    def _validate_decision_payload(
+        self,
+        payload: dict[str, Any],
+        offered_actions: set[str],
+        offered_wait_reasons: set[str],
+        offered_exit_ids: set[str],
+    ) -> list[str]:
+        """Return schema validation errors for a decision payload."""
+        errors: list[str] = []
+        action = payload.get("action")
+        wait_reason = payload.get("wait_reason")
+        exit_id = payload.get("exit_id")
+        pace = payload.get("pace")
+        reassess_when = payload.get("reassess_when")
+        assessment = payload.get("assessment")
+
+        if action not in offered_actions:
+            errors.append(f"action must be one of {sorted(offered_actions)}")
+
+        if not isinstance(assessment, dict):
+            errors.append("assessment must be an object")
+        else:
+            required_assessment_fields = (
+                "source_credibility",
+                "situation_appraisal",
+                "personal_relevance",
+                "options_considered",
+                "option_chosen_because",
+                "information_gap",
+            )
+            for key in required_assessment_fields:
+                if key not in assessment or not isinstance(assessment.get(key), str):
+                    errors.append(f"assessment.{key} must be a string")
+
+        if action == "wait":
+            if wait_reason not in offered_wait_reasons:
+                errors.append(
+                    f"wait_reason must be one of {sorted(offered_wait_reasons)} when action=wait"
+                )
+            if pace is not None:
+                errors.append("pace must be null when action=wait")
+        else:
+            if wait_reason is not None:
+                errors.append("wait_reason must be null unless action=wait")
+            if pace not in {"normal_pace", "hurrying", "running"}:
+                errors.append(
+                    'pace must be one of "normal_pace", "hurrying", or "running" when action is not wait'
+                )
+
+        if action == "evacuate":
+            if exit_id not in offered_exit_ids:
+                errors.append(f"exit_id must be one of {sorted(offered_exit_ids)} when action=evacuate")
+        else:
+            if exit_id is not None:
+                errors.append("exit_id must be null unless action=evacuate")
+
+        if reassess_when not in {"next_interval", "new_cue_only"}:
+            errors.append("reassess_when must be 'next_interval' or 'new_cue_only'")
+
+        return errors
+
+    @staticmethod
+    def _decision_payload_to_json(payload: dict[str, Any]) -> str:
+        """Serialize payload into a stable compact JSON string."""
+        return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+    def _build_fallback_decision(
+        self,
+        agent_id: str,
+        offered_actions: set[str],
+        offered_wait_reasons: set[str],
+        offered_exit_ids: set[str],
+    ) -> dict[str, Any]:
+        """Fallback policy after repeated malformed outputs."""
+        decisions = self.agent_decisions.get(agent_id, {}).get("decisions", [])
+        if decisions:
+            last_payload = decisions[-1].get("decision_payload")
+            if isinstance(last_payload, dict):
+                errors = self._validate_decision_payload(
+                    last_payload,
+                    offered_actions,
+                    offered_wait_reasons,
+                    offered_exit_ids,
+                )
+                if not errors:
+                    return last_payload
+
+        fallback_action = "continue_activity" if "continue_activity" in offered_actions else "wait"
+        fallback_wait_reason = None
+        fallback_exit = None
+        fallback_pace: str | None = "normal_pace"
+        if fallback_action == "wait":
+            fallback_wait_reason = (
+                "awaiting_information"
+                if "awaiting_information" in offered_wait_reasons
+                else sorted(offered_wait_reasons)[0]
+            )
+            fallback_pace = None
+
+        return {
+            "assessment": {
+                "source_credibility": "Unable to parse a valid response this turn.",
+                "situation_appraisal": "No updated appraisal was available.",
+                "personal_relevance": "No updated relevance estimate was available.",
+                "options_considered": "Fallback policy applied.",
+                "option_chosen_because": "Reused a safe default after repeated schema failures.",
+                "information_gap": "No reliable model output was available.",
+            },
+            "action": fallback_action,
+            "wait_reason": fallback_wait_reason,
+            "exit_id": fallback_exit,
+            "pace": fallback_pace,
+            "reassess_when": "next_interval",
+        }
 
     def _get_following_constraint_text(self, observation: str) -> str:
         """Build a hard movement constraint block when followers are detected.
@@ -916,21 +1138,49 @@ class DecisionProcessor:
                 observation = "\n".join(goal_lines) + "\n\n" + observation
 
             # Build profile-aware valid exit options block
-            valid_exits_text = self._get_valid_exits_section(agent_id, observation, zone_id)
+            valid_exits_text, offered_exit_ids, has_reachable_exit = self._get_valid_exits_section(
+                agent_id,
+                observation,
+                zone_id,
+            )
+
+            route_blocked = self._is_route_blocked(agent_id, observation)
+            cues = self._detect_cues(agent_id, observation, zone_id, route_blocked)
+
+            # Cue-only gate: skip base-interval deliberation until a cue arrives.
+            reassess_mode = self._agent_reassess_modes.get(agent_id, "next_interval")
+            if reassess_mode == "new_cue_only" and not cues:
+                logger.debug(f"{agent_id}: gated by reassess_when='new_cue_only' (no cue)")
+                return
+
+            offered_wait_reasons = ["awaiting_information", "awaiting_instruction"]
+            if route_blocked:
+                offered_wait_reasons.append("route_blocked")
+
+            offered_actions = ["continue_activity", "wait"]
+            if self.action_executor.has_reachable_information_source(agent_id, position, zone_id):
+                offered_actions.append("seek_information")
+            if has_reachable_exit and offered_exit_ids:
+                offered_actions.append("evacuate")
+            if self._has_train_service():
+                offered_actions.append("leave_by_train")
+
+            offered_actions_set = set(offered_actions)
+            offered_wait_reasons_set = set(offered_wait_reasons)
+            offered_exit_ids_set = set(offered_exit_ids)
+            available_actions_block = self._build_available_actions_block(
+                offered_actions,
+                offered_wait_reasons,
+                offered_exit_ids,
+            )
+            wait_action_rule_block, pace_field_block, pace_validation_block = (
+                self._build_pace_prompt_blocks(offered_actions)
+            )
 
             # Build follower constraint block (injected when circular/following detected)
             following_constraint_text = self._get_following_constraint_text(observation)
 
-            # Only expose zone-targeting when it is meaningful this turn.
-            # In practice this is when exits are not currently available/visible,
-            # so the agent needs an intermediate area-level move.
-            include_zones = "Visible exits right now: none." in valid_exits_text
-            zones_section = self._build_zones_section(zones, zone_id) if include_zones else ""
-            has_zones = bool(zones_section.strip())
-
             # Build the action spec with prompt text
-            # Per-role extra text injected verbatim before the JSON schema.
-            # Configured via agents.roles.<role>.decision_prompt_extra in the scenario YAML.
             cfg = self._agent_cfg.get(agent_id, {})
             role_prompt_extra = cfg.get("decision_prompt_extra", "")
             situation_framing = (f"{role_prompt_extra}\n\n") if role_prompt_extra else ""
@@ -941,28 +1191,28 @@ class DecisionProcessor:
                 cfg.get("personality_anchor")
                 or cfg.get("personality_type", "unknown")
             )
-            last_decision_summary = self._build_last_decision_summary(agent_id, current_sim_time)
-
-            # Compute minimal inline suffixes for zone-related placeholders.
-            # zone_option:    appends ', "zone"' to the target_type line when zones are available.
-            # zone_name_hint: appends the zone_name description when zones are available.
-            # zone_constraint: adds the zone constraint bullet when zones are available.
-            zone_option = ', "zone"' if has_zones else ""
-            zone_name_hint = (
-                " (or zone name EXACTLY as shown in Available Zones)" if has_zones else ""
+            journey_block = agent_goal if agent_goal else "Continue your assigned journey."
+            previous_decision_summary = self._build_last_decision_summary(agent_id, current_sim_time)
+            new_info_text = self._extract_new_information_text(observation)
+            cue_text = ", ".join(cues) if cues else "none"
+            new_since_last_decision = (
+                f"{previous_decision_summary} New information: {new_info_text} "
+                f"Detected cues: {cue_text}."
             )
-            zone_constraint = "- If target_type='zone', zone_name is required.\n" if has_zones else ""
+            current_surroundings = observation
 
             prompt_text = self._render_decision_prompt(
                 age=age,
                 gender=gender,
                 personality_profile=personality_profile,
-                last_decision_summary=last_decision_summary,
+                journey_block=journey_block,
+                new_since_last_decision=new_since_last_decision,
+                current_surroundings=current_surroundings,
+                available_actions_block=available_actions_block,
+                wait_action_rule_block=wait_action_rule_block,
+                pace_field_block=pace_field_block,
+                pace_validation_block=pace_validation_block,
                 situation_framing=situation_framing,
-                zone_option=zone_option,
-                zone_name_hint=zone_name_hint,
-                zone_constraint=zone_constraint,
-                zones_section=zones_section,
                 following_constraint_text=following_constraint_text,
                 valid_exits_text=valid_exits_text,
             )
@@ -997,34 +1247,49 @@ class DecisionProcessor:
             )
 
             llm_was_called = False  # Track whether LLM was called for decision record
+            repair_status = "ok"
+            decision_payload: dict[str, Any] | None = None
 
             if not should_call_llm and cached_decision:
-                # Reuse cached decision - no new information to act on
-                action = cached_decision
-                logger.info(
-                    f"{agent_id}: ✓ Prompt unchanged, reusing cached decision (saved LLM call)"
-                )
-                async with self._state_lock:
-                    self.llm_calls_skipped += 1
-
-                # --- Short-circuit Opt 7b ---
-                # If the agent already has a committed destination and is moving toward
-                # it, there is no need to re-translate or re-execute — JuPedSim is
-                # already routing them correctly.  We only run the full pipeline when
-                # the agent is waiting (needs a fresh waypoint) or has no destination yet.
-                existing_dest = self.agent_destinations.get(agent_id)
-                agent_is_moving = (
-                    self.action_executor.agent_action.get(agent_id) == "moving"
-                    if hasattr(self.action_executor, "agent_action")
-                    else False
-                )
-                if existing_dest and agent_is_moving:
-                    logger.debug(
-                        f"{agent_id}: ✓ Short-circuit — already moving to '{existing_dest}', "
-                        f"skipping translation & execution"
+                candidate_payload = self._extract_json_object(cached_decision)
+                if candidate_payload is not None:
+                    payload_errors = self._validate_decision_payload(
+                        candidate_payload,
+                        offered_actions_set,
+                        offered_wait_reasons_set,
+                        offered_exit_ids_set,
                     )
-                    return
-            else:
+                    if not payload_errors:
+                        decision_payload = candidate_payload
+                        action = cached_decision
+                        repair_status = "cached"
+                        logger.info(
+                            f"{agent_id}: ✓ Prompt unchanged, reusing cached decision (saved LLM call)"
+                        )
+                        async with self._state_lock:
+                            self.llm_calls_skipped += 1
+
+                        existing_dest = self.agent_destinations.get(agent_id)
+                        agent_is_moving = (
+                            self.action_executor.agent_action.get(agent_id) == "moving"
+                            if hasattr(self.action_executor, "agent_action")
+                            else False
+                        )
+                        if existing_dest and agent_is_moving:
+                            logger.debug(
+                                f"{agent_id}: ✓ Short-circuit — already moving to '{existing_dest}', "
+                                f"skipping translation & execution"
+                            )
+                            return
+
+                if decision_payload is None:
+                    should_call_llm = True
+                    cached_decision = None
+                    logger.info(
+                        f"{agent_id}: cached decision invalid for current offered set — requesting fresh decision"
+                    )
+
+            if decision_payload is None:
                 if should_call_llm and self._min_redecision_interval_secs > 0:
                     if "No significant new information." in observation:
                         previous_llm_time = self._last_llm_decision_time.get(agent_id)
@@ -1033,87 +1298,126 @@ class DecisionProcessor:
                             if elapsed < self._min_redecision_interval_secs:
                                 throttled_cached = self.prompt_cache.get_cached_decision(agent_id)
                                 if throttled_cached:
-                                    action = throttled_cached
-                                    logger.info(
-                                        f"{agent_id}: ✓ Reusing cached decision "
-                                        f"(redecision throttle {elapsed:.1f}s "
-                                        f"< {self._min_redecision_interval_secs:.1f}s)"
-                                    )
-                                    async with self._state_lock:
-                                        self.llm_calls_skipped += 1
-                                    should_call_llm = False
-                                    cached_decision = throttled_cached
+                                    candidate_payload = self._extract_json_object(throttled_cached)
+                                    if candidate_payload is not None:
+                                        payload_errors = self._validate_decision_payload(
+                                            candidate_payload,
+                                            offered_actions_set,
+                                            offered_wait_reasons_set,
+                                            offered_exit_ids_set,
+                                        )
+                                        if not payload_errors:
+                                            decision_payload = candidate_payload
+                                            action = throttled_cached
+                                            repair_status = "cached"
+                                            logger.info(
+                                                f"{agent_id}: ✓ Reusing cached decision "
+                                                f"(redecision throttle {elapsed:.1f}s "
+                                                f"< {self._min_redecision_interval_secs:.1f}s)"
+                                            )
+                                            async with self._state_lock:
+                                                self.llm_calls_skipped += 1
+                                            should_call_llm = False
 
-                if not should_call_llm and cached_decision:
-                    action = cached_decision
-                else:
-                # Call LLM - significant new information detected
+                if decision_payload is None:
                     with self.perf_timer.measure("agent_observe", is_parallel=True):
                         agent.observe(observation)
 
-                    # Acquire semaphore before the LLM call to prevent burst overload.
-                    async with self._llm_semaphore:
-                        try:
-                            with self.perf_timer.measure("agent_act_llm", is_parallel=True):
-                                llm_current_agent_id.set(agent_id)
-                                llm_current_sim_time.set(current_sim_time)
-                                if self._per_agent_timeout_secs is not None:
-                                    async with asyncio.timeout(self._per_agent_timeout_secs):
-                                        action = await asyncio.to_thread(agent.act, action_spec)
-                                else:
-                                    action = await asyncio.to_thread(agent.act, action_spec)
-                        except asyncio.TimeoutError:
-                            timeout_secs = self._per_agent_timeout_secs
-                            logger.warning(
-                                f"{agent_id}: decision timed out after {timeout_secs:.0f}s — "
-                                "keeping existing waypoint"
-                            )
-                            return
+                    last_errors: list[str] = ["invalid response"]
+                    raw_action = ""
+                    attempts_used = 0
 
-                    # Cache the decision for future reuse
+                    for attempt_idx in range(3):
+                        attempts_used = attempt_idx + 1
+                        attempt_prompt = prompt_text
+                        if attempt_idx > 0:
+                            attempt_prompt = (
+                                prompt_text
+                                + "\n\nSYSTEM NOTE: Your previous output violated the schema: "
+                                + "; ".join(last_errors)
+                                + ". Return only valid JSON that satisfies all rules."
+                            )
+                        attempt_action_spec = entity_lib.ActionSpec(
+                            call_to_action=attempt_prompt,
+                            output_type=entity_lib.OutputType.FREE,
+                        )
+
+                        async with self._llm_semaphore:
+                            try:
+                                with self.perf_timer.measure("agent_act_llm", is_parallel=True):
+                                    llm_current_agent_id.set(agent_id)
+                                    llm_current_sim_time.set(current_sim_time)
+                                    if self._per_agent_timeout_secs is not None:
+                                        async with asyncio.timeout(self._per_agent_timeout_secs):
+                                            raw_action = await asyncio.to_thread(
+                                                agent.act, attempt_action_spec
+                                            )
+                                    else:
+                                        raw_action = await asyncio.to_thread(agent.act, attempt_action_spec)
+                            except asyncio.TimeoutError:
+                                timeout_secs = self._per_agent_timeout_secs
+                                logger.warning(
+                                    f"{agent_id}: decision timed out after {timeout_secs:.0f}s — "
+                                    "keeping existing waypoint"
+                                )
+                                return
+
+                        parsed = self._extract_json_object(raw_action)
+                        if parsed is None:
+                            last_errors = ["response was not valid JSON"]
+                            continue
+
+                        last_errors = self._validate_decision_payload(
+                            parsed,
+                            offered_actions_set,
+                            offered_wait_reasons_set,
+                            offered_exit_ids_set,
+                        )
+                        if not last_errors:
+                            decision_payload = parsed
+                            break
+
+                    if decision_payload is None:
+                        decision_payload = self._build_fallback_decision(
+                            agent_id,
+                            offered_actions_set,
+                            offered_wait_reasons_set,
+                            offered_exit_ids_set,
+                        )
+                        repair_status = "fallback"
+                    elif attempts_used == 1:
+                        repair_status = "ok"
+                    elif attempts_used == 2:
+                        repair_status = "repair_1"
+                    else:
+                        repair_status = "repair_2"
+
+                    action = self._decision_payload_to_json(decision_payload)
                     self.prompt_cache.cache_decision(agent_id, action)
                     llm_was_called = True
                     self._last_llm_decision_time[agent_id] = current_sim_time
 
-                    if should_call_llm and messages_list:
-                        logger.info(
-                            f"{agent_id}: ✓ Calling LLM (received {len(messages_list)} message(s))"
-                        )
-                    elif should_call_llm:
-                        logger.info(f"{agent_id}: ✓ Calling LLM (observation changed significantly)")
-                    else:
-                        logger.info(f"{agent_id}: ✓ Calling LLM (first decision)")
-
                     async with self._state_lock:
                         self.llm_calls_made += 1
-
-                    # Update observation/action cache
-                    async with self._state_lock:
                         self.last_observations[agent_id] = observation
                         self.last_actions[agent_id] = action
+
+            if decision_payload is None:
+                logger.warning(f"{agent_id}: no decision payload available, skipping")
+                return
+
+            self._agent_reassess_modes[agent_id] = str(
+                decision_payload.get("reassess_when", "next_interval")
+            )
 
             # Parse JSON response
             with self.perf_timer.measure("parse_json_response", is_parallel=True):
                 reasoning = self._parse_json_response(action)
 
-            # Persist goal update if the agent revised their objective
-            if isinstance(reasoning, dict):
-                goal_update = reasoning.get("goal_update", "")
-                if goal_update and isinstance(goal_update, str) and goal_update.strip():
-                    async with self._state_lock:
-                        self.agent_goals[agent_id] = goal_update.strip()
-                    logger.info(f"{agent_id}: Updated goal → '{goal_update.strip()}'")
-
             # Translate action to JuPedSim command
-            if position is None:
-                # Agent has likely exited - skip action execution
-                logger.debug(f"{agent_id}: No position found, likely exited")
-                return
-
             with self.perf_timer.measure("translate_action", is_parallel=True):
                 translated = self.action_translator.translate(agent_id, action, position)
 
-            # Update wait-since tracker: reset on any movement, extend on wait.
             if translated.get("action_type") == "wait":
                 async with self._state_lock:
                     self._agent_wait_since.setdefault(agent_id, current_sim_time)
@@ -1121,64 +1425,63 @@ class DecisionProcessor:
                 async with self._state_lock:
                     self._agent_wait_since.pop(agent_id, None)
 
-            # Inject the LLM's own reasoning text into the translated dict so that
-            # the previous-decision memory shown to the agent next turn uses the
-            # agent's actual words rather than the translator's description.
             llm_reasoning = self._reasoning_to_str(
-                reasoning.get("reasoning", "") if isinstance(reasoning, dict) else ""
+                reasoning.get("assessment", {}) if isinstance(reasoning, dict) else ""
             )
             if llm_reasoning:
                 translated["reasoning"] = llm_reasoning
-
-            # Extract and deliver any message
-            with self.perf_timer.measure("message_delivery", is_parallel=True):
-                self.message_system.extract_and_deliver_message(
-                    sender_id=agent_id,
-                    action=action,
-                    sender_position=position,
-                    current_sim_time=current_sim_time,
-                    state_queries=self.state_queries,
-                    exited_agents=self.exited_agents,
-                )
 
             # Detect route changes and store decision
             with self.perf_timer.measure("decision_storage", is_parallel=True):
                 new_exit = extract_exit_name(translated, self.station_layout)
 
-                # Async-safe read from agent_destinations
                 async with self._state_lock:
                     old_exit = self.agent_destinations.get(agent_id)
 
                 route_changed = False
 
-                # Prepare decision record before acquiring lock
+                prompt_hash = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+                run_meta = self.station_layout.get("run_metadata", {})
                 decision_record = {
                     "time": current_sim_time,
                     "observation": observation,
                     "prompt": action_spec.call_to_action if llm_was_called else "cached",
                     "action": action,
                     "reasoning": reasoning,
+                    "decision_payload": decision_payload,
                     "translated": translated,
+                    "offered_set": sorted(offered_actions_set),
+                    "repair_status": repair_status,
+                    "run_id": run_meta.get("run_id"),
+                    "condition": run_meta.get("condition"),
+                    "agent_id": agent_id,
+                    "t": current_sim_time,
+                    "zone": zone_id,
+                    "action_verb": decision_payload.get("action"),
+                    "wait_reason": decision_payload.get("wait_reason"),
+                    "exit_id": decision_payload.get("exit_id"),
+                    "resolved_info_source": translated.get("resolved_info_source"),
+                    "pace": decision_payload.get("pace"),
+                    "reassess_when": decision_payload.get("reassess_when"),
+                    "assessment": decision_payload.get("assessment"),
+                    "prompt_hash": prompt_hash,
+                    "model_id": run_meta.get("model_id"),
+                    "seed": run_meta.get("seed"),
+                    "cue_types": cues,
                 }
 
-                # Async-safe update of shared state
                 async with self._state_lock:
-                    if new_exit:
-                        if old_exit and old_exit != new_exit:
-                            # Route change detected!
-                            logger.info(f"🔄 {agent_id} changed route: {old_exit} → {new_exit}")
-                            route_changed = True
+                    if new_exit and old_exit and old_exit != new_exit:
+                        logger.info(f"🔄 {agent_id} changed route: {old_exit} → {new_exit}")
+                        route_changed = True
 
-                    # Add route change metadata if it occurred
                     if route_changed:
                         decision_record["route_change"] = {
                             "from_exit": old_exit,
                             "to_exit": new_exit,
-                            "reason": self._reasoning_to_str(reasoning.get("reasoning", "")),
+                            "reason": self._reasoning_to_str(reasoning.get("assessment", {})),
                         }
 
-                    # Store decision — cap history to avoid unbounded RAM growth.
-                    # Route-change records are always kept; others are a rolling window.
                     _MAX_DECISIONS_PER_AGENT = 200
                     if agent_id not in self.agent_decisions:
                         self.agent_decisions[agent_id] = {"decisions": []}
@@ -1186,10 +1489,8 @@ class DecisionProcessor:
                     decisions_list = self.agent_decisions[agent_id]["decisions"]
                     decisions_list.append(decision_record)
                     if len(decisions_list) > _MAX_DECISIONS_PER_AGENT:
-                        # Evict oldest entry; this keeps the list O(1) amortised.
                         decisions_list.pop(0)
 
-            # Apply to JuPedSim
             with self.perf_timer.measure("apply_to_jupedsim", is_parallel=True):
                 self.action_executor.execute_action(agent_id, translated, current_sim_time)
 
@@ -1198,37 +1499,29 @@ class DecisionProcessor:
         except Exception as e:
             logger.error(f"Error processing {agent_id}: {e}", exc_info=True)
 
-    def _parse_json_response(self, response: str) -> dict[str, str]:
-        """Parse JSON response from agent, extracting reasoning components."""
-        try:
-            # Strip agent name prefix (e.g., "Agent 0 {" -> "{")
-            json_start = response.find("{")
-            if json_start > 0:
-                response = response[json_start:]
-
-            data = json.loads(response)
-            return {
-                "reasoning": data.get("reasoning", ""),
-                "goal_update": data.get("goal_update", ""),
-            }
-        except json.JSONDecodeError:
+    def _parse_json_response(self, response: str) -> dict[str, Any]:
+        """Parse JSON response and expose assessment/action keys."""
+        parsed = self._extract_json_object(response)
+        if parsed is None:
             logger.warning(f"Failed to parse JSON response: {response[:200]}")
-            return {
-                "reasoning": response[:200],
-            }
+            return {"assessment": {}, "action": "", "raw": response[:200]}
+        return {
+            "assessment": parsed.get("assessment", {}),
+            "action": parsed.get("action", ""),
+            "wait_reason": parsed.get("wait_reason"),
+            "exit_id": parsed.get("exit_id"),
+            "pace": parsed.get("pace"),
+            "reassess_when": parsed.get("reassess_when"),
+        }
 
     @staticmethod
     def _reasoning_to_str(reasoning_val) -> str:
-        """Convert a reasoning value (PADM dict or plain string) to a readable string.
-
-        For PADM responses, combines risk_identification and protective_action_assessment
-        as the most decision-relevant fields.  Plain strings are returned unchanged.
-        """
+        """Convert assessment text to a compact single-line summary."""
         if isinstance(reasoning_val, str):
             return reasoning_val
         if isinstance(reasoning_val, dict):
             parts = []
-            for key in ("risk_identification", "protective_action_assessment"):
+            for key in ("situation_appraisal", "option_chosen_because"):
                 val = reasoning_val.get(key, "")
                 if val and isinstance(val, str):
                     parts.append(val.strip().rstrip("."))
@@ -1244,46 +1537,27 @@ class DecisionProcessor:
         return compact[: max_len - 3].rstrip() + "..."
 
     def _build_last_decision_summary(self, agent_id: str, current_sim_time: float) -> str:
-        """Build a readable summary of the agent's previous decision."""
+        """Build the Block 3 summary with previous verb/target only."""
         decisions = self.agent_decisions.get(agent_id, {}).get("decisions", [])
         if not decisions:
-            return "no previous decision recorded."
+            return "First decision point for you."
 
         last = decisions[-1]
         last_time = float(last.get("time", current_sim_time))
         seconds_ago = max(0.0, current_sim_time - last_time)
 
-        translated = last.get("translated", {}) if isinstance(last, dict) else {}
-        action_type = translated.get("action_type", "unknown")
-        target_type = translated.get("target_type", "")
-        target_exit = translated.get("target_exit", "")
-        target_agent = translated.get("target_agent", "")
-        zone_name = translated.get("zone_name", "")
+        payload = last.get("decision_payload", {}) if isinstance(last, dict) else {}
+        action = str(payload.get("action", "continue_activity"))
+        wait_reason = payload.get("wait_reason")
+        exit_id = payload.get("exit_id")
 
-        action_desc = action_type
-        if action_type == "move":
-            if target_type == "exit" and target_exit:
-                action_desc = f"move to exit '{target_exit}'"
-            elif target_type == "agent" and target_agent:
-                action_desc = f"move toward {target_agent}"
-            elif target_type == "zone" and zone_name:
-                action_desc = f"move to zone '{zone_name}'"
-            else:
-                action_desc = "move"
-        elif action_type == "wait":
-            wait_reason = translated.get("wait_reason", "")
-            action_desc = f"wait ({wait_reason})" if wait_reason else "wait"
+        target_text = ""
+        if action == "wait" and wait_reason:
+            target_text = f" (reason: {wait_reason})"
+        elif action == "evacuate" and exit_id:
+            target_text = f" (exit_id: {exit_id})"
 
-        reasoning_payload = last.get("reasoning", "") if isinstance(last, dict) else ""
-        if isinstance(reasoning_payload, dict):
-            reason_text = self._reasoning_to_str(reasoning_payload.get("reasoning", ""))
-        else:
-            reason_text = self._reasoning_to_str(reasoning_payload)
-
-        if not reason_text:
-            reason_text = "no explicit reason was recorded"
-
-        return f"{seconds_ago:.0f}s ago you chose to {action_desc} because {reason_text}."
+        return f"{seconds_ago:.0f}s ago your previous choice was action='{action}'{target_text}."
 
     def on_agent_exit(self, agent_id: str) -> None:
         """

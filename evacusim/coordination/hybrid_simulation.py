@@ -177,7 +177,7 @@ class HybridSimulationRunner:
         # When pre_built_systems is provided the systems were already set up (and
         # their director agents already added to JuPedSim) before random passengers
         # were spawned, preventing spawn-position collisions.
-        self._staff_systems: list[StaffSystem] = []
+        self._staff_systems: list[Any] = []
         if pre_built_systems is not None:
             self._staff_systems = list(pre_built_systems)
             self.agent_roles.update(pre_built_agent_roles or {})
@@ -274,6 +274,8 @@ class HybridSimulationRunner:
             agent_destinations=self.agent_destinations,
             wait_events=self.wait_events,
             agent_configs=agents_config,
+            agent_roles=self.agent_roles,
+            pace_multipliers=self.performance_config.get("pace_multipliers", {}),
         )
 
         # Decision processing
@@ -291,6 +293,7 @@ class HybridSimulationRunner:
             last_actions=self.last_actions,
             perf_timer=self.perf_timer,
             jps_sim=self.jps_sim,
+            event_manager=self.event_manager,
             agent_configs=agents_config,
             enable_group_decisions=bool(
                 self.performance_config.get("enable_group_decisions", False)

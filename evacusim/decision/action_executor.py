@@ -17,6 +17,11 @@ from evacusim.utils.speed_utils import convert_speed_to_ms
 
 logger = get_logger(__name__)
 
+# TODO: Calibrate these from empirical evacuation speed distributions.
+# These are not intended as free tuning parameters during scenario runs.
+HURRYING_MULTIPLIER: float | None = None
+RUNNING_MULTIPLIER: float | None = None
+
 
 class ActionExecutor:
     """Applies translated actions to the JuPedSim simulation."""
@@ -33,6 +38,8 @@ class ActionExecutor:
         agent_destinations: dict[str, str],
         wait_events: list[dict[str, Any]],
         agent_configs: list[dict[str, Any]],
+        agent_roles: dict[str, str] | None = None,
+        pace_multipliers: dict[str, Any] | None = None,
     ):
         """
         Initialize action executor.
@@ -59,6 +66,59 @@ class ActionExecutor:
         self.agent_destinations = agent_destinations
         self.wait_events = wait_events
         self.agent_configs = agent_configs
+        self.agent_roles = agent_roles or {}
+        self._zone_adjacency: dict[str, list[str]] = station_layout.get("zone_adjacency", {})
+        self._indicator_boards: list[dict[str, Any]] = station_layout.get("indicator_boards", [])
+        self._configure_pace_multipliers(pace_multipliers or {})
+
+    @staticmethod
+    def _coerce_multiplier(value: Any, key: str) -> float:
+        """Coerce a configured multiplier and validate positivity."""
+        try:
+            coerced = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"performance.pace_multipliers.{key} must be a number") from exc
+        if coerced <= 0.0:
+            raise ValueError(f"performance.pace_multipliers.{key} must be > 0")
+        return coerced
+
+    def _configure_pace_multipliers(self, pace_multipliers: dict[str, Any]) -> None:
+        """Configure module-level pace multipliers from scenario config."""
+        global HURRYING_MULTIPLIER, RUNNING_MULTIPLIER
+
+        if not isinstance(pace_multipliers, dict):
+            raise ValueError("performance.pace_multipliers must be a mapping when provided")
+
+        hurrying = pace_multipliers.get("hurrying")
+        running = pace_multipliers.get("running")
+
+        HURRYING_MULTIPLIER = (
+            self._coerce_multiplier(hurrying, "hurrying") if hurrying is not None else None
+        )
+        RUNNING_MULTIPLIER = (
+            self._coerce_multiplier(running, "running") if running is not None else None
+        )
+
+        if HURRYING_MULTIPLIER is not None and HURRYING_MULTIPLIER < 1.0:
+            logger.warning(
+                "Configured hurrying multiplier %.3f is < 1.0; this will slow agents.",
+                HURRYING_MULTIPLIER,
+            )
+        if RUNNING_MULTIPLIER is not None and RUNNING_MULTIPLIER < 1.0:
+            logger.warning(
+                "Configured running multiplier %.3f is < 1.0; this will slow agents.",
+                RUNNING_MULTIPLIER,
+            )
+        if (
+            HURRYING_MULTIPLIER is not None
+            and RUNNING_MULTIPLIER is not None
+            and RUNNING_MULTIPLIER < HURRYING_MULTIPLIER
+        ):
+            logger.warning(
+                "Configured running multiplier %.3f is below hurrying %.3f.",
+                RUNNING_MULTIPLIER,
+                HURRYING_MULTIPLIER,
+            )
 
     def execute_action(
         self, agent_id: str, translated_action: dict[str, Any], current_sim_time: float
@@ -83,7 +143,12 @@ class ActionExecutor:
         )
 
         try:
-            # Apply dynamic speed if specified
+            # Apply pace-based speed modulation from the cognitive layer.
+            pace = translated_action.get("pace")
+            if isinstance(pace, str):
+                self._apply_pace_speed(agent_id, pace)
+
+            # Backward-compatible speed handling for legacy prompt schemas.
             speed_str = translated_action.get("speed")
             if speed_str:
                 speed_ms = convert_speed_to_ms(speed_str)
@@ -132,7 +197,11 @@ class ActionExecutor:
                         # Regular agent approach (not following)
                         logger.debug(f"{agent_id} moving toward {target_agent_id} at {target}")
 
-            if action_type == "move" and target:
+            if action_type == "continue":
+                self._handle_continue_action(agent_id)
+            elif action_type == "seek_information":
+                self._handle_seek_information_action(agent_id, translated_action)
+            elif action_type == "move" and target:
                 self._handle_move_action(agent_id, translated_action, target)
             elif action_type == "wait":
                 self._handle_wait_action(agent_id, translated_action, current_sim_time)
@@ -161,6 +230,158 @@ class ActionExecutor:
             import traceback
 
             logger.debug(f"Traceback: {traceback.format_exc()}")
+
+    def _apply_pace_speed(self, agent_id: str, pace: str) -> None:
+        """Apply pace multiplier to the agent's current desired speed."""
+        if pace == "normal_pace":
+            return
+        if pace == "hurrying":
+            if HURRYING_MULTIPLIER is None:
+                raise ValueError("HURRYING_MULTIPLIER is unset for pace='hurrying'")
+            multiplier = HURRYING_MULTIPLIER
+        elif pace == "running":
+            if RUNNING_MULTIPLIER is None:
+                raise ValueError("RUNNING_MULTIPLIER is unset for pace='running'")
+            multiplier = RUNNING_MULTIPLIER
+        else:
+            return
+
+        try:
+            current_speed = self.jps_sim.get_agent_speed(agent_id)
+            if current_speed is None:
+                return
+            self.jps_sim.set_agent_speed(agent_id, float(current_speed) * multiplier)
+        except Exception:
+            # Keep execution robust if speed APIs are unavailable in some backends.
+            return
+
+    def _handle_continue_action(self, agent_id: str) -> None:
+        """Continue along the currently assigned journey without changing target."""
+        if self.agent_destinations.get(agent_id):
+            self.agent_action[agent_id] = "moving"
+            logger.debug(f"[CONTINUE] {agent_id} preserving current journey")
+        else:
+            # No known destination to continue toward; hold current state safely.
+            self.agent_action[agent_id] = "waiting"
+            logger.debug(f"[CONTINUE] {agent_id} had no active destination; holding state")
+
+    def _handle_seek_information_action(
+        self,
+        agent_id: str,
+        translated_action: dict[str, Any],
+    ) -> None:
+        """Route to a deterministic nearby information source when available."""
+        current_position = self.state_queries.get_agent_position(agent_id)
+        if current_position is None:
+            return
+
+        zone_id = self._identify_zone(current_position)
+        source = self._resolve_information_source(agent_id, zone_id)
+        if source is not None:
+            snapped = self._safe_follow_target(agent_id, current_position, source["position"])
+            self.jps_sim.set_agent_target(agent_id, snapped)
+            self.agent_action[agent_id] = "moving"
+            translated_action["resolved_info_source"] = source["id"]
+            logger.debug(f"[SEEK_INFO] {agent_id} routing to {source['id']}")
+            return
+
+        self.agent_action[agent_id] = "waiting"
+        self.jps_sim.set_agent_target(agent_id, current_position)
+        translated_action["resolved_info_source"] = None
+        logger.debug(f"[SEEK_INFO] {agent_id} no reachable source found; waiting in place")
+
+    def has_reachable_information_source(
+        self,
+        agent_id: str,
+        position: tuple[float, float],
+        zone_id: str | None,
+    ) -> bool:
+        """Return True when deterministic seek-information resolver has a target."""
+        _ = position  # position kept for future geometric checks.
+        return self._resolve_information_source(agent_id, zone_id) is not None
+
+    def _identify_zone(self, position: tuple[float, float]) -> str | None:
+        """Return the finest-grained named zone covering this position."""
+        zones_polygons = self.station_layout.get("zones_polygons", {})
+        if not zones_polygons:
+            return None
+        from shapely.geometry import Point
+
+        pt = Point(position)
+        best_zone = None
+        best_area = float("inf")
+        for zone_name, poly in zones_polygons.items():
+            try:
+                if poly.covers(pt) or poly.contains(pt):
+                    area = poly.area
+                    if area < best_area:
+                        best_area = area
+                        best_zone = zone_name
+            except Exception:
+                continue
+        return best_zone
+
+    def _staff_candidates(self) -> list[str]:
+        """Return IDs of likely information-providing staff/responder agents."""
+        out: list[str] = []
+        for aid, role in self.agent_roles.items():
+            role_l = str(role).lower()
+            if any(k in role_l for k in ("staff", "rci", "responder", "fire")):
+                out.append(aid)
+        return out
+
+    def _resolve_information_source(
+        self,
+        agent_id: str,
+        zone_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Deterministically resolve seek_information source with v1.1 priority."""
+        if zone_id is None:
+            return None
+
+        adjacent = set(self._zone_adjacency.get(zone_id, []))
+        staff_ids = self._staff_candidates()
+
+        staff_current: list[dict[str, Any]] = []
+        staff_adjacent: list[dict[str, Any]] = []
+        for sid in staff_ids:
+            if sid == agent_id:
+                continue
+            pos = self.state_queries.get_agent_position(sid)
+            if pos is None:
+                continue
+            s_zone = self._identify_zone(pos)
+            if s_zone == zone_id:
+                staff_current.append({"id": f"staff:{sid}", "position": pos})
+            elif s_zone in adjacent:
+                staff_adjacent.append({"id": f"staff:{sid}", "position": pos})
+
+        boards_current: list[dict[str, Any]] = []
+        boards_adjacent: list[dict[str, Any]] = []
+        for board in self._indicator_boards:
+            b_zone = board.get("zone_id")
+            b_pos = board.get("position")
+            if not b_zone or not b_pos:
+                continue
+            try:
+                b_position = (float(b_pos[0]), float(b_pos[1]))
+            except Exception:
+                continue
+            b_id = str(board.get("id", f"board:{b_zone}"))
+            if b_zone == zone_id:
+                boards_current.append({"id": b_id, "position": b_position})
+            elif b_zone in adjacent:
+                boards_adjacent.append({"id": b_id, "position": b_position})
+
+        if staff_current:
+            return staff_current[0]
+        if boards_current:
+            return boards_current[0]
+        if staff_adjacent:
+            return staff_adjacent[0]
+        if boards_adjacent:
+            return boards_adjacent[0]
+        return None
 
     # ------------------------------------------------------------------
     # Helpers

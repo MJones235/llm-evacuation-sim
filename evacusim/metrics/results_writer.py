@@ -11,6 +11,7 @@ from typing import Any
 
 from evacusim.utils.logger import get_logger
 from evacusim.metrics.analytics_generator import AnalyticsGenerator
+from evacusim.metrics.decision_telemetry import build_decision_telemetry
 from evacusim.metrics.llm_cost_reporter import FinancialReporter
 
 logger = get_logger(__name__)
@@ -64,6 +65,7 @@ class ResultsWriter:
             "events": event_history,
             "blocked_exits": list(blocked_exits),
             "messages": message_history,
+            "decision_telemetry": build_decision_telemetry(agent_decisions),
             "config": {
                 "decision_interval": decision_interval,
                 "max_steps": max_steps,
@@ -198,6 +200,7 @@ class ResultsWriter:
             "blocked_exits": list(blocked_exits),
             "route_changes": route_changes,
             "messages": message_history,
+            "decision_telemetry": build_decision_telemetry(agent_decisions, wait_events),
             "config": {
                 "decision_interval": decision_interval,
                 "max_steps": max_steps,

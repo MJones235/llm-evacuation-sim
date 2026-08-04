@@ -1,42 +1,43 @@
-Agent profile and recent context:
-- You are a ${age}-year-old ${gender}.
-- Personality: ${personality_profile}
-- Last decision: ${last_decision_summary}
+Block 1 - Role
+You are a ${age}-year-old ${gender}.
+Personality anchor: ${personality_profile}
 
-${situation_framing}Work through these questions in order, then decide.
+Block 2 - Journey
+${journey_block}
 
-Reply with ONLY this JSON:
+Block 3 - New since last decision
+${new_since_last_decision}
+
+Block 4 - Current surroundings
+${current_surroundings}
+
+Block 5 - Available actions
+${available_actions_block}
+
+Block 6 - Response format
+Reply with ONLY this JSON object. Do not add commentary.
 {
-  "reasoning": {
-    "risk_identification": "<Is there a real threat here, or could this be a false alarm? What evidence do you have either way?>",
-    "risk_assessment": "<If there is a threat, does it affect you personally? How severe and how immediate?>",
-    "protective_action_search": "<What options are available to you right now?>",
-    "protective_action_assessment": "<How effective and safe is each option? What are the costs of acting now versus waiting?>",
-    "stakeholder_assessment": "<How much do you trust the source of any information you have received?>"
+  "assessment": {
+    "source_credibility": "",
+    "situation_appraisal": "",
+    "personal_relevance": "",
+    "options_considered": "",
+    "option_chosen_because": "",
+    "information_gap": ""
   },
-  "action_type": "wait" or "move",
-  "target_type": ONE OF: "current_position", "exit", "agent"${zone_option},
-  "target_agent": null (or agent_id like "agent_5"),
-  "exit_name": null (or the exit name EXACTLY as listed in visible/valid exits),
-  "zone_name": null${zone_name_hint},
-  "wait_reason": null (or reason if waiting),
-  "speed": null (or "slow_walk", "normal_walk", "brisk_walk", "jog", "run"),
-  "message": null (or your spoken words),
-  "message_type": null (or "directed", "shout"),
-  "goal_update": null (or revised plain-text goal if your fundamental objective has changed)
+  "action": "continue_activity | wait | seek_information | evacuate | leave_by_train",
+  "wait_reason": null,
+  "exit_id": null,
+${pace_field_block}
+  "reassess_when": "next_interval | new_cue_only"
 }
 
-Hard constraints:
-- If action_type='wait', target_type MUST be 'current_position'.
-- If target_type='exit', exit_name is required and must match an allowed exit name exactly.
-- If target_type='agent', target_agent is required.
-${zone_constraint}- If action_type='wait', speed MUST be null.
-- Keep spoken message short and natural; no narration.
-- goal_update: null unless your fundamental objective has genuinely changed.
+Validation rules:
+- action must be one of the offered actions listed above.
+${wait_action_rule_block}
+- if action = evacuate: set exit_id to one offered exit identifier exactly.
+- if action is not wait: wait_reason must be null.
+- if action is not evacuate: exit_id must be null.
+${pace_validation_block}
 
-Decision policy:
-1. If helping someone, stay coordinated with that person.
-2. To progress toward your goal, choose target_type='exit' or target_type='agent'.
-3. If uncertain or waiting, choose target_type='current_position'.
-
-${zones_section}${following_constraint_text}${valid_exits_text}
+${situation_framing}${following_constraint_text}${valid_exits_text}

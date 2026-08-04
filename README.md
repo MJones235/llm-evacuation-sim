@@ -44,6 +44,60 @@ pip install git+https://github.com/your-org/evacusim.git
 See the [monument-evacuation](https://github.com/your-org/monument-evacuation) study repo for
 a worked example of how to use this framework for a real experiment series.
 
+## Regression KPI Harness
+
+Use the built-in comparison harness to evaluate run-to-run quality deltas after
+decision, prompt, or transfer logic changes.
+
+Run from the repository root:
+
+```bash
+python -m evacusim.metrics.regression_harness \
+	/path/to/baseline/results.json \
+	/path/to/candidate/results.json \
+	--out-json /path/to/comparison.json
+```
+
+The harness reports deltas for:
+
+- final simulation time
+- decision volume and wait-loop rate
+- action mix and pace mix
+- route-change count
+- per-zone maximum occupancy from population snapshots
+
+For queue-density hotspot analysis, define queue-specific monitoring zones in
+scenario YAML so they appear in `population_timeseries` snapshots.
+
+### Pace Multiplier Config
+
+Configure pace multipliers in scenario YAML:
+
+```yaml
+performance:
+	pace_multipliers:
+		hurrying: 1.25
+		running: 1.8
+```
+
+The action executor validates these values (numeric and > 0). If a pace value
+is used in decisions without a configured multiplier, execution fails fast with
+an explicit error.
+
+### Decision Telemetry in Outputs
+
+Incremental and final results JSON now include a `decision_telemetry` block
+with rollups such as:
+
+- decision_records_total
+- wait_decision_rate
+- fallback_rate
+- action_counts
+- pace_counts
+- reassess_mode_counts
+- repair_status_counts
+- cue_type_counts
+
 ## Prompt Customization
 
 Prompt text is loaded from external files so you can iterate on wording without
