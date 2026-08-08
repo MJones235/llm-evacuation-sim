@@ -41,7 +41,7 @@ pip install git+https://github.com/your-org/evacusim.git
 
 ## Usage
 
-See the [monument-evacuation](https://github.com/your-org/monument-evacuation) study repo for
+See the [monument-evac-sim](https://github.com/MJones235/monument-evac-sim) study repo for
 a worked example of how to use this framework for a real experiment series.
 
 ## Regression KPI Harness
