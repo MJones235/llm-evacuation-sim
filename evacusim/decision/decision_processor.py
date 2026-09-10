@@ -1369,6 +1369,14 @@ class DecisionProcessor:
                 logger.warning(f"{agent_id}: no decision payload available, skipping")
                 return
 
+            # Honour the engine contract: an engine may return a validated
+            # payload without a serialized ``action_json`` (the LLM engine
+            # already has one; rule-based/other engines leave it None). The
+            # downstream JSON-parse and action translation both consume the
+            # string form, so serialize it here when the engine did not.
+            if action is None:
+                action = self._decision_payload_to_json(decision_payload)
+
             self._apply_goal_commitment_transition(agent_id, decision_payload, observation)
 
             self._agent_reassess_modes[agent_id] = str(
