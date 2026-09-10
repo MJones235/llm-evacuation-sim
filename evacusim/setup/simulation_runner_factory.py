@@ -70,6 +70,11 @@ class SimulationRunnerFactory:
         prompts_config = config.get("prompts", {})
         decision_prompt_template_path = prompts_config.get("decision_prompt_template_path")
 
+        # Select the decision engine. Default is the Concordia/LLM engine; a
+        # rule-based (LLM-free) engine can be requested via the ``decision``
+        # config section, in which case no Concordia agents or embedder are built.
+        decision_engine = SimulationRunnerFactory._build_decision_engine(config)
+
         logger.info("Creating HybridSimulationRunner...")
 
         # Persist full debug logs alongside run artifacts so transfer/discharge
@@ -100,6 +105,7 @@ class SimulationRunnerFactory:
                 pace_to_realtime=pace_to_realtime,
                 pre_built_systems=pre_built_systems,
                 pre_built_agent_roles=pre_built_agent_roles,
+                decision_engine=decision_engine,
             )
             logger.info("HybridSimulationRunner initialized")
         except Exception as e:
@@ -113,6 +119,40 @@ class SimulationRunnerFactory:
         SimulationRunnerFactory._load_events(runner, config)
 
         return runner
+
+    @staticmethod
+    def _build_decision_engine(config: dict):
+        """Construct the decision engine named by ``config["decision"]``.
+
+        Returns ``None`` for the default LLM engine (the DecisionProcessor then
+        builds its own LLMDecisionEngine), or a RuleBasedDecisionEngine for an
+        LLM-free run.
+        """
+        decision_config = config.get("decision", {}) or {}
+        engine_name = str(decision_config.get("engine", "llm")).lower()
+        if engine_name in ("rule_based", "rule", "rules"):
+            from evacusim.decision.rule_based_decision_engine import (
+                RuleBasedDecisionEngine,
+            )
+
+            weights = decision_config.get("rule_weights", {}) or {}
+            engine = RuleBasedDecisionEngine(
+                w_proximity=float(weights.get("proximity", 0.5)),
+                w_busyness=float(weights.get("busyness", 0.3)),
+                w_familiarity=float(weights.get("familiarity", 0.2)),
+                crowd_radius_m=float(decision_config.get("crowd_radius_m", 5.0)),
+            )
+            logger.info(
+                "Decision engine: rule_based (LLM-free); weights=%s",
+                weights or "defaults",
+            )
+            return engine
+        if engine_name not in ("llm", "concordia", "default"):
+            logger.warning(
+                "Unknown decision.engine '%s'; defaulting to the LLM engine.",
+                engine_name,
+            )
+        return None
 
     @staticmethod
     def _load_events(runner: HybridSimulationRunner, config: dict) -> None:

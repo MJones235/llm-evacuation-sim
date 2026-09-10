@@ -123,6 +123,7 @@ class HybridSimulationRunner:
         pace_to_realtime: bool = False,
         pre_built_systems: list | None = None,
         pre_built_agent_roles: dict | None = None,
+        decision_engine=None,
     ):
         """
         Initialize the hybrid simulation runner.
@@ -209,20 +210,41 @@ class HybridSimulationRunner:
         # 3. Memory of last decision: What did they commit to?
         self.agent_last_decision: dict[str, dict] = {}  # agent_id -> translated_action dict
 
-        # Build agents using AgentBuilder (parallel initialization for faster startup)
-        agent_builder = AgentBuilder(
-            language_model=language_model,
-            embedder=embedder,
-            station_layout=station_layout,
-        )
+        # Build the agent registry. In LLM mode each agent is a Concordia entity
+        # (memory bank + language model + sentence embedder). When a non-LLM
+        # decision engine is injected we skip Concordia entirely — no embedder is
+        # loaded and the language model is never called — and register lightweight
+        # no-op agents that only need to absorb broadcast observations.
+        self._decision_engine = decision_engine
+        if decision_engine is None:
+            agent_builder = AgentBuilder(
+                language_model=language_model,
+                embedder=embedder,
+                station_layout=station_layout,
+            )
 
-        # Build agents asynchronously for faster initialization
-        import asyncio
+            # Build agents asynchronously for faster initialization
+            import asyncio
 
-        self.concordia_agents, injured_agents = asyncio.run(
-            agent_builder.build_agents(agents_config)
-        )
-        self.agent_injured = injured_agents
+            self.concordia_agents, injured_agents = asyncio.run(
+                agent_builder.build_agents(agents_config)
+            )
+            self.agent_injured = injured_agents
+        else:
+            from evacusim.coordination.noop_agent import NoOpAgent
+
+            self.concordia_agents = {
+                cfg["id"]: NoOpAgent(cfg["id"], cfg.get("name")) for cfg in agents_config
+            }
+            self.agent_injured = {
+                cfg["id"] for cfg in agents_config if cfg.get("is_injured")
+            }
+            logger.info(
+                "Non-LLM decision engine (%s) selected — skipped Concordia agent "
+                "construction for %d agents (no embedder, no model calls).",
+                type(decision_engine).__name__,
+                len(self.concordia_agents),
+            )
 
         # Tracking
         # Seeded below once group cadence is known.
@@ -308,6 +330,7 @@ class HybridSimulationRunner:
             ),
             wait_nudge_enabled=bool(self.performance_config.get("wait_nudge_enabled", False)),
             decision_prompt_template_path=decision_prompt_template_path,
+            decision_engine=decision_engine,
         )
 
         # Observation coordination
