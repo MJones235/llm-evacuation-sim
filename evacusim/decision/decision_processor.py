@@ -1349,7 +1349,7 @@ class DecisionProcessor:
                 offered_wait_reasons=offered_wait_reasons,
                 offered_exit_ids=offered_exit_ids,
                 exit_options=exit_options,
-                route_blocked=bool(getattr(self.event_manager, "blocked_exits", None)),
+                route_blocked=route_blocked,
                 cues=cues,
                 current_sim_time=current_sim_time,
                 offered_actions_set=offered_actions_set,
@@ -1674,12 +1674,32 @@ class DecisionProcessor:
     def _build_exit_options(self, agent_id, position, zone_id, offered_exit_ids):
         """Assemble structured routing signals for each offered exit.
 
-        Returns ``{exit_id -> ExitOption}``.  Distance/crowd/familiarity are left
-        at defaults here; the rule-based engine enriches them.  The LLM engine
-        ignores this map entirely.
+        Returns ``{exit_id -> ExitOption}`` carrying the three signals a
+        rule-based engine weighs — proximity (straight-line distance to the exit
+        coordinate), busyness (agents currently near that exit), and familiarity
+        (whether the exit is known to the agent given their knowledge profile and
+        zone).  The LLM engine ignores these numeric fields.
         """
         options: dict[str, ExitOption] = {}
-        registry = getattr(self.action_translator, "exit_name_registry", None)
+        registry = getattr(self.action_translator, "exit_registry", None)
+        cfg = self._agent_cfg.get(agent_id, {})
+        profile = cfg.get("knowledge_profile", "novice")
+        agent_level = str(cfg.get("level_id", "0"))
+
+        # Config-driven familiarity: exits this profile is expected to know in
+        # this zone (commuters additionally know their memorised commuter exits).
+        zone_exits = self._zone_known_exits.get(zone_id or "", {})
+        known_ids = set(zone_exits.get(profile, []))
+        if profile == "commuter":
+            known_ids |= set(zone_exits.get("commuter", []))
+
+        # Snapshot all agent positions once for the busyness count.
+        try:
+            all_positions = self.jps_sim.get_all_agent_positions() if self.jps_sim else {}
+        except Exception:
+            all_positions = {}
+        crowd_radius_sq = 5.0 ** 2
+
         for exit_id in offered_exit_ids:
             display = exit_id
             try:
@@ -1687,10 +1707,32 @@ class DecisionProcessor:
                     display = registry.get_display_name(exit_id) or exit_id
             except Exception:
                 display = exit_id
+
+            coords = None
+            try:
+                coords = self.action_translator._get_exit_coordinates(exit_id, agent_level)
+            except Exception:
+                coords = None
+
+            distance_m = None
+            crowd_count = 0
+            if coords is not None:
+                dx = position[0] - coords[0]
+                dy = position[1] - coords[1]
+                distance_m = (dx * dx + dy * dy) ** 0.5
+                for other_id, p in all_positions.items():
+                    if other_id == agent_id:
+                        continue
+                    if (p[0] - coords[0]) ** 2 + (p[1] - coords[1]) ** 2 <= crowd_radius_sq:
+                        crowd_count += 1
+
             tags = tuple(self._exit_semantic_tags.get(exit_id, []))
             options[exit_id] = ExitOption(
                 exit_id=exit_id,
                 display_name=display,
+                distance_m=distance_m,
+                crowd_count=crowd_count,
+                familiar=exit_id in known_ids,
                 semantic_tags=tags,
             )
         return options
