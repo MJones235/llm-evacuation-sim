@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 import jupedsim as jps
+from shapely.geometry import Point
+from shapely.ops import nearest_points
 
 from evacusim.utils.logger import get_logger
 from evacusim.jps.agent_tracker import AgentTracker
@@ -91,17 +93,23 @@ class ConcordiaJuPedSimulation:
         )
 
     def add_geometry_obstacle_for_exit(self, exit_name: str) -> None:
-        """Add a physical barrier that prevents agent access to a blocked exit.
+        """Record the platform-facing entrance position for a runtime-blocked exit.
 
-        Runtime blocking should allow agents to approach an exit and discover the
-        obstruction, but prevent crossing into the transfer zone. We therefore
-        place a narrow barrier strip at the corridor/transfer-zone threshold.
+        JuPedSim geometry modification (switch_geometry) reliably fails for
+        escalator exits because any barrier that seals the corridor entrance
+        disconnects the exit stage in the transfer zone, causing a
+        'stages outside of geometry' error.  Exit stages cannot be removed
+        at runtime, so navmesh modification is not feasible here.
 
-        For robust startup pre-blocking (t<=0), GeometryManager._apply_initial_blockages
-        still removes the full shaft from navmesh. This method is for runtime
-        block_exit events where discovery behavior matters.
-        """  # noqa: D401
-        from shapely.ops import unary_union as _union
+        Instead this method computes and stores the platform-facing corridor
+        entrance position in ``geometry_manager.blocked_exit_positions`` so
+        that proximity-based re-routing checks fire *before* agents enter the
+        corridor, rather than after they reach the far (TZ) end.
+
+        For startup pre-blocking (t<=0), GeometryManager._apply_initial_blockages
+        still removes the full shaft from the navmesh.
+        """
+        import math as _math
 
         binding = getattr(self.geometry_manager, "escalator_exit_bindings", {}).get(exit_name)
         if binding is None:
@@ -110,51 +118,52 @@ class ConcordiaJuPedSimulation:
         corridor_poly = self.geometry_manager.escalator_corridors.get(corridor_name)
         if corridor_poly is None:
             logger.warning(
-                f"No corridor polygon '{corridor_name}' found — cannot add geometry obstacle"
+                f"No corridor polygon '{corridor_name}' found — cannot record entrance position"
             )
             return
 
-        # Find the matching transfer-zone walkable area.
         tz_key = binding.get("transfer_zone", "")
         tz_poly = self.geometry_manager.walkable_areas.get(tz_key) if tz_key else None
-
-        # Preferred: barrier along the shared corridor↔transfer-zone boundary.
-        barrier_poly = None
-        if tz_poly is not None:
-            shared_boundary = corridor_poly.boundary.intersection(tz_poly.boundary)
-            if not shared_boundary.is_empty:
-                # Cap style 2 gives squared ends, better for doorway-style sealing.
-                barrier_poly = shared_boundary.buffer(0.35, cap_style=2, join_style=2)
-                # Keep the strip local to the escalator mouth.
-                mouth_region = corridor_poly.buffer(0.15).union(tz_poly.buffer(0.15))
-                barrier_poly = barrier_poly.intersection(mouth_region)
-
-            # Fallback if boundary topology is imperfect in source geometry.
-            if (barrier_poly is None or barrier_poly.is_empty):
-                overlap = corridor_poly.intersection(tz_poly.buffer(0.6))
-                if not overlap.is_empty:
-                    barrier_poly = overlap.buffer(0.05)
-
-        # Last resort: if transfer-zone metadata is missing, create a short strip
-        # near the corridor centroid instead of deleting the entire shaft.
-        if barrier_poly is None or barrier_poly.is_empty:
-            c = corridor_poly.centroid
-            fallback_strip = c.buffer(0.45)
-            barrier_poly = fallback_strip.intersection(corridor_poly.buffer(0.15))
-
-        if barrier_poly is None or barrier_poly.is_empty:
+        if tz_poly is None:
             logger.warning(
-                f"Could not construct runtime barrier for '{exit_name}' on '{corridor_name}'"
+                f"No transfer-zone polygon '{tz_key}' for '{exit_name}' — cannot compute entrance"
             )
             return
 
-        # Small cleanup buffer to avoid sliver/topology issues.
-        barrier_poly = _union([barrier_poly]).buffer(0.01)
-        self.geometry_manager.add_obstacle_polygon(barrier_poly)
-        logger.info(
-            f"🚧 Escalator '{corridor_name}' runtime-blocked with threshold barrier "
-            f"({barrier_poly.area:.2f} m² removed)"
-        )
+        # Find the corridor edge that is farthest from the TZ centroid.
+        # That edge is the platform-facing entrance mouth.  Step 1.5 m outward
+        # (away from the TZ, toward the platform) to get a point just outside the
+        # corridor entrance — agents will be intercepted there, before entry.
+        try:
+            _coords = list(corridor_poly.exterior.coords)[:-1]
+            _n = len(_coords)
+            _ref_x, _ref_y = tz_poly.centroid.x, tz_poly.centroid.y
+            _best_dist, _best_mid, _best_normal = -1.0, (0.0, 0.0), (0.0, 1.0)
+            for _i in range(_n):
+                _p1, _p2 = _coords[_i], _coords[(_i + 1) % _n]
+                _mid = ((_p1[0] + _p2[0]) / 2.0, (_p1[1] + _p2[1]) / 2.0)
+                _dist = _math.hypot(_mid[0] - _ref_x, _mid[1] - _ref_y)
+                if _dist > _best_dist:
+                    _best_dist = _dist
+                    _best_mid = _mid
+                    _dx, _dy = _p2[0] - _p1[0], _p2[1] - _p1[1]
+                    _ln = _math.hypot(_dx, _dy)
+                    if _ln < 1e-9:
+                        continue
+                    _nx1, _ny1 = -_dy / _ln, _dx / _ln
+                    _dot1 = _nx1 * (_ref_x - _mid[0]) + _ny1 * (_ref_y - _mid[1])
+                    _best_normal = (_nx1, _ny1) if _dot1 < 0 else (_dy / _ln, -_dx / _ln)
+            entrance_pos = (
+                _best_mid[0] + _best_normal[0] * 1.5,
+                _best_mid[1] + _best_normal[1] * 1.5,
+            )
+            self.geometry_manager.blocked_exit_positions[exit_name] = entrance_pos
+            logger.info(
+                f"🚧 '{exit_name}': recorded corridor entrance at {entrance_pos} "
+                f"(proximity checks will intercept agents before they enter)"
+            )
+        except Exception as e:
+            logger.warning(f"Could not compute entrance position for '{exit_name}': {e}")
 
     def add_agent(
         self,
@@ -265,10 +274,25 @@ class ConcordiaJuPedSimulation:
             return
 
         jps_id = self.agent_tracker.get_jps_id(agent_id)
-        self.agent_tracker.set_target(agent_id, target)
+        safe_target = self._coerce_target_inside_walkable(target)
+        self.agent_tracker.set_target(agent_id, safe_target)
 
-        # Create a waypoint stage at the target location
-        stage_id = self.simulation.add_waypoint_stage(target, distance=2.0)
+        # Create a waypoint stage at the target location. If JuPedSim rejects
+        # the point due to numeric edge/boundary issues, retry with a robust
+        # fallback point guaranteed to be inside walkable geometry.
+        try:
+            stage_id = self.simulation.add_waypoint_stage(safe_target, distance=2.0)
+        except Exception as e:
+            fallback = self._fallback_walkable_point_near(safe_target)
+            if fallback is None:
+                raise
+            logger.warning(
+                f"set_agent_target({agent_id}) rejected point {safe_target}: {e}. "
+                f"Retrying with fallback {fallback}."
+            )
+            safe_target = fallback
+            self.agent_tracker.set_target(agent_id, safe_target)
+            stage_id = self.simulation.add_waypoint_stage(safe_target, distance=2.0)
 
         # Create a journey to this waypoint
         journey = jps.JourneyDescription([stage_id])
@@ -281,7 +305,61 @@ class ConcordiaJuPedSimulation:
             stage_id=stage_id,
         )
 
-        logger.info(f"Set target for agent {agent_id} to {target}")
+        logger.info(f"Set target for agent {agent_id} to {safe_target}")
+
+    def _coerce_target_inside_walkable(
+        self,
+        target: tuple[float, float],
+    ) -> tuple[float, float]:
+        """Snap *target* into walkable geometry when it falls outside bounds."""
+        combined = getattr(self.geometry_manager, "_combined_geometry", None)
+        if combined is None or combined.is_empty:
+            return target
+
+        pt = Point(target)
+        inner = combined.buffer(-0.05)
+        if inner.is_empty:
+            inner = combined
+
+        if inner.covers(pt) or inner.contains(pt):
+            return target
+
+        try:
+            nearest_on_walkable = nearest_points(inner, pt)[0]
+            snapped = (float(nearest_on_walkable.x), float(nearest_on_walkable.y))
+            logger.debug(f"Snapped target {target} -> {snapped} (outside walkable area)")
+            return snapped
+        except Exception:
+            rp = inner.representative_point()
+            snapped = (float(rp.x), float(rp.y))
+            logger.debug(
+                f"Fallback-snapped target {target} -> {snapped} "
+                "(nearest-point projection failed)"
+            )
+            return snapped
+
+    def _fallback_walkable_point_near(
+        self,
+        target: tuple[float, float],
+    ) -> tuple[float, float] | None:
+        """Return a conservative in-bounds fallback for waypoint creation."""
+        combined = getattr(self.geometry_manager, "_combined_geometry", None)
+        if combined is None or combined.is_empty:
+            return None
+
+        inner = combined.buffer(-0.15)
+        if inner.is_empty:
+            inner = combined
+
+        try:
+            nearest_on_walkable = nearest_points(inner, Point(target))[0]
+            return (float(nearest_on_walkable.x), float(nearest_on_walkable.y))
+        except Exception:
+            try:
+                rp = inner.representative_point()
+                return (float(rp.x), float(rp.y))
+            except Exception:
+                return None
 
     def set_agent_destination_exit(self, agent_id: str, exit_name: str) -> None:
         """
@@ -422,7 +500,11 @@ class ConcordiaJuPedSimulation:
                 exited[agent_id] = assigned_exit
                 logger.info(f"Agent {agent_id} exited through assigned exit {assigned_exit}")
                 self.agent_tracker.remove_agent(agent_id)
-                self.last_known_positions.pop(agent_id, None)
+                # Do NOT pop last_known_positions here — _restore_agent_to_source_level
+                # in multi_level_simulation needs the position near the exit mouth when
+                # the exit is blocked and the agent must be returned to this level.
+                # Stale entries for genuinely-departed agents are harmless (agent IDs
+                # are not reused within a run and the dict is per-level).
                 self.agent_assigned_exits.pop(agent_id, None)
                 continue
 
@@ -474,7 +556,7 @@ class ConcordiaJuPedSimulation:
                 logger.warning(f"Agent {agent_id} exited but no exit found nearby")
 
             self.agent_tracker.remove_agent(agent_id)
-            self.last_known_positions.pop(agent_id, None)
+            # As above: retain last_known_positions for the restore-after-blocked-exit path.
             self.agent_assigned_exits.pop(agent_id, None)
 
         return exited

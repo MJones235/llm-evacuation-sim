@@ -98,6 +98,16 @@ with rollups such as:
 - repair_status_counts
 - cue_type_counts
 
+### Decision Cadence and Bootstrap Controls
+
+Decision scheduling is now explicitly configurable:
+
+- `performance.bootstrap_initial_decisions` (default `true`): run an all-agent decision cycle at `t=0` so every agent starts with a journey.
+- `performance.decision_groups` (default `3`): stagger decision batches to preserve per-agent cadence while reducing LLM burst load.
+- `performance.immediate_redecision_on_transfer` (default `true`): run immediate targeted re-decisions for recently transferred agents.
+
+Critical events (`block_exit`, `train_departure`) still trigger immediate all-agent decision overrides.
+
 ## Prompt Customization
 
 Prompt text is loaded from external files so you can iterate on wording without

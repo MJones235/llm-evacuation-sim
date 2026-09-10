@@ -304,15 +304,9 @@ class SpatialAnalyzer:
                 if self._canonical_visible_exit_key(name) not in inactive_exits
             }
 
-        # Filter out exits that are currently blocked.
-        # - For runtime-blocked exits (created by an event after spawn): hide
-        #   immediately — agents can reasonably assume the exit is inaccessible
-        #   once an announcement or visual cue reaches them.
-        # - For pre-blocked exits (shaft removed from navmesh at startup, stored
-        #   in blocked_exit_positions): keep them visible UNTIL the agent is
-        #   within the discovery radius.  The physical escalator shaft is still
-        #   there and labelled; only the barrier at the entrance reveals the
-        #   blockage.  This produces the "walk-up-and-discover" behaviour.
+        # Filter out blocked exits from the normal visible list only after the
+        # blockage is discovered at close range. Until then, blocked exits remain
+        # visible as ordinary exits so agents can walk up and discover them.
         if blocked_exits:
             # Resolve the level geometry manager once for the proximity check.
             _pre_blocked_pos: dict[str, tuple[float, float]] = {}
@@ -325,11 +319,11 @@ class SpatialAnalyzer:
             def _keep_exit(name: str, pos: tuple[float, float]) -> bool:
                 if name not in blocked_exits:
                     return True  # not blocked — always visible
-                if name in _pre_blocked_pos:
-                    # Pre-blocked: only hide once within discovery range
-                    dist_sq = (position[0] - pos[0]) ** 2 + (position[1] - pos[1]) ** 2
-                    return dist_sq > _DISCOVERY_RADIUS ** 2
-                return False  # runtime-blocked: hide immediately
+                # Runtime and pre-blocked exits both follow walk-up discovery.
+                # When close enough to discover the barrier, remove from normal
+                # visible exits so it only appears in blocked observations.
+                dist_sq = (position[0] - pos[0]) ** 2 + (position[1] - pos[1]) ** 2
+                return dist_sq > _DISCOVERY_RADIUS ** 2
 
             exits_to_check = {
                 name: pos for name, pos in exits_to_check.items()
@@ -596,6 +590,11 @@ class SpatialAnalyzer:
                 if distance > _PREBLOCKED_DISCOVERY_RADIUS:
                     continue
             else:
+                # Runtime-blocked exits require both LOS and close proximity to
+                # model local discovery rather than distant global awareness.
+                _RUNTIME_DISCOVERY_RADIUS = 12.0
+                if distance > _RUNTIME_DISCOVERY_RADIUS:
+                    continue
                 if not self._has_line_of_sight(position, exit_pos, level_obstacles, level_walkable_geom):
                     continue
 

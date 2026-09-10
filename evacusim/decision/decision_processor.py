@@ -151,7 +151,11 @@ class DecisionProcessor:
         self._escalator_deferral_timeout_secs: float = 12.0
         self._escalator_progress_threshold_m: float = 0.4
         self._escalator_deferral_state: dict[str, dict[str, Any]] = {}
-
+        # Agents deferred this cycle because they are still traversing an
+        # escalator departure zone/corridor. The coordinator can re-queue these
+        # IDs for an immediate follow-up cycle so they are prompted as soon as
+        # they clear the escalator mouth.
+        self._deferred_escalator_agents: set[str] = set()
         # Initialize prompt cache for intelligent LLM call reduction
         self.prompt_cache = PromptCache(enable_detailed_logging=True)
         self.llm_calls_skipped = 0  # Statistics tracking
@@ -160,6 +164,7 @@ class DecisionProcessor:
         # Per-agent persistent goal text used for journey framing.
         # Seeded from agent_cfg["initial_goal"] on first decision.
         self.agent_goals: dict[str, str] = {}
+        self._evacuation_committed_agents: set[str] = set()
 
         # Tracks the sim-time when each agent last issued a non-wait action.
         # Used to inject an escalating wait-duration nudge into the observation so
@@ -230,6 +235,7 @@ class DecisionProcessor:
         new_since_last_decision: str,
         current_surroundings: str,
         available_actions_block: str,
+        action_enum_block: str,
         wait_action_rule_block: str,
         pace_field_block: str,
         pace_validation_block: str,
@@ -246,6 +252,7 @@ class DecisionProcessor:
             new_since_last_decision=new_since_last_decision,
             current_surroundings=current_surroundings,
             available_actions_block=available_actions_block,
+            action_enum_block=action_enum_block,
             wait_action_rule_block=wait_action_rule_block,
             pace_field_block=pace_field_block,
             pace_validation_block=pace_validation_block,
@@ -253,6 +260,13 @@ class DecisionProcessor:
             following_constraint_text=following_constraint_text,
             valid_exits_text=valid_exits_text,
         )
+
+    @staticmethod
+    def _build_action_enum_block(offered_actions: list[str]) -> str:
+        """Build the allowed action enum text used in the JSON schema section."""
+        if not offered_actions:
+            return "wait"
+        return " | ".join(offered_actions)
 
     @staticmethod
     def _build_pace_prompt_blocks(offered_actions: list[str]) -> tuple[str, str, str]:
@@ -326,6 +340,13 @@ class DecisionProcessor:
         for _m in _RE_BLOCKED_EXIT_LINE.finditer(observation):
             blocked_display.add(_m.group(1).strip())
 
+        def _is_blocked(eid: str) -> bool:
+            # Intentional: blocked status is knowledge-driven. An exit is treated
+            # as blocked only when the agent has explicitly observed that in their
+            # own prompt context (or remembered it from prior local discovery).
+            disp = registry.get_display_name(eid)
+            return disp in blocked_display
+
         visible_names: set[str] = set()
         line_match = _RE_VISIBLE_EXITS_LINE.search(observation)
         if line_match:
@@ -339,17 +360,16 @@ class DecisionProcessor:
             mem_ids = self._zone_known_exits.get(zone_id or "", {}).get("commuter", [])
             for eid in mem_ids:
                 if eid in valid_ids and _is_valid_departure(eid):
-                    disp = registry.get_display_name(eid)
-                    if disp not in blocked_display:
+                    if not _is_blocked(eid):
                         candidate_ids.append(eid)
 
         # Visible exits are available to all profiles.
         for eid in sorted(valid_ids):
             if not _is_valid_departure(eid):
                 continue
-            disp = registry.get_display_name(eid)
-            if disp in blocked_display:
+            if _is_blocked(eid):
                 continue
+            disp = registry.get_display_name(eid)
             if disp in visible_names:
                 candidate_ids.append(eid)
 
@@ -358,8 +378,7 @@ class DecisionProcessor:
             fallback_ids = self._zone_known_exits.get(zone_id or "", {}).get(profile, [])
             for eid in fallback_ids:
                 if eid in valid_ids and _is_valid_departure(eid):
-                    disp = registry.get_display_name(eid)
-                    if disp not in blocked_display:
+                    if not _is_blocked(eid):
                         candidate_ids.append(eid)
 
         # De-duplicate while preserving order.
@@ -374,7 +393,9 @@ class DecisionProcessor:
         semantics_text = self._build_exit_semantics_text(goal_policy, offered_exit_ids)
         if not offered_exit_ids:
             return (
-                semantics_text + "No evacuation exits are currently available from where you are.\n",
+                "Route availability from your current position: no usable evacuation exits right now.\n"
+                + semantics_text
+                + "No evacuation exits are currently available from where you are.\n",
                 [],
                 False,
             )
@@ -383,9 +404,11 @@ class DecisionProcessor:
         for eid in offered_exit_ids:
             disp = registry.get_display_name(eid)
             bullets.append(f"- {eid}: {disp}")
+        route_names = ", ".join(registry.get_display_name(eid) for eid in offered_exit_ids)
 
         return (
-            "Evacuation exits you can choose now (use exit_id exactly):\n"
+            f"Route availability from your current position: usable exits now are {route_names}.\n"
+            + "Evacuation exits you can choose now (use exit_id exactly):\n"
             + "\n".join(bullets)
             + "\n"
             + semantics_text,
@@ -472,19 +495,61 @@ class DecisionProcessor:
                 avoided_names.append(registry.get_display_name(eid))
 
         instruction = str(goal_policy.get("instruction", "")).strip()
-        lines = ["\nGoal-aligned exit guidance:"]
+        lines = ["\nExit context:"]
         if instruction:
             lines.append(f"- {instruction}")
         if preferred_names:
             shown = ", ".join(sorted(set(preferred_names))[:8])
-            lines.append(f"- Prefer exits like: {shown}")
+            lines.append(f"- Exits associated with this goal context: {shown}")
         if avoided_names:
             shown = ", ".join(sorted(set(avoided_names))[:8])
-            lines.append(f"- Avoid exits like: {shown} (unless your goal is to leave the station)")
+            lines.append(f"- Other available exits in a different context: {shown}")
 
         if len(lines) == 1:
             return ""
         return "\n" + "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _has_explicit_all_clear(observation: str) -> bool:
+        """Return True when observation clearly indicates alarm stand-down."""
+        text = (observation or "").lower()
+        return "all clear" in text or "all-clear" in text
+
+    def _evacuation_goal_text(self) -> str:
+        """Canonical goal text once an agent has committed to evacuation."""
+        return "Leave the station via a safe exit."
+
+    def _apply_goal_commitment_transition(
+        self,
+        agent_id: str,
+        decision_payload: dict[str, Any],
+        observation: str,
+    ) -> None:
+        """Update persistent goal commitment from latest decision/cues."""
+        if self._has_explicit_all_clear(observation):
+            if agent_id in self._evacuation_committed_agents:
+                self._evacuation_committed_agents.discard(agent_id)
+                self.agent_goals.pop(agent_id, None)
+                logger.info(
+                    f"{agent_id}: all-clear cue detected — released evacuation commitment"
+                )
+            return
+
+        action = str(decision_payload.get("action", ""))
+        if action == "evacuate":
+            if agent_id not in self._evacuation_committed_agents:
+                logger.info(
+                    f"{agent_id}: evacuation decision committed as persistent goal"
+                )
+            self._evacuation_committed_agents.add(agent_id)
+            self.agent_goals[agent_id] = self._evacuation_goal_text()
+
+    def clear_goal_for_redecision(self, agent_id: str) -> None:
+        """Clear mutable goal state while preserving evacuation commitment."""
+        if agent_id in self._evacuation_committed_agents:
+            self.agent_goals[agent_id] = self._evacuation_goal_text()
+            return
+        self.agent_goals.pop(agent_id, None)
 
     @staticmethod
     def _has_reachable_information_source(observation: str) -> bool:
@@ -939,6 +1004,12 @@ class DecisionProcessor:
 
         return current_sim_time
 
+    def consume_deferred_escalator_agents(self) -> set[str]:
+        """Return and clear agents deferred in escalator departure context."""
+        deferred = set(self._deferred_escalator_agents)
+        self._deferred_escalator_agents.clear()
+        return deferred
+
     async def _process_agents_parallel(
         self,
         observations: dict,
@@ -951,6 +1022,7 @@ class DecisionProcessor:
         # the loop that asyncio.run() just started (a new loop each decision cycle).
         self._state_lock = asyncio.Lock()
         self._llm_semaphore = asyncio.Semaphore(self._llm_semaphore_limit)
+        self._deferred_escalator_agents.clear()
 
         # Filter and create tasks using list comprehension for efficiency
         candidate_agents = (
@@ -1084,10 +1156,32 @@ class DecisionProcessor:
                 logger.debug(f"{agent_id}: No position found, likely exited")
                 return
 
-            # While traversing escalator geometry, keep current movement and defer
-            # new decisions until the next regular batch after leaving that area.
+            # Post-transfer escape waypoint: defer until the agent has physically
+            # walked to the random waypoint assigned after a level transfer.
+            # This ensures agents clear the escalator arrival area and do not
+            # stop and block the mouth before making their real decision.
+            _escape_wps = getattr(self.jps_sim, "transfer_escape_waypoints", {})
+            if agent_id in _escape_wps:
+                _ewp = _escape_wps[agent_id]
+                _dist = ((position[0] - _ewp[0]) ** 2 + (position[1] - _ewp[1]) ** 2) ** 0.5
+                if _dist > 2.0:
+                    self._deferred_escalator_agents.add(agent_id)
+                    logger.debug(
+                        f"{agent_id}: en route to post-transfer waypoint "
+                        f"({_dist:.1f}m away) — deferring decision"
+                    )
+                    return
+                else:
+                    del _escape_wps[agent_id]
+                    logger.debug(
+                        f"{agent_id}: reached post-transfer waypoint — decision now permitted"
+                    )
+
+            # While traversing escalator geometry (departure side), keep current
+            # movement and defer until the agent leaves that area.
             if self._agent_is_on_escalator(agent_id):
                 if self._should_defer_escalator_decision(agent_id, current_sim_time, position):
+                    self._deferred_escalator_agents.add(agent_id)
                     logger.debug(f"{agent_id}: in escalator departure context — deferring decision")
                     return
             else:
@@ -1101,7 +1195,9 @@ class DecisionProcessor:
                 zone_id = self._identify_zone(position)
 
             # ── Persistent goal ──────────────────────────────────────────────
-            if agent_id not in self.agent_goals:
+            if agent_id in self._evacuation_committed_agents:
+                self.agent_goals[agent_id] = self._evacuation_goal_text()
+            elif agent_id not in self.agent_goals:
                 cfg = self._agent_cfg.get(agent_id, {})
                 self.agent_goals[agent_id] = cfg.get("initial_goal", "")
             agent_goal = self.agent_goals[agent_id]
@@ -1173,6 +1269,7 @@ class DecisionProcessor:
                 offered_wait_reasons,
                 offered_exit_ids,
             )
+            action_enum_block = self._build_action_enum_block(offered_actions)
             wait_action_rule_block, pace_field_block, pace_validation_block = (
                 self._build_pace_prompt_blocks(offered_actions)
             )
@@ -1209,6 +1306,7 @@ class DecisionProcessor:
                 new_since_last_decision=new_since_last_decision,
                 current_surroundings=current_surroundings,
                 available_actions_block=available_actions_block,
+                action_enum_block=action_enum_block,
                 wait_action_rule_block=wait_action_rule_block,
                 pace_field_block=pace_field_block,
                 pace_validation_block=pace_validation_block,
@@ -1405,6 +1503,8 @@ class DecisionProcessor:
             if decision_payload is None:
                 logger.warning(f"{agent_id}: no decision payload available, skipping")
                 return
+
+            self._apply_goal_commitment_transition(agent_id, decision_payload, observation)
 
             self._agent_reassess_modes[agent_id] = str(
                 decision_payload.get("reassess_when", "next_interval")

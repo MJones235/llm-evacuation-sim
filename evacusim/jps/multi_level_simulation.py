@@ -107,13 +107,18 @@ class MultiLevelJuPedSimulation:
         self._transfer_cooldown_steps: int = 100
         self._last_transfer_step: dict[str, int] = {}  # agent_id -> step number
 
-        # Exits that are currently blocked (set by hybrid_simulation / EventManager).
-        # When an agent physically reaches a blocked escalator exit on a level
-        # where no geometry obstacle could be placed, they are returned to the
-        # platform floor and flagged for an immediate re-decision.
+        # Post-transfer escape waypoints: the random target assigned to each
+        # agent after level transfer so they walk clear of the escalator mouth
+        # before the LLM fires. Decision processor reads this to defer prompts
+        # until the agent is within arrival_waypoint_reached_m of the target.
+        self.transfer_escape_waypoints: dict[str, tuple[float, float]] = {}
+
+        # Exits currently blocked by scenario events.
+        # Used by corridor-barrier enforcement so agents cannot enter blocked
+        # escalator shafts.
         self.blocked_exits: set[str] = set()
-        # Agents returned from a blocked escalator this step; hybrid_simulation
-        # should trigger an immediate LLM re-decision for these.
+        # Agents forced to re-decide this step (e.g. blocked corridor contact).
+        # hybrid_simulation consumes this set and triggers immediate LLM decisions.
         self.agents_needing_redecision: set[str] = set()
 
         # Setup level transfer manager
@@ -231,7 +236,7 @@ class MultiLevelJuPedSimulation:
         minx, miny, maxx, maxy = inner.bounds
         min_dist = self.transfer_random_waypoint_min_distance_m
 
-        for _ in range(60):
+        for _ in range(200):
             x = random.uniform(minx, maxx)
             y = random.uniform(miny, maxy)
             if not inner.contains(Point((x, y))):
@@ -243,7 +248,14 @@ class MultiLevelJuPedSimulation:
             return (x, y)
 
         # Fallback: use the geometry representative point (always valid).
+        # This should rarely trigger with 200 samples; it is logged as a warning
+        # so that persistent failures (e.g. geometry too small) are visible.
         rp = inner.representative_point()
+        logger.warning(
+            f"_pick_random_level_waypoint: 200 samples exhausted for level '{level_id}'; "
+            f"falling back to representative_point {(float(rp.x), float(rp.y))}. "
+            "Consider reducing transfer_random_waypoint_min_distance_m if this recurs."
+        )
         return (float(rp.x), float(rp.y))
 
     def _enforce_transfer_discharge(self) -> None:  # no-op: superseded by random-waypoint
@@ -323,16 +335,25 @@ class MultiLevelJuPedSimulation:
         if self.is_complete:
             return False
 
-        # Step 1: Check for agents that exited through escalators and transfer them
-        self._process_escalator_exits(self.blocked_exits)
+        # Step 1: Enforce blocked-escalator corridor barriers before processing
+        # transfers so agents cannot enter blocked escalator shafts.
+        self._enforce_blocked_escalator_corridors()
 
-        # Step 2: Step each level's simulation
+        # Step 2: Check for agents that exited through escalators and transfer them
+        self._process_escalator_exits()
+
+        # Step 3: Step each level's simulation
         any_active = False
         for sim in self.simulations.values():
             if sim.step():
                 any_active = True
 
-        # Step 3: Enforce escalator physics (speed floor for departure zones/corridors).
+        # Re-apply blocked corridor barriers after movement. This catches any
+        # agent that touched a blocked corridor boundary during this integration
+        # step and schedules immediate re-decision.
+        self._enforce_blocked_escalator_corridors()
+
+        # Step 4: Enforce escalator physics (speed floor for departure zones/corridors).
         # Done after JuPedSim has advanced so position data is fresh.
         self._enforce_escalator_constraints()
 
@@ -347,19 +368,14 @@ class MultiLevelJuPedSimulation:
 
         return True
 
-    def _process_escalator_exits(self, blocked_exits: set[str] | None = None):
+    def _process_escalator_exits(self):
         """
         Check each level for agents that have exited through escalators.
 
         Escalators are exits that connect two levels. When an agent exits through
         an escalator on one level, they are spawned into the target level.
 
-        If *blocked_exits* is provided, agents that reach a blocked escalator exit
-        are returned to a safe position on their current level and flagged for
-        immediate re-decision rather than being transferred.
         """
-        if blocked_exits is None:
-            blocked_exits = set()
         # Reset same-step spawn tracking so each step starts fresh.
         self._pending_spawn_positions.clear()
 
@@ -384,24 +400,6 @@ class MultiLevelJuPedSimulation:
                         del self.agent_levels[agent_id]
                     continue
 
-                # --- Blocked exit interception (general) ---
-                # If this exit is blocked, the agent physically reached a barrier.
-                # Re-spawn them at their last known position so they are back
-                # just in front of the barrier, and flag for immediate re-decision.
-                # This mechanism is exit-type agnostic — it works for any blocked
-                # exit (escalator, door, collapsed-person blockage, etc.).
-                if exit_name in blocked_exits:
-                    self._restore_agent_to_source_level(
-                        agent_id=agent_id,
-                        source_level=level_id,
-                        reason=(
-                            f"Agent reached blocked exit {exit_name} on level {level_id}; "
-                            "forcing immediate re-decision"
-                        ),
-                        force_redecision=True,
-                    )
-                    continue
-
                 # Enforce cooldown to prevent immediate bounce-back transfers.
                 last_step = self._last_transfer_step.get(agent_id, -self._transfer_cooldown_steps)
                 steps_since = self.current_step - last_step
@@ -420,6 +418,112 @@ class MultiLevelJuPedSimulation:
                     f"Agent {agent_id} reached escalator exit {exit_name} on level {level_id} - initiating transfer"
                 )
                 self._transfer_agent_through_escalator(agent_id, level_id, exit_name)
+
+    def _enforce_blocked_escalator_corridors(self) -> set[str]:
+        """Keep agents out of blocked escalator corridors.
+
+        For each blocked escalator on each loaded level:
+        - If an agent has entered the blocked corridor polygon, or
+        - If an agent is committed to that blocked escalator and is touching the
+          corridor boundary,
+
+        their current destination is cancelled, they are redirected to the
+        nearest walkable point outside that corridor, and they are flagged for an
+        immediate LLM re-decision.
+        """
+        if not self.blocked_exits:
+            return set()
+
+        from shapely.geometry import Point
+
+        rejected: set[str] = set()
+        boundary_touch_radius_m = 0.6
+
+        for level_id, sim in self.simulations.items():
+            bindings = getattr(sim.geometry_manager, "escalator_exit_bindings", {})
+            corridors = getattr(sim.geometry_manager, "escalator_corridors", {})
+            if not bindings or not corridors:
+                continue
+
+            level_positions = sim.get_all_agent_positions()
+            for agent_id, pos in level_positions.items():
+                p = Point(pos)
+                assigned_exit = sim.agent_assigned_exits.get(agent_id)
+
+                for blocked_exit in self.blocked_exits:
+                    binding = bindings.get(blocked_exit)
+                    if binding is None:
+                        continue
+                    corridor_name = binding.get("corridor", "")
+                    corridor_poly = corridors.get(corridor_name)
+                    if corridor_poly is None:
+                        continue
+
+                    inside_corridor = corridor_poly.covers(p) or corridor_poly.contains(p)
+                    approaching_blocked_corridor = (
+                        assigned_exit == blocked_exit
+                        and p.distance(corridor_poly) <= boundary_touch_radius_m
+                    )
+                    if not inside_corridor and not approaching_blocked_corridor:
+                        continue
+
+                    retreat_target = self._nearest_walkable_point_outside_corridor(
+                        sim=sim,
+                        corridor_poly=corridor_poly,
+                        position=pos,
+                    )
+                    if retreat_target is None:
+                        retreat_target = pos
+
+                    # Cancel stale blocked route and force an immediate re-decision.
+                    sim.agent_assigned_exits.pop(agent_id, None)
+                    self.agents_needing_redecision.add(agent_id)
+
+                    try:
+                        sim.set_agent_target(agent_id, retreat_target)
+                    except Exception as e:
+                        logger.debug(
+                            f"Could not set retreat target for {agent_id} away from "
+                            f"blocked corridor {corridor_name}: {e}"
+                        )
+
+                    rejected.add(agent_id)
+                    logger.info(
+                        f"Blocked escalator barrier: {agent_id} redirected away from "
+                        f"{blocked_exit} corridor on level {level_id}; immediate re-decision queued"
+                    )
+                    break
+
+        return rejected
+
+    def _nearest_walkable_point_outside_corridor(
+        self,
+        sim: ConcordiaJuPedSimulation,
+        corridor_poly,
+        position: tuple[float, float],
+    ) -> tuple[float, float] | None:
+        """Find a nearby walkable point that is outside *corridor_poly*."""
+        from shapely.geometry import Point
+
+        combined = getattr(sim.geometry_manager, "_combined_geometry", None)
+        if combined is None or combined.is_empty:
+            return None
+
+        # Remove a tiny buffered corridor so selected points are clearly outside.
+        safe_region = combined.difference(corridor_poly.buffer(0.05))
+        if safe_region.is_empty:
+            return None
+
+        try:
+            nearest_on_safe = nearest_points(Point(position), safe_region)[1]
+        except Exception:
+            return None
+
+        candidate = (float(nearest_on_safe.x), float(nearest_on_safe.y))
+        cp = Point(candidate)
+        if corridor_poly.covers(cp) or corridor_poly.contains(cp):
+            return None
+        return candidate
 
     def _transfer_agent_through_escalator(self, agent_id: str, current_level: str, exit_name: str):
         """
@@ -589,9 +693,10 @@ class MultiLevelJuPedSimulation:
             if random_wp is not None:
                 try:
                     self.simulations[target_level].set_agent_target(agent_id, random_wp)
+                    self.transfer_escape_waypoints[agent_id] = random_wp
                     logger.debug(
-                        f"[TRANSFER] {agent_id} → random waypoint {random_wp} "
-                        f"on level {target_level} (LLM fires during transit)"
+                        f"[TRANSFER] {agent_id} → escape waypoint {random_wp} "
+                        f"on level {target_level} (LLM deferred until reached)"
                     )
                 except Exception as e:
                     logger.debug(f"Could not set transfer waypoint for {agent_id}: {e}")

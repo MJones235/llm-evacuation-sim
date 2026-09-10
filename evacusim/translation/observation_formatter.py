@@ -252,12 +252,12 @@ class ObservationFormatter:
                 # in the agent's mental model even when they've moved away.
                 lines.append(
                     f"The {blocked['name']} appears blocked or obstructed "
-                    f"(you already know this exit is blocked)."
+                    f"(remembered from earlier observation)."
                 )
             else:
                 lines.append(
                     f"The {blocked['name']} appears blocked or obstructed "
-                    f"({dist})."
+                    f"(seen now: {dist})."
                 )
 
         return lines

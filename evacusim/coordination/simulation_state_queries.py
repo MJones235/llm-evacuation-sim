@@ -56,6 +56,11 @@ class SimulationStateQueries:
         """
         Get recent events relevant to agents.
 
+        If an event entry contains a ``message_template`` key (i.e. the original
+        message had a ``{elapsed_time}`` placeholder), the placeholder is resolved
+        dynamically using the elapsed time since the event fired so that agents
+        always receive an up-to-date duration phrase.
+
         Args:
             event_history: List of all events
             current_sim_time: Current simulation time
@@ -64,7 +69,23 @@ class SimulationStateQueries:
         Returns:
             List of event messages (only events that have already occurred)
         """
-        # Return only events that have occurred (time <= current_sim_time)
-        occurred_events = [e["message"] for e in event_history if e["time"] <= current_sim_time]
+        occurred_messages: list[str] = []
+        for e in event_history:
+            if e["time"] > current_sim_time:
+                continue
+            template = e.get("message_template")
+            if template:
+                elapsed = current_sim_time - e["time"]
+                minutes = round(elapsed / 60)
+                if minutes < 1:
+                    phrase = "less than a minute"
+                elif minutes == 1:
+                    phrase = "1 minute"
+                else:
+                    phrase = f"{minutes} minutes"
+                msg = template.replace("{elapsed_time}", phrase)
+            else:
+                msg = e["message"]
+            occurred_messages.append(msg)
         # Return last N events
-        return occurred_events[-count:]
+        return occurred_messages[-count:]

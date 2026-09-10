@@ -46,6 +46,10 @@ class EventManager:
         # Used by the simulation loop to decide whether an immediate all-agent
         # re-decision is required (critical events) or can be staggered.
         self.last_fired_event_types: set[str] = set()
+        # Exits that were newly blocked during the most recent check_and_trigger_events
+        # call (cleared each call). Used by hybrid_simulation to cancel destinations
+        # for agents already en route to an exit that just became blocked.
+        self.last_newly_blocked_exits: set[str] = set()
 
         # Train state — populated by train_arrival events.
         # active_train_exits: exits currently open for boarding.
@@ -114,6 +118,7 @@ class EventManager:
         """
         fired = False
         self.last_fired_event_types.clear()
+        self.last_newly_blocked_exits.clear()
 
         # Check whether any previously activated train exits have now departed.
         # This runs every step (not only when a scheduled event is due).
@@ -339,7 +344,8 @@ class EventManager:
 
         Adds the exit to ``blocked_exits`` so that:
         - Agents who have line-of-sight will see it as blocked in their observation.
-        - The multi-level simulation will refuse level transfers through blocked escalators.
+                - The multi-level simulation will enforce blocked-corridor barriers so
+                    agents cannot enter blocked escalator shafts.
 
         Discovery is entirely spatial/observational — no broadcast is made.  An agent
         only learns about the blockage when they approach close enough to see it, or
@@ -358,6 +364,7 @@ class EventManager:
                 "adding to blocked_exits for observation only"
             )
         self.blocked_exits.add(exit_name)
+        self.last_newly_blocked_exits.add(exit_name)
 
         # Place a geometry obstacle only if the exit is a known registered stage.
         # Pre-blocked exits already have their corridor removed from the navmesh.
@@ -371,27 +378,60 @@ class EventManager:
             f"🚧 Exit '{exit_name}' blocked — threshold barrier + blocked-transfer handling active"
         )
 
+    @staticmethod
+    def _format_elapsed_time_phrase(elapsed_seconds: float) -> str:
+        """Return a human-readable phrase describing how long ago an event occurred.
+
+        Examples:
+            0 s  -> "less than a minute"
+            60 s -> "1 minute"
+            90 s -> "1 minute"
+            120 s -> "2 minutes"
+        """
+        minutes = round(elapsed_seconds / 60)
+        if minutes < 1:
+            return "less than a minute"
+        elif minutes == 1:
+            return "1 minute"
+        else:
+            return f"{minutes} minutes"
+
     def broadcast_event(
         self, event_message: str, current_sim_time: float, agents: dict[str, Any]
     ) -> None:
         """
         Broadcast an event to all agents.
 
+        Event messages may contain a ``{elapsed_time}`` placeholder which is
+        replaced with a human-readable phrase describing how long the event has
+        been ongoing (e.g. ``"less than a minute"``, ``"1 minute"``,
+        ``"10 minutes"``).  At broadcast time the elapsed duration is zero, so
+        agents hear ``"less than a minute"``; subsequent decision prompts
+        re-resolve the phrase dynamically via :func:`get_recent_events`.
+
         Args:
-            event_message: The event message to broadcast
+            event_message: The event message to broadcast (may contain ``{elapsed_time}``).
             current_sim_time: Current simulation time
             agents: Dictionary of agent_id -> agent entity
         """
-        logger.info(f"Broadcasting event: {event_message}")
+        # Resolve {elapsed_time} for the immediate agent observation (elapsed = 0).
+        has_placeholder = "{elapsed_time}" in event_message
+        if has_placeholder:
+            resolved_message = event_message.replace(
+                "{elapsed_time}", self._format_elapsed_time_phrase(0)
+            )
+        else:
+            resolved_message = event_message
 
-        # Store event
-        self.event_history.append(
-            {
-                "time": current_sim_time,
-                "message": event_message,
-            }
-        )
+        logger.info(f"Broadcasting event: {resolved_message}")
+
+        # Store event — keep the original template so subsequent prompts can
+        # re-resolve {elapsed_time} with the current elapsed duration.
+        entry: dict[str, Any] = {"time": current_sim_time, "message": resolved_message}
+        if has_placeholder:
+            entry["message_template"] = event_message
+        self.event_history.append(entry)
 
         # Notify all agents
         for agent in agents.values():
-            agent.observe(f"[ANNOUNCEMENT] {event_message}")
+            agent.observe(f"[ANNOUNCEMENT] {resolved_message}")

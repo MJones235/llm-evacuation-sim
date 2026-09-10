@@ -71,6 +71,23 @@ class ObservationCoordinator:
         # retained permanently so they don't oscillate back toward blocked exits.
         self._agent_known_blocked: dict[str, set[str]] = {}
 
+    def remember_blocked_exits_for_agents(
+        self,
+        agent_ids: set[str],
+        blocked_exits: set[str],
+    ) -> None:
+        """Persist blocked-exit knowledge for specific agents.
+
+        Called when agents are physically bounced from blocked corridors, so the
+        very next prompt can include blockage knowledge even if proximity-based
+        visual discovery would otherwise miss it.
+        """
+        if not agent_ids or not blocked_exits:
+            return
+        for agent_id in agent_ids:
+            known = self._agent_known_blocked.setdefault(agent_id, set())
+            known.update(blocked_exits)
+
     def generate_all_observations(self, current_sim_time: float) -> dict[str, str]:
         """
         Generate observations for all agents based on simulation state.

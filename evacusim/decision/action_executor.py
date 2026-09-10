@@ -67,6 +67,11 @@ class ActionExecutor:
         self.wait_events = wait_events
         self.agent_configs = agent_configs
         self.agent_roles = agent_roles or {}
+        self._agent_base_speed: dict[str, float] = {
+            str(cfg.get("id")): float(cfg.get("walking_speed", 1.34))
+            for cfg in (agent_configs or [])
+            if cfg.get("id")
+        }
         self._zone_adjacency: dict[str, list[str]] = station_layout.get("zone_adjacency", {})
         self._indicator_boards: list[dict[str, Any]] = station_layout.get("indicator_boards", [])
         self._configure_pace_multipliers(pace_multipliers or {})
@@ -232,7 +237,7 @@ class ActionExecutor:
             logger.debug(f"Traceback: {traceback.format_exc()}")
 
     def _apply_pace_speed(self, agent_id: str, pace: str) -> None:
-        """Apply pace multiplier to the agent's current desired speed."""
+        """Apply pace multiplier to the agent's baseline desired speed."""
         if pace == "normal_pace":
             return
         if pace == "hurrying":
@@ -247,10 +252,18 @@ class ActionExecutor:
             return
 
         try:
-            current_speed = self.jps_sim.get_agent_speed(agent_id)
-            if current_speed is None:
-                return
-            self.jps_sim.set_agent_speed(agent_id, float(current_speed) * multiplier)
+            baseline = self._agent_base_speed.get(agent_id)
+            if baseline is None:
+                current_speed = self.jps_sim.get_agent_speed(agent_id)
+                if current_speed is None:
+                    return
+                baseline = float(current_speed)
+                self._agent_base_speed[agent_id] = baseline
+
+            target_speed = baseline * multiplier
+            # Safety cap to avoid pathological runaway speeds from malformed inputs.
+            target_speed = min(target_speed, 4.0)
+            self.jps_sim.set_agent_speed(agent_id, target_speed)
         except Exception:
             # Keep execution robust if speed APIs are unavailable in some backends.
             return

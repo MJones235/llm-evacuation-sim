@@ -18,14 +18,14 @@ Block 6 - Response format
 Reply with ONLY this JSON object. Do not add commentary.
 {
   "assessment": {
-    "source_credibility": "",
-    "situation_appraisal": "",
-    "personal_relevance": "",
-    "options_considered": "",
-    "option_chosen_because": "",
-    "information_gap": ""
+    "source_credibility": "<warning confirmation - assess whether you trust the source(s) of new information>",
+    "situation_appraisal": "<threat appraisal - describe what you think is happening now, how serious it seems, and how urgent action appears>",
+    "personal_relevance": "<personal risk appraisal - explain how exposed or vulnerable you personally are in your current location and circumstances>",
+    "options_considered": "<protective action search - list realistic actions you considered right now>",
+    "option_chosen_because": "<protective action selection - explain why the chosen action is best given safety, feasibility, and your current goal>",
+    "information_gap": "<unresolved uncertainty - state what critical information is still missing that could change your decision>"
   },
-  "action": "continue_activity | wait | seek_information | evacuate | leave_by_train",
+  "action": "${action_enum_block}",
   "wait_reason": null,
   "exit_id": null,
 ${pace_field_block}

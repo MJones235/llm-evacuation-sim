@@ -351,6 +351,7 @@ class HybridSimulationRunner:
         # A single worker is enough — we only ever have one pending write at a time.
         self._io_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="results_io")
         self._pending_write: Future | None = None
+        self._last_step_error: str | None = None
 
         # Write every 200 steps (10 s at dt=0.05 s) instead of every 10 steps (0.5 s).
         # This reduces I/O traffic by 20× while keeping the live viewer reasonably fresh.
@@ -518,7 +519,13 @@ class HybridSimulationRunner:
                     # Advance JuPedSim simulation
                     with self.perf_timer.measure("jupedsim_step"):
                         if not self._step_jupedsim():
-                            logger.info("JuPedSim simulation complete")
+                            if self._last_step_error:
+                                logger.error(
+                                    "JuPedSim simulation aborted due to step error: "
+                                    f"{self._last_step_error}"
+                                )
+                            else:
+                                logger.info("JuPedSim simulation complete")
                             break
 
                     self.current_sim_time = step * self.jps_sim.dt
@@ -569,7 +576,7 @@ class HybridSimulationRunner:
                             )
                             for _tid in transferred_agents:
                                 self.agent_destinations.pop(_tid, None)
-                                self.decision_processor.agent_goals.pop(_tid, None)
+                                self.decision_processor.clear_goal_for_redecision(_tid)
                                 self.decision_processor.prompt_cache.clear_agent(_tid)
                                 self._pending_immediate_decisions.add(_tid)
                             if immediate_transfer_redecision:
@@ -581,21 +588,27 @@ class HybridSimulationRunner:
                                     "(performance.immediate_redecision_on_transfer=false)"
                                 )
 
-                    # Consume agents that were bounced back from a blocked escalator.
-                    # Clear their stale route commitments and schedule an immediate
-                    # re-decision so they pick an unblocked exit next cycle.
+                    # Consume agents rejected by blocked-corridor barrier logic.
+                    # Clear stale route commitments and schedule an immediate
+                    # re-decision so they pick a new action next cycle.
                     if hasattr(self.jps_sim, "agents_needing_redecision") and self.jps_sim.agents_needing_redecision:
                         bounced = set(self.jps_sim.agents_needing_redecision)
                         self.jps_sim.agents_needing_redecision.clear()
                         logger.info(
-                            f"Bounced agents re-deciding after blocked escalator: {bounced}"
+                            f"Blocked-corridor contacts queued for immediate re-decision: {bounced}"
                         )
+                        if hasattr(self.observation_coordinator, "remember_blocked_exits_for_agents"):
+                            self.observation_coordinator.remember_blocked_exits_for_agents(
+                                bounced,
+                                set(self.event_manager.blocked_exits),
+                            )
                         for _bid in bounced:
                             self.agent_destinations.pop(_bid, None)
-                            self.decision_processor.agent_goals.pop(_bid, None)
+                            self.decision_processor.clear_goal_for_redecision(_bid)
                             self.decision_processor.prompt_cache.clear_agent(_bid)
                             self._pending_immediate_decisions.add(_bid)
                         force_immediate_decision_cycle = True
+
                     # decisions, meaning the alarm was missed for the entire
                     # decision cycle that coincided with the alarm time).
                     with self.perf_timer.measure("event_checking"):
@@ -626,7 +639,7 @@ class HybridSimulationRunner:
                     if stranded:
                         for aid in stranded:
                             self.agent_destinations.pop(aid, None)
-                            self.decision_processor.agent_goals.pop(aid, None)
+                            self.decision_processor.clear_goal_for_redecision(aid)
                             self.decision_processor.prompt_cache.clear_agent(aid)
                         new_event_fired = True
                         logger.info(
@@ -643,8 +656,12 @@ class HybridSimulationRunner:
                     # Check if it's time for Concordia decisions (normal schedule) or
                     # if a critical event just fired (immediate all-agent override).
                     should_decide = self._should_make_decisions()
+                    has_pending_immediate = bool(self._pending_immediate_decisions)
                     should_run_decisions = (
-                        should_decide or force_immediate_decision_cycle or critical_event_fired
+                        should_decide
+                        or force_immediate_decision_cycle
+                        or critical_event_fired
+                        or has_pending_immediate
                     )
                     if new_event_fired and not critical_event_fired and not should_run_decisions:
                         logger.info(
@@ -667,6 +684,14 @@ class HybridSimulationRunner:
                                 # Targeted immediate cycle: process only pending
                                 # out-of-group agents (e.g. transferred/bounced)
                                 # without disturbing the normal staggered cadence.
+                                current_group = []
+                                logger.info(
+                                    "Immediate targeted decision cycle for pending "
+                                    "transferred/re-routed agents"
+                                )
+                            elif has_pending_immediate:
+                                # Pending immediate agents should not wait for
+                                # the next staggered tick; run a targeted cycle.
                                 current_group = []
                                 logger.info(
                                     "Immediate targeted decision cycle for pending "
@@ -729,6 +754,26 @@ class HybridSimulationRunner:
                                     self.current_sim_time,
                                     agent_ids=current_group,
                                 )
+
+                                # Agents can be intentionally deferred while still
+                                # inside escalator departure geometry. Re-queue
+                                # them for a targeted immediate cycle so they are
+                                # prompted as soon as they clear the escalator mouth.
+                                deferred_transfer_agents = set()
+                                if hasattr(self.decision_processor, "consume_deferred_escalator_agents"):
+                                    deferred_transfer_agents = {
+                                        a
+                                        for a in self.decision_processor.consume_deferred_escalator_agents()
+                                        if a not in self.exited_agents
+                                    }
+                                if deferred_transfer_agents:
+                                    self._pending_immediate_decisions.update(deferred_transfer_agents)
+                                    logger.debug(
+                                        f"Re-queued {len(deferred_transfer_agents)} escalator-deferred "
+                                        f"agent(s) for immediate follow-up decision: "
+                                        f"{deferred_transfer_agents}"
+                                    )
+
                                 # Preserve global cadence on targeted immediate
                                 # cycles; only update last_decision_time for
                                 # normal schedule ticks or global event overrides.
@@ -924,6 +969,7 @@ class HybridSimulationRunner:
             True if simulation should continue, False if complete
         """
         try:
+            self._last_step_error = None
             # Keep jps_sim's blocked_exits in sync so the physics layer can
             # intercept agents that reach a blocked escalator exit on levels
             # where no geometry obstacle could be placed (e.g. level -1).
@@ -931,6 +977,7 @@ class HybridSimulationRunner:
                 self.jps_sim.blocked_exits = set(self.event_manager.blocked_exits)
             return self.jps_sim.step()
         except Exception as e:
+            self._last_step_error = str(e)
             logger.error(f"JuPedSim step error: {e}")
             return False
 

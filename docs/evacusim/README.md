@@ -9,10 +9,8 @@ This directory contains comprehensive technical documentation for evacusim imple
 3. Use [packages/README.md](packages/README.md) for package responsibilities and data contracts.
 4. Use [function-reference/README.md](function-reference/README.md) for full function-by-function coverage.
 5. Review [design-decisions.md](design-decisions.md) and [risk-register.md](risk-register.md) for review and improvement planning.
-6. Review [preliminary-fix-plan.md](preliminary-fix-plan.md) for a staged remediation proposal before implementation.
-7. Execute against [implementation-checklist-v1.md](implementation-checklist-v1.md) for concrete phased tasks.
-8. Track the escalator reliability rewrite in [escalator-rewrite-spec.md](escalator-rewrite-spec.md).
-9. Use deep dives for critical mechanics across simulation, orchestration, cognition, and analytics:
+6. Track the escalator reliability rewrite in [escalator-rewrite-spec.md](escalator-rewrite-spec.md).
+7. Use deep dives for critical mechanics across simulation, orchestration, cognition, and analytics:
    - [deep-dives/README.md](deep-dives/README.md)
    - [deep-dives/bootstrap-and-dependency-wiring.md](deep-dives/bootstrap-and-dependency-wiring.md)
    - [deep-dives/event-scheduling-and-director-systems.md](deep-dives/event-scheduling-and-director-systems.md)

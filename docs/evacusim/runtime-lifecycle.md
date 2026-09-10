@@ -26,8 +26,10 @@
 - [AgentBuilder.build_agents](function-reference/concordia__agent_builder.md)
 - [DecisionProcessor.__init__](function-reference/decision__decision_processor.md)
 
-7. Initial decision pass
+7. Optional initial decision pass
 - [HybridSimulationRunner._bootstrap_initial_decisions](function-reference/coordination__hybrid_simulation.md)
+- Controlled by `performance.bootstrap_initial_decisions` (default: `true`).
+- If disabled, the first staggered decision group still runs at `t=0`.
 
 ## Main Loop Sequence
 
@@ -49,6 +51,10 @@ Each iteration generally executes:
 
 4. Decision trigger check
 - [HybridSimulationRunner._should_make_decisions](function-reference/coordination__hybrid_simulation.md)
+- Normal mode uses staggered decision groups (`performance.decision_groups`) to preserve per-agent cadence while smoothing LLM load.
+- Immediate override modes:
+	- all-agent cycle for critical events (`block_exit`, `train_departure`),
+	- targeted cycle for pending transferred/bounced agents (configurable via `performance.immediate_redecision_on_transfer`).
 
 5. Observation and decisions
 - [ObservationCoordinator.generate_all_observations](function-reference/coordination__observation_coordinator.md)

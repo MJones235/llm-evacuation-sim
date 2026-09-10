@@ -274,9 +274,8 @@ class ObservationGenerator:
         # --- Exit awareness (line-of-sight + persistent memory) ---
 
         # 1. Discover exits visible right now via LOS geometry.
-        #    Pass blocked_exits so that currently-blocked exits are excluded from
-        #    the visible list — they appear instead as blocked visual observations
-        #    once the agent is within discovery range.
+        #    Blocked exits remain in this list until they are discovered at close
+        #    range; once discovered they move to blocked visual observations.
         visible_exits = self.spatial_analyzer.get_visible_exits(
             position, agent_level=agent_level, agent_zone=zone, jps_sim=self.jps_sim,
             inactive_exits=inactive_exits,
@@ -299,15 +298,12 @@ class ObservationGenerator:
 
         # 4. Format observation lines.
         if visible_exits:
-            # Group by distance category for a natural description.
-            by_dist: dict[str, list[str]] = {"very close": [], "nearby": [], "visible in distance": []}
-            for exit_info in visible_exits:
-                cat = exit_info.get("distance", "visible in distance")
-                by_dist.setdefault(cat, []).append(exit_info["name"])
-            parts = []
-            for cat in ("very close", "nearby", "visible in distance"):
-                if by_dist[cat]:
-                    parts.append(f"{', '.join(by_dist[cat])} ({cat})")
+            # Keep one exit per entry so downstream parsing can map each visible
+            # display name back to a specific exit id without ambiguity.
+            parts = [
+                f"{exit_info['name']} ({exit_info.get('distance', 'visible in distance')})"
+                for exit_info in visible_exits
+            ]
             observations.append(f"Exits visible right now: {'; '.join(parts)}.")
         else:
             observations.append("Exits visible right now: none.")
