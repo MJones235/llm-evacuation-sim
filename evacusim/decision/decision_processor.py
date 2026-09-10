@@ -211,6 +211,18 @@ class DecisionProcessor:
 
         logger.debug("DecisionProcessor initialized for parallel async processing")
 
+    def register_agent(self, cfg: dict) -> None:
+        """Register a per-agent config after construction (runtime spawning).
+
+        Feature A spawns passengers over time, so their configs are not known at
+        construction.  This inserts one into ``_agent_cfg`` (keyed by id) so the
+        next decision cycle can build a ``DecisionContext`` for the new agent.
+        The caller is responsible for adding the matching entity to
+        ``concordia_agents`` and the agent to the physics simulation.
+        """
+        agent_id = cfg["id"]
+        self._agent_cfg[agent_id] = cfg
+
     def _load_decision_prompt_template(self, template_path: str | None) -> Template:
         """Load the decision prompt template from disk.
 

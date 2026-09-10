@@ -124,6 +124,7 @@ class HybridSimulationRunner:
         pre_built_systems: list | None = None,
         pre_built_agent_roles: dict | None = None,
         decision_engine=None,
+        spawn_controller=None,
     ):
         """
         Initialize the hybrid simulation runner.
@@ -166,6 +167,18 @@ class HybridSimulationRunner:
         self.enable_video = enable_video
         self.pace_to_realtime = pace_to_realtime
         self.performance_config = performance_config or {}
+
+        # Feature A: runtime (Poisson/timetable) passenger spawning. When a
+        # spawn controller is provided, agents are inserted mid-run as their
+        # arrival times are reached. Runtime spawning builds LLM-free
+        # NoOpAgents, so it requires the rule-based engine (decision_engine set).
+        self.spawn_controller = spawn_controller
+        self.spawn_log: list[dict[str, Any]] = []
+        if spawn_controller is not None and decision_engine is None:
+            raise ValueError(
+                "Runtime passenger spawning (calibration) requires the rule-based "
+                "decision engine; it is LLM-free only. Set decision.engine: rule_based."
+            )
 
         # Roles map: agent_id → human-readable role label.
         # Populated during setup (e.g. by StaffSystem) before the simulation loop.
@@ -436,6 +449,93 @@ class HybridSimulationRunner:
     # System management
     # ------------------------------------------------------------------
 
+    def register_runtime_agent(self, cfg: dict[str, Any], position, level_id) -> bool:
+        """Insert a runtime-spawned passenger into the simulation and pipeline.
+
+        Adds the agent to JuPedSim, registers an LLM-free ``NoOpAgent`` in the
+        shared ``concordia_agents`` map (so exit/observation/decision machinery
+        picks it up on the next cycle), and hands its config to the decision
+        processor.  The agent spawns with a default JuPedSim destination so it
+        moves immediately; the rule-based engine re-routes it by goal on its
+        first decision.  Returns False (and logs) if physical insertion fails
+        (e.g. the spawn point is occupied).
+        """
+        agent_id = cfg["id"]
+        walking_speed = float(cfg.get("walking_speed", 1.34))
+        try:
+            if hasattr(self.jps_sim, "simulations"):
+                self.jps_sim.add_agent(
+                    agent_id, position, walking_speed=walking_speed,
+                    level_id=str(level_id), assign_default_destination=True,
+                )
+            else:
+                self.jps_sim.add_agent(
+                    agent_id, position, walking_speed=walking_speed,
+                    assign_default_destination=True,
+                )
+        except Exception as e:
+            # Expected occasionally (occupied point, jitter outside walkable);
+            # the caller retries with a larger jitter, so log at debug.
+            logger.debug(
+                "Runtime spawn attempt failed for %s at %s (level %s): %s",
+                agent_id, position, level_id, e,
+            )
+            return False
+
+        from evacusim.coordination.noop_agent import NoOpAgent
+
+        self.concordia_agents[agent_id] = NoOpAgent(agent_id, cfg.get("name"))
+        self.agent_configs.append(cfg)
+        self.decision_processor.register_agent(cfg)
+        self.spawn_log.append(
+            {
+                "id": agent_id,
+                "source": cfg.get("spawn_source"),
+                "location": cfg.get("spawn_location"),
+                "time_s": cfg.get("spawn_time_s"),
+                "level": str(level_id),
+                "dest_exit": cfg.get("target"),
+            }
+        )
+        logger.debug(
+            "Runtime-spawned %s (%s) at %s level %s -> %s",
+            agent_id, cfg.get("spawn_source"), position, level_id, cfg.get("target"),
+        )
+        return True
+
+    _SPAWN_MAX_ATTEMPTS = 12  # jitter-retry budget per runtime arrival
+
+    def _spawn_arrivals(self, current_sim_time: float) -> None:
+        """Spawn any passengers whose scheduled arrival time has been reached.
+
+        No-op unless a spawn controller was configured (calibration runs).
+        """
+        if self.spawn_controller is None:
+            return
+        for event in self.spawn_controller.pop_due(current_sim_time):
+            cfg, position, level_id = self.spawn_controller.build_agent_cfg(event)
+            if self.register_runtime_agent(cfg, position, level_id):
+                continue
+            # Retry with a progressively larger jitter disc so bursts of
+            # simultaneous arrivals (and points that land near a wall) spread
+            # out until a valid, non-colliding position is found.
+            placed = False
+            for attempt in range(1, self._SPAWN_MAX_ATTEMPTS):
+                position, level_id = self.spawn_controller.jittered_position(
+                    event, attempt=attempt
+                )
+                cfg["start_position"] = position
+                if self.register_runtime_agent(cfg, position, level_id):
+                    placed = True
+                    break
+            if not placed:
+                logger.warning(
+                    "Dropped runtime arrival %s (source=%s, location=%s): no valid "
+                    "spawn position after %d attempts.",
+                    cfg["id"], cfg.get("spawn_source"), cfg.get("spawn_location"),
+                    self._SPAWN_MAX_ATTEMPTS,
+                )
+
     def _init_systems(
         self,
         systems_config: dict[str, Any] | None,
@@ -538,6 +638,26 @@ class HybridSimulationRunner:
                     step_start = time.perf_counter()
                     self.current_step = step
                     force_immediate_decision_cycle = False
+                    self.current_sim_time = step * self.jps_sim.dt
+
+                    # Feature A: spawn passengers whose Poisson/timetable arrival
+                    # time has been reached BEFORE stepping physics, so a run that
+                    # begins with an empty population (calibration) still populates
+                    # instead of terminating at step 0.  No-op without a controller.
+                    self._spawn_arrivals(self.current_sim_time)
+
+                    # The physics layer latches "complete" the first time it steps
+                    # with an empty population — which for a calibration run is t=0,
+                    # before the first arrival.  While the spawn controller still has
+                    # queued arrivals (or live agents remain) clear that latch so
+                    # stepping resumes and spawned passengers actually move.
+                    if self.spawn_controller is not None and getattr(
+                        self.jps_sim, "is_complete", False
+                    ) and (
+                        self.spawn_controller.remaining > 0
+                        or len(self.concordia_agents) > len(self.exited_agents)
+                    ):
+                        self.jps_sim.is_complete = False
 
                     # Advance JuPedSim simulation
                     with self.perf_timer.measure("jupedsim_step"):
@@ -547,11 +667,17 @@ class HybridSimulationRunner:
                                     "JuPedSim simulation aborted due to step error: "
                                     f"{self._last_step_error}"
                                 )
-                            else:
-                                logger.info("JuPedSim simulation complete")
+                                break
+                            # Physics reports no agents remain this step.  When a
+                            # calibration spawn controller still has arrivals queued,
+                            # keep looping so later arrivals spawn; otherwise finish.
+                            if (
+                                self.spawn_controller is not None
+                                and self.spawn_controller.remaining > 0
+                            ):
+                                continue
+                            logger.info("JuPedSim simulation complete")
                             break
-
-                    self.current_sim_time = step * self.jps_sim.dt
 
                     # Check for agents who have exited and remove them
                     self.exit_tracker.check_exited_agents(self.current_sim_time, self.current_step)
@@ -937,6 +1063,22 @@ class HybridSimulationRunner:
         if self.output_file:
             self.population_monitor.save(self.output_file.parent)
         results["population_timeseries"] = self.population_monitor.to_dict()
+
+        # Feature A: write the calibration report (realised vs expected
+        # arrivals + occupancy) when this was a calibration run.
+        if self.spawn_controller is not None and self.output_file is not None:
+            try:
+                from evacusim.calibration.calibration_report import (
+                    write_calibration_report,
+                )
+                write_calibration_report(
+                    getattr(self.spawn_controller, "expected_intervals", []) or [],
+                    self.spawn_log,
+                    self.population_monitor,
+                    self.output_file.parent,
+                )
+            except Exception as e:
+                logger.error(f"Failed to write calibration report: {e}", exc_info=True)
 
         # Save position history if video generation is enabled
         if self.position_tracker and self.output_file:
