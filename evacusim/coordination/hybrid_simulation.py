@@ -487,6 +487,13 @@ class HybridSimulationRunner:
         self.concordia_agents[agent_id] = NoOpAgent(agent_id, cfg.get("name"))
         self.agent_configs.append(cfg)
         self.decision_processor.register_agent(cfg)
+        # The staggered decision groups are fixed at init from the initial
+        # population (empty for a calibration run), so a runtime-spawned agent is
+        # in no rotation group and would never receive a decision — it would only
+        # follow the default-destination journey set at spawn, never the
+        # rule-based goal routing (e.g. leave_by_train).  Flag it for an immediate
+        # out-of-group decision so it routes correctly on the step it appears.
+        self._pending_immediate_decisions.add(agent_id)
         self.spawn_log.append(
             {
                 "id": agent_id,
@@ -726,10 +733,32 @@ class HybridSimulationRunner:
                         hasattr(self.jps_sim, "board_agents_on_platform")
                         and self.event_manager.active_train_exits
                     ):
+                        # Waiting boarders: agents whose goal is to board a train
+                        # and who are not actively routing away (no destination, or
+                        # a destination that is itself a train exit).  Passing these
+                        # to board_agents_on_platform lets a passenger who has
+                        # descended and is holding on the platform board the next
+                        # train that dwells there, without an explicit move→train
+                        # decision.  Alighters (goal: leave the station) are absent
+                        # from this set, so they are never re-boarded onto the train
+                        # they just stepped off.
+                        _boarder_ids = {
+                            aid
+                            for aid, goal in self.decision_processor.agent_goals.items()
+                            if aid not in self.exited_agents
+                            and self.decision_processor._goal_is_train_oriented(goal)
+                            and (
+                                not self.agent_destinations.get(aid, "")
+                                or self.agent_destinations.get(aid, "").startswith(
+                                    "train_platform_"
+                                )
+                            )
+                        }
                         for _exit_name in list(self.event_manager.active_train_exits):
                             for _cid in self.jps_sim.board_agents_on_platform(
                                 _exit_name,
                                 agent_destinations=self.agent_destinations,
+                                eligible_ids=_boarder_ids,
                             ):
                                 if _cid not in self.exited_agents:
                                     self.exited_agents.add(_cid)

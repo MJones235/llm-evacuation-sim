@@ -323,6 +323,14 @@ class MultiLevelJuPedSimulation:
         )
         self.agent_levels[agent_id] = level_id
 
+        # Adding an agent means the simulation is no longer complete.  The
+        # per-level step() latches is_complete when a level empties (and stays
+        # latched); the aggregate flag latches likewise.  Reset the aggregate
+        # here so a run that had briefly emptied (e.g. calibration between
+        # sparse arrivals) resumes stepping once re-populated.  The per-level
+        # flag is reset inside the level's own add_agent.
+        self.is_complete = False
+
         logger.info(f"Added agent {agent_id} to level {level_id} at {position}")
 
     def step(self) -> bool:
@@ -1004,14 +1012,27 @@ class MultiLevelJuPedSimulation:
         self,
         exit_name: str,
         agent_destinations: dict[str, str] | None = None,
+        eligible_ids: "set[str] | None" = None,
     ) -> list[str]:
         """
-        Board agents that have committed to boarding this train.
+        Board agents standing on the platform when a train dwells there.
 
-        Only agents whose ``agent_destinations`` entry matches *exit_name* are
-        boarded — agents merely crossing the platform toward an escalator are
-        left alone.  If *agent_destinations* is not provided every agent inside
-        the platform polygon is boarded (legacy fallback).
+        An agent inside the platform polygon is boarded when either:
+
+        * it has **explicitly committed** to this train — its
+          ``agent_destinations`` entry equals *exit_name*; or
+        * it is a **waiting boarder** — its id is in *eligible_ids*, the set of
+          agents whose goal is to board a train and who are not actively routing
+          away (computed by the caller from agent goals/destinations).
+
+        Agents actively routing away (a non-train destination such as an
+        escalator or street exit) and agents whose goal is to *leave* the
+        station — e.g. alighters who have just stepped off onto the platform —
+        are left untouched, so they are never re-boarded onto the train they
+        just left.
+
+        If *agent_destinations* is not provided every agent inside the platform
+        polygon is boarded (legacy fallback).
 
         Uses Shapely containment against the full platform walkable area so that
         agents board from any point on the platform, not just from the small
@@ -1020,6 +1041,8 @@ class MultiLevelJuPedSimulation:
         Args:
             exit_name: Canonical exit name, e.g. ``"train_platform_3"``.
             agent_destinations: Live dict of agent_id -> current exit name.
+            eligible_ids: Ids of waiting boarders eligible to board a dwelling
+                train even without an explicit ``train_platform_*`` destination.
 
         Returns:
             List of Concordia IDs marked for removal this step.
@@ -1046,14 +1069,16 @@ class MultiLevelJuPedSimulation:
         from shapely.geometry import Point
 
         current_positions = level_sim.agent_tracker.get_all_positions()
+        eligible = eligible_ids or set()
         for concordia_id, pos in current_positions.items():
-            # Only board agents who have explicitly committed to this exact
-            # train exit.  Agents with no destination (waiting) or heading to
-            # an escalator/street exit are left alone — they haven't chosen
-            # to board and should not be silently removed.
+            # Board an agent when it has explicitly committed to this exact train
+            # exit, or when it is a waiting boarder standing on the platform as a
+            # train dwells.  Agents routing away via an escalator/street exit and
+            # non-boarders (e.g. alighters leaving the station) are left alone —
+            # they are excluded from ``eligible_ids`` and never re-boarded.
             if agent_destinations is not None:
                 dest = agent_destinations.get(concordia_id, "")
-                if dest != exit_name:
+                if dest != exit_name and concordia_id not in eligible:
                     continue
             if not platform_poly.contains(Point(pos)):
                 continue
