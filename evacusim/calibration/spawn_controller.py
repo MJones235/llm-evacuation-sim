@@ -64,6 +64,16 @@ class RuntimeSpawnController:
     def remaining(self) -> int:
         return len(self._schedule) - self._cursor
 
+    def peek_next_time(self) -> float | None:
+        """Scheduled time of the next un-popped spawn event, or ``None`` if drained.
+
+        Lets the runner fast-forward over idle spans (no live agents) straight to
+        the next arrival instead of stepping physics dt-by-dt through the gap.
+        """
+        if self._cursor < len(self._schedule):
+            return self._schedule[self._cursor].time_s
+        return None
+
     def pop_due(self, current_sim_time: float) -> list[SpawnEvent]:
         """Return (and consume) all events with ``time_s <= current_sim_time``.
 

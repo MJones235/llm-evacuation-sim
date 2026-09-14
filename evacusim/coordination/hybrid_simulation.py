@@ -536,6 +536,24 @@ class HybridSimulationRunner:
                     self._SPAWN_MAX_ATTEMPTS,
                 )
 
+    def _in_idle_gap(self) -> bool:
+        """True when the station is empty and the next arrival is still ahead.
+
+        Only meaningful for calibration runs (a spawn controller is present).
+        In that state there is nothing to step — no live agents to move, board,
+        or exit — so the runner can skip the per-step body and spin cheaply to
+        the next scheduled arrival.  Guards against draining the schedule: once
+        no arrivals remain, ``peek_next_time()`` is ``None`` and this returns
+        ``False`` so the normal completion path runs.
+        """
+        if self.spawn_controller is None:
+            return False
+        live = len(self.concordia_agents) - len(self.exited_agents)
+        if live > 0:
+            return False
+        nxt = self.spawn_controller.peek_next_time()
+        return nxt is not None and nxt > self.current_sim_time
+
     def _init_systems(
         self,
         systems_config: dict[str, Any] | None,
@@ -645,6 +663,22 @@ class HybridSimulationRunner:
                     # begins with an empty population (calibration) still populates
                     # instead of terminating at step 0.  No-op without a controller.
                     self._spawn_arrivals(self.current_sim_time)
+
+                    # Fast-forward idle spans.  When the station is empty and the
+                    # next scheduled arrival is still in the future (overnight, or
+                    # any gap between arrivals), skip the whole per-step body —
+                    # physics, exit/boarding scans, event checks, decisions — and
+                    # let the cheap loop spin to the next arrival.  Population is
+                    # zero across the gap, so nothing is lost; we still record the
+                    # periodic snapshot so the timeseries keeps its zero samples.
+                    if self._in_idle_gap():
+                        self.population_monitor.record_snapshot(
+                            self.current_sim_time, self.exited_agents
+                        )
+                        results["steps"] = step + 1
+                        results["sim_time"] = self.current_sim_time
+                        progress.update(task, advance=1)
+                        continue
 
                     # The physics layer latches "complete" the first time it steps
                     # with an empty population — which for a calibration run is t=0,
