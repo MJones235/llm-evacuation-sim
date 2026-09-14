@@ -70,6 +70,17 @@ class SimulationRunnerFactory:
         prompts_config = config.get("prompts", {})
         decision_prompt_template_path = prompts_config.get("decision_prompt_template_path")
 
+        # Select the decision engine. Default is the Concordia/LLM engine; a
+        # rule-based (LLM-free) engine can be requested via the ``decision``
+        # config section, in which case no Concordia agents or embedder are built.
+        decision_engine = SimulationRunnerFactory._build_decision_engine(config)
+
+        # Feature A: optional runtime passenger spawning driven by usage +
+        # timetable CSVs (calibration under non-evacuation conditions).
+        spawn_controller, calibration_timetable = (
+            SimulationRunnerFactory._build_calibration(config)
+        )
+
         logger.info("Creating HybridSimulationRunner...")
 
         # Persist full debug logs alongside run artifacts so transfer/discharge
@@ -100,6 +111,8 @@ class SimulationRunnerFactory:
                 pace_to_realtime=pace_to_realtime,
                 pre_built_systems=pre_built_systems,
                 pre_built_agent_roles=pre_built_agent_roles,
+                decision_engine=decision_engine,
+                spawn_controller=spawn_controller,
             )
             logger.info("HybridSimulationRunner initialized")
         except Exception as e:
@@ -111,8 +124,122 @@ class SimulationRunnerFactory:
 
         # Configure events
         SimulationRunnerFactory._load_events(runner, config)
+        SimulationRunnerFactory._load_calibration_train_events(runner, calibration_timetable)
 
         return runner
+
+    @staticmethod
+    def _build_decision_engine(config: dict):
+        """Construct the decision engine named by ``config["decision"]``.
+
+        Returns ``None`` for the default LLM engine (the DecisionProcessor then
+        builds its own LLMDecisionEngine), or a RuleBasedDecisionEngine for an
+        LLM-free run.
+        """
+        decision_config = config.get("decision", {}) or {}
+        engine_name = str(decision_config.get("engine", "llm")).lower()
+        if engine_name in ("rule_based", "rule", "rules"):
+            from evacusim.decision.rule_based_decision_engine import (
+                RuleBasedDecisionEngine,
+            )
+
+            weights = decision_config.get("rule_weights", {}) or {}
+            engine = RuleBasedDecisionEngine(
+                w_proximity=float(weights.get("proximity", 0.5)),
+                w_busyness=float(weights.get("busyness", 0.3)),
+                w_familiarity=float(weights.get("familiarity", 0.2)),
+                crowd_radius_m=float(decision_config.get("crowd_radius_m", 5.0)),
+            )
+            logger.info(
+                "Decision engine: rule_based (LLM-free); weights=%s",
+                weights or "defaults",
+            )
+            return engine
+        if engine_name not in ("llm", "concordia", "default"):
+            logger.warning(
+                "Unknown decision.engine '%s'; defaulting to the LLM engine.",
+                engine_name,
+            )
+        return None
+
+    @staticmethod
+    def _build_calibration(config: dict):
+        """Build the runtime spawn controller for a calibration run.
+
+        Returns ``(spawn_controller, timetable)``.  When ``calibration.enabled``
+        is false/absent, returns ``(None, [])`` and the run behaves normally.
+        Loads the usage + timetable CSVs, builds a seeded Poisson arrival
+        schedule, and wraps it in a :class:`RuntimeSpawnController`.
+        """
+        calibration = config.get("calibration") or {}
+        if not calibration.get("enabled", False):
+            return None, []
+
+        from evacusim.calibration.usage_data import (
+            load_entrance_usage,
+            load_timetable,
+        )
+        from evacusim.calibration.poisson_scheduler import build_arrival_schedule
+        from evacusim.calibration.spawn_controller import RuntimeSpawnController
+
+        intervals = load_entrance_usage(calibration["entrance_usage_csv"])
+        timetable = (
+            load_timetable(calibration["timetable_csv"])
+            if calibration.get("timetable_csv")
+            else []
+        )
+
+        spawn_points = calibration["spawn_points"]
+        spawn_cfg = {
+            "entrance_level": str(calibration.get("entrance_level", "0")),
+            "entrance_dest_exits": calibration.get("entrance_dest_exits", []),
+            "platform_level": str(calibration.get("platform_level", "-1")),
+            "platform_exit": calibration.get("platform_exit", ""),
+        }
+        seed = int(calibration.get("seed", 0))
+        schedule = build_arrival_schedule(intervals, timetable, spawn_cfg, seed=seed)
+
+        controller = RuntimeSpawnController(
+            schedule,
+            spawn_points,
+            seed=seed,
+            jitter_m=float(calibration.get("spawn_jitter_m", 0.5)),
+            walking_speed=float(calibration.get("walking_speed", 1.34)),
+            knowledge_profile=calibration.get("knowledge_profile", "novice"),
+        )
+        # Retained for the end-of-run calibration report (expected vs realised).
+        controller.expected_intervals = intervals
+
+        logger.info(
+            "Calibration enabled: %d scheduled arrivals "
+            "(%d entrance intervals, %d trains); seed=%d",
+            len(schedule), len(intervals), len(timetable), seed,
+        )
+        return controller, timetable
+
+    @staticmethod
+    def _load_calibration_train_events(runner, timetable) -> None:
+        """Map each timetable train arrival to a ``train_arrival`` event.
+
+        Reuses the existing EventManager mechanism so platform boarding exits
+        activate when trains arrive (entrance passengers can then board).
+        """
+        for tr in timetable:
+            runner.event_manager.scheduled_events.append(
+                {
+                    "time": float(tr.arrival_s),
+                    "type": "train_arrival",
+                    "platforms": [tr.platform],
+                    "dwell_seconds": float(tr.dwell_s),
+                    "message": f"A train has arrived at platform {tr.platform}.",
+                    "_fired": False,
+                }
+            )
+        if timetable:
+            logger.info(
+                "Calibration: mapped %d train arrivals to train_arrival events",
+                len(timetable),
+            )
 
     @staticmethod
     def _load_events(runner: HybridSimulationRunner, config: dict) -> None:

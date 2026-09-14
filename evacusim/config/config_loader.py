@@ -168,6 +168,8 @@ class ConfigLoader:
 
         ConfigLoader._validate_knowledge_profiles(config)
         ConfigLoader._validate_goal_semantic_policies(config)
+        ConfigLoader._validate_decision_section(config)
+        ConfigLoader._validate_calibration_section(config)
 
         # Validate spawn_schedule (optional)
         if "spawn_schedule" in agents_config:
@@ -200,6 +202,128 @@ class ConfigLoader:
                     logger.info(f"Multi-level simulation enabled: {multi_level['levels']}")
 
         logger.debug("Configuration validation passed")
+
+    @staticmethod
+    def _validate_decision_section(config: dict[str, Any]) -> None:
+        """Validate the optional ``decision`` section.
+
+        Selects the cognition engine for the run. When absent, the default
+        LLM/Concordia engine is used. Schema::
+
+            decision:
+              engine: rule_based        # or "llm" (default)
+              crowd_radius_m: 5.0        # optional, rule_based only
+              rule_weights:              # optional, rule_based only
+                proximity: 0.5
+                busyness: 0.3
+                familiarity: 0.2
+        """
+        decision = config.get("decision")
+        if decision is None:
+            return
+        if not isinstance(decision, dict):
+            raise ValueError("decision must be a dictionary when provided")
+
+        engine = decision.get("engine", "llm")
+        if not isinstance(engine, str) or not engine.strip():
+            raise ValueError("decision.engine must be a non-empty string")
+        known = {"llm", "concordia", "default", "rule_based", "rule", "rules"}
+        if engine.lower() not in known:
+            raise ValueError(
+                f"decision.engine '{engine}' is not recognised; "
+                f"expected one of {sorted(known)}"
+            )
+
+        crowd_radius = decision.get("crowd_radius_m")
+        if crowd_radius is not None and (
+            not isinstance(crowd_radius, int | float) or crowd_radius <= 0
+        ):
+            raise ValueError("decision.crowd_radius_m must be a positive number")
+
+        weights = decision.get("rule_weights")
+        if weights is not None:
+            if not isinstance(weights, dict):
+                raise ValueError("decision.rule_weights must be a dictionary")
+            for key in ("proximity", "busyness", "familiarity"):
+                if key not in weights:
+                    continue
+                value = weights[key]
+                if not isinstance(value, int | float) or value < 0:
+                    raise ValueError(
+                        f"decision.rule_weights.{key} must be a non-negative number"
+                    )
+
+    @staticmethod
+    def _validate_calibration_section(config: dict[str, Any]) -> None:
+        """Validate the optional ``calibration`` section (Feature A).
+
+        Drives non-evacuation calibration: passengers arrive over time from
+        usage/timetable CSVs via runtime Poisson spawning.  Runtime spawning is
+        LLM-free only, so when calibration is enabled the decision engine must be
+        rule-based.  Schema::
+
+            calibration:
+              enabled: true
+              seed: 7
+              entrance_usage_csv: data/calibration/entrance_usage.csv
+              timetable_csv: data/calibration/timetable.csv
+              entrance_dest_exits: [train_platform_1]
+              platform_exit: street_exit_a
+              spawn_points:
+                entrance_a: { level: "0",  xy: [10.0, 5.0] }
+                platform_1: { level: "-1", xy: [20.0, -3.0] }
+        """
+        calibration = config.get("calibration")
+        if calibration is None:
+            return
+        if not isinstance(calibration, dict):
+            raise ValueError("calibration must be a dictionary when provided")
+        if not calibration.get("enabled", False):
+            return
+
+        # Runtime spawning is LLM-free only.
+        engine = str((config.get("decision") or {}).get("engine", "llm")).lower()
+        if engine not in ("rule_based", "rule", "rules"):
+            raise ValueError(
+                "calibration.enabled requires decision.engine to be rule_based "
+                f"(got '{engine}'); runtime spawning is LLM-free only."
+            )
+
+        usage_csv = calibration.get("entrance_usage_csv")
+        if not isinstance(usage_csv, str) or not usage_csv.strip():
+            raise ValueError("calibration.entrance_usage_csv must be a non-empty path string")
+
+        timetable_csv = calibration.get("timetable_csv")
+        if timetable_csv is not None and (
+            not isinstance(timetable_csv, str) or not timetable_csv.strip()
+        ):
+            raise ValueError("calibration.timetable_csv must be a non-empty path string when provided")
+
+        seed = calibration.get("seed", 0)
+        if not isinstance(seed, int):
+            raise ValueError("calibration.seed must be an integer")
+
+        dest_exits = calibration.get("entrance_dest_exits", [])
+        if not isinstance(dest_exits, list) or not all(isinstance(e, str) for e in dest_exits):
+            raise ValueError("calibration.entrance_dest_exits must be a list of exit-id strings")
+
+        platform_exit = calibration.get("platform_exit")
+        if platform_exit is not None and not isinstance(platform_exit, str):
+            raise ValueError("calibration.platform_exit must be a string when provided")
+
+        spawn_points = calibration.get("spawn_points")
+        if not isinstance(spawn_points, dict) or not spawn_points:
+            raise ValueError("calibration.spawn_points must be a non-empty mapping of location -> {level, xy}")
+        for loc, spec in spawn_points.items():
+            if not isinstance(spec, dict):
+                raise ValueError(f"calibration.spawn_points.{loc} must be a mapping")
+            xy = spec.get("xy")
+            if (
+                not isinstance(xy, (list, tuple))
+                or len(xy) != 2
+                or not all(isinstance(v, (int, float)) for v in xy)
+            ):
+                raise ValueError(f"calibration.spawn_points.{loc}.xy must be [x, y] numbers")
 
     @staticmethod
     def _validate_knowledge_profiles(config: dict[str, Any]) -> None:

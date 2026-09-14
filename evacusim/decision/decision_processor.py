@@ -27,6 +27,7 @@ from evacusim.utils.logger import get_logger
 from evacusim.decision.action_utils import extract_exit_name
 from evacusim.decision.prompt_cache import PromptCache
 from evacusim.concordia.azure_llm_concordia import llm_current_agent_id, llm_current_sim_time
+from evacusim.core.decision_engine import DecisionContext, DecisionResult, ExitOption
 
 logger = get_logger(__name__)
 
@@ -79,6 +80,7 @@ class DecisionProcessor:
         min_redecision_interval_secs: float = 0.0,
         wait_nudge_enabled: bool = False,
         decision_prompt_template_path: str | None = None,
+        decision_engine=None,
     ):
         """
         Initialize decision processor.
@@ -198,7 +200,28 @@ class DecisionProcessor:
             "goal_semantic_policies", []
         )
 
+        # Pluggable decision engine (LLM by default). The engine turns a
+        # DecisionContext into a DecisionResult; everything downstream is
+        # engine-agnostic. When a non-LLM engine is injected, no Concordia
+        # entity is required to produce a decision.
+        if decision_engine is None:
+            from evacusim.decision.llm_decision_engine import LLMDecisionEngine
+            decision_engine = LLMDecisionEngine(self)
+        self._engine = decision_engine
+
         logger.debug("DecisionProcessor initialized for parallel async processing")
+
+    def register_agent(self, cfg: dict) -> None:
+        """Register a per-agent config after construction (runtime spawning).
+
+        Feature A spawns passengers over time, so their configs are not known at
+        construction.  This inserts one into ``_agent_cfg`` (keyed by id) so the
+        next decision cycle can build a ``DecisionContext`` for the new agent.
+        The caller is responsible for adding the matching entity to
+        ``concordia_agents`` and the agent to the physics simulation.
+        """
+        agent_id = cfg["id"]
+        self._agent_cfg[agent_id] = cfg
 
     def _load_decision_prompt_template(self, template_path: str | None) -> Template:
         """Load the decision prompt template from disk.
@@ -1320,189 +1343,51 @@ class DecisionProcessor:
                 output_type=entity_lib.OutputType.FREE,
             )
 
-            # ===== INTELLIGENT PROMPT CACHING =====
-            # Check if we should call LLM or reuse cached decision
-            try:
-                received_messages = self.message_system.get_received_messages(agent_id)
-                messages_list = (
-                    [
-                        msg.get("message", str(msg)) if isinstance(msg, dict) else msg
-                        for msg in received_messages
-                    ]
-                    if received_messages
-                    else None
-                )
-            except Exception as e:
-                logger.debug(f"{agent_id}: Could not get messages: {e}")
-                messages_list = None
-
-            # Check cache to decide whether to call LLM
-            should_call_llm, cached_decision = self.prompt_cache.should_call_llm(
-                agent_id=agent_id,
-                observation=observation,
-                action_spec_text=prompt_text,
-                received_messages=messages_list,
+            # ── Decision production via pluggable engine ────────────────
+            # Assemble an engine-neutral DecisionContext and delegate to the
+            # injected engine (LLM by default, rule-based when configured).
+            # Everything below this block is engine-agnostic.
+            exit_options = self._build_exit_options(
+                agent_id, position, zone_id, offered_exit_ids
             )
-
-            llm_was_called = False  # Track whether LLM was called for decision record
-            repair_status = "ok"
-            decision_payload: dict[str, Any] | None = None
-
-            if not should_call_llm and cached_decision:
-                candidate_payload = self._extract_json_object(cached_decision)
-                if candidate_payload is not None:
-                    payload_errors = self._validate_decision_payload(
-                        candidate_payload,
-                        offered_actions_set,
-                        offered_wait_reasons_set,
-                        offered_exit_ids_set,
-                    )
-                    if not payload_errors:
-                        decision_payload = candidate_payload
-                        action = cached_decision
-                        repair_status = "cached"
-                        logger.info(
-                            f"{agent_id}: ✓ Prompt unchanged, reusing cached decision (saved LLM call)"
-                        )
-                        async with self._state_lock:
-                            self.llm_calls_skipped += 1
-
-                        existing_dest = self.agent_destinations.get(agent_id)
-                        agent_is_moving = (
-                            self.action_executor.agent_action.get(agent_id) == "moving"
-                            if hasattr(self.action_executor, "agent_action")
-                            else False
-                        )
-                        if existing_dest and agent_is_moving:
-                            logger.debug(
-                                f"{agent_id}: ✓ Short-circuit — already moving to '{existing_dest}', "
-                                f"skipping translation & execution"
-                            )
-                            return
-
-                if decision_payload is None:
-                    should_call_llm = True
-                    cached_decision = None
-                    logger.info(
-                        f"{agent_id}: cached decision invalid for current offered set — requesting fresh decision"
-                    )
-
-            if decision_payload is None:
-                if should_call_llm and self._min_redecision_interval_secs > 0:
-                    if "No significant new information." in observation:
-                        previous_llm_time = self._last_llm_decision_time.get(agent_id)
-                        if previous_llm_time is not None:
-                            elapsed = current_sim_time - previous_llm_time
-                            if elapsed < self._min_redecision_interval_secs:
-                                throttled_cached = self.prompt_cache.get_cached_decision(agent_id)
-                                if throttled_cached:
-                                    candidate_payload = self._extract_json_object(throttled_cached)
-                                    if candidate_payload is not None:
-                                        payload_errors = self._validate_decision_payload(
-                                            candidate_payload,
-                                            offered_actions_set,
-                                            offered_wait_reasons_set,
-                                            offered_exit_ids_set,
-                                        )
-                                        if not payload_errors:
-                                            decision_payload = candidate_payload
-                                            action = throttled_cached
-                                            repair_status = "cached"
-                                            logger.info(
-                                                f"{agent_id}: ✓ Reusing cached decision "
-                                                f"(redecision throttle {elapsed:.1f}s "
-                                                f"< {self._min_redecision_interval_secs:.1f}s)"
-                                            )
-                                            async with self._state_lock:
-                                                self.llm_calls_skipped += 1
-                                            should_call_llm = False
-
-                if decision_payload is None:
-                    with self.perf_timer.measure("agent_observe", is_parallel=True):
-                        agent.observe(observation)
-
-                    last_errors: list[str] = ["invalid response"]
-                    raw_action = ""
-                    attempts_used = 0
-
-                    for attempt_idx in range(3):
-                        attempts_used = attempt_idx + 1
-                        attempt_prompt = prompt_text
-                        if attempt_idx > 0:
-                            attempt_prompt = (
-                                prompt_text
-                                + "\n\nSYSTEM NOTE: Your previous output violated the schema: "
-                                + "; ".join(last_errors)
-                                + ". Return only valid JSON that satisfies all rules."
-                            )
-                        attempt_action_spec = entity_lib.ActionSpec(
-                            call_to_action=attempt_prompt,
-                            output_type=entity_lib.OutputType.FREE,
-                        )
-
-                        async with self._llm_semaphore:
-                            try:
-                                with self.perf_timer.measure("agent_act_llm", is_parallel=True):
-                                    llm_current_agent_id.set(agent_id)
-                                    llm_current_sim_time.set(current_sim_time)
-                                    if self._per_agent_timeout_secs is not None:
-                                        async with asyncio.timeout(self._per_agent_timeout_secs):
-                                            raw_action = await asyncio.to_thread(
-                                                agent.act, attempt_action_spec
-                                            )
-                                    else:
-                                        raw_action = await asyncio.to_thread(agent.act, attempt_action_spec)
-                            except asyncio.TimeoutError:
-                                timeout_secs = self._per_agent_timeout_secs
-                                logger.warning(
-                                    f"{agent_id}: decision timed out after {timeout_secs:.0f}s — "
-                                    "keeping existing waypoint"
-                                )
-                                return
-
-                        parsed = self._extract_json_object(raw_action)
-                        if parsed is None:
-                            last_errors = ["response was not valid JSON"]
-                            continue
-
-                        last_errors = self._validate_decision_payload(
-                            parsed,
-                            offered_actions_set,
-                            offered_wait_reasons_set,
-                            offered_exit_ids_set,
-                        )
-                        if not last_errors:
-                            decision_payload = parsed
-                            break
-
-                    if decision_payload is None:
-                        decision_payload = self._build_fallback_decision(
-                            agent_id,
-                            offered_actions_set,
-                            offered_wait_reasons_set,
-                            offered_exit_ids_set,
-                        )
-                        repair_status = "fallback"
-                    elif attempts_used == 1:
-                        repair_status = "ok"
-                    elif attempts_used == 2:
-                        repair_status = "repair_1"
-                    else:
-                        repair_status = "repair_2"
-
-                    action = self._decision_payload_to_json(decision_payload)
-                    self.prompt_cache.cache_decision(agent_id, action)
-                    llm_was_called = True
-                    self._last_llm_decision_time[agent_id] = current_sim_time
-
-                    async with self._state_lock:
-                        self.llm_calls_made += 1
-                        self.last_observations[agent_id] = observation
-                        self.last_actions[agent_id] = action
+            ctx = DecisionContext(
+                agent_id=agent_id,
+                position=position,
+                zone_id=zone_id,
+                goal=agent_goal,
+                observation=observation,
+                agent_cfg=cfg,
+                offered_actions=offered_actions,
+                offered_wait_reasons=offered_wait_reasons,
+                offered_exit_ids=offered_exit_ids,
+                exit_options=exit_options,
+                route_blocked=route_blocked,
+                cues=cues,
+                current_sim_time=current_sim_time,
+                offered_actions_set=offered_actions_set,
+                offered_wait_reasons_set=offered_wait_reasons_set,
+                offered_exit_ids_set=offered_exit_ids_set,
+                prompt_text=prompt_text,
+            )
+            result = await self._engine.decide(ctx)
+            if result.skip_downstream:
+                return
+            decision_payload = result.payload
+            action = result.action_json
+            repair_status = result.repair_status
+            llm_was_called = result.llm_was_called
 
             if decision_payload is None:
                 logger.warning(f"{agent_id}: no decision payload available, skipping")
                 return
+
+            # Honour the engine contract: an engine may return a validated
+            # payload without a serialized ``action_json`` (the LLM engine
+            # already has one; rule-based/other engines leave it None). The
+            # downstream JSON-parse and action translation both consume the
+            # string form, so serialize it here when the engine did not.
+            if action is None:
+                action = self._decision_payload_to_json(decision_payload)
 
             self._apply_goal_commitment_transition(agent_id, decision_payload, observation)
 
@@ -1598,6 +1483,279 @@ class DecisionProcessor:
 
         except Exception as e:
             logger.error(f"Error processing {agent_id}: {e}", exc_info=True)
+
+    async def _llm_produce_decision(self, ctx) -> DecisionResult:
+        """LLM-backed decision production (prompt cache + agent.act retry/repair).
+
+        Extracted verbatim from the former inline block of
+        ``_process_single_agent``; behaviour is unchanged.  Invoked through the
+        :class:`LLMDecisionEngine` seam.  Reads its inputs from *ctx* and returns
+        a :class:`DecisionResult`; the orchestrator owns everything downstream.
+        """
+        agent_id = ctx.agent_id
+        observation = ctx.observation
+        prompt_text = ctx.prompt_text
+        offered_actions_set = ctx.offered_actions_set
+        offered_wait_reasons_set = ctx.offered_wait_reasons_set
+        offered_exit_ids_set = ctx.offered_exit_ids_set
+        position = ctx.position
+        current_sim_time = ctx.current_sim_time
+        agent = self.concordia_agents[agent_id]
+        action = None
+        if True:
+            # ===== INTELLIGENT PROMPT CACHING =====
+            # Check if we should call LLM or reuse cached decision
+            try:
+                received_messages = self.message_system.get_received_messages(agent_id)
+                messages_list = (
+                    [
+                        msg.get("message", str(msg)) if isinstance(msg, dict) else msg
+                        for msg in received_messages
+                    ]
+                    if received_messages
+                    else None
+                )
+            except Exception as e:
+                logger.debug(f"{agent_id}: Could not get messages: {e}")
+                messages_list = None
+
+            # Check cache to decide whether to call LLM
+            should_call_llm, cached_decision = self.prompt_cache.should_call_llm(
+                agent_id=agent_id,
+                observation=observation,
+                action_spec_text=prompt_text,
+                received_messages=messages_list,
+            )
+
+            llm_was_called = False  # Track whether LLM was called for decision record
+            repair_status = "ok"
+            decision_payload: dict[str, Any] | None = None
+
+            if not should_call_llm and cached_decision:
+                candidate_payload = self._extract_json_object(cached_decision)
+                if candidate_payload is not None:
+                    payload_errors = self._validate_decision_payload(
+                        candidate_payload,
+                        offered_actions_set,
+                        offered_wait_reasons_set,
+                        offered_exit_ids_set,
+                    )
+                    if not payload_errors:
+                        decision_payload = candidate_payload
+                        action = cached_decision
+                        repair_status = "cached"
+                        logger.info(
+                            f"{agent_id}: ✓ Prompt unchanged, reusing cached decision (saved LLM call)"
+                        )
+                        async with self._state_lock:
+                            self.llm_calls_skipped += 1
+
+                        existing_dest = self.agent_destinations.get(agent_id)
+                        agent_is_moving = (
+                            self.action_executor.agent_action.get(agent_id) == "moving"
+                            if hasattr(self.action_executor, "agent_action")
+                            else False
+                        )
+                        if existing_dest and agent_is_moving:
+                            logger.debug(
+                                f"{agent_id}: ✓ Short-circuit — already moving to '{existing_dest}', "
+                                f"skipping translation & execution"
+                            )
+                            return DecisionResult(payload=None, skip_downstream=True)
+
+                if decision_payload is None:
+                    should_call_llm = True
+                    cached_decision = None
+                    logger.info(
+                        f"{agent_id}: cached decision invalid for current offered set — requesting fresh decision"
+                    )
+
+            if decision_payload is None:
+                if should_call_llm and self._min_redecision_interval_secs > 0:
+                    if "No significant new information." in observation:
+                        previous_llm_time = self._last_llm_decision_time.get(agent_id)
+                        if previous_llm_time is not None:
+                            elapsed = current_sim_time - previous_llm_time
+                            if elapsed < self._min_redecision_interval_secs:
+                                throttled_cached = self.prompt_cache.get_cached_decision(agent_id)
+                                if throttled_cached:
+                                    candidate_payload = self._extract_json_object(throttled_cached)
+                                    if candidate_payload is not None:
+                                        payload_errors = self._validate_decision_payload(
+                                            candidate_payload,
+                                            offered_actions_set,
+                                            offered_wait_reasons_set,
+                                            offered_exit_ids_set,
+                                        )
+                                        if not payload_errors:
+                                            decision_payload = candidate_payload
+                                            action = throttled_cached
+                                            repair_status = "cached"
+                                            logger.info(
+                                                f"{agent_id}: ✓ Reusing cached decision "
+                                                f"(redecision throttle {elapsed:.1f}s "
+                                                f"< {self._min_redecision_interval_secs:.1f}s)"
+                                            )
+                                            async with self._state_lock:
+                                                self.llm_calls_skipped += 1
+                                            should_call_llm = False
+
+                if decision_payload is None:
+                    with self.perf_timer.measure("agent_observe", is_parallel=True):
+                        agent.observe(observation)
+
+                    last_errors: list[str] = ["invalid response"]
+                    raw_action = ""
+                    attempts_used = 0
+
+                    for attempt_idx in range(3):
+                        attempts_used = attempt_idx + 1
+                        attempt_prompt = prompt_text
+                        if attempt_idx > 0:
+                            attempt_prompt = (
+                                prompt_text
+                                + "\n\nSYSTEM NOTE: Your previous output violated the schema: "
+                                + "; ".join(last_errors)
+                                + ". Return only valid JSON that satisfies all rules."
+                            )
+                        attempt_action_spec = entity_lib.ActionSpec(
+                            call_to_action=attempt_prompt,
+                            output_type=entity_lib.OutputType.FREE,
+                        )
+
+                        async with self._llm_semaphore:
+                            try:
+                                with self.perf_timer.measure("agent_act_llm", is_parallel=True):
+                                    llm_current_agent_id.set(agent_id)
+                                    llm_current_sim_time.set(current_sim_time)
+                                    if self._per_agent_timeout_secs is not None:
+                                        async with asyncio.timeout(self._per_agent_timeout_secs):
+                                            raw_action = await asyncio.to_thread(
+                                                agent.act, attempt_action_spec
+                                            )
+                                    else:
+                                        raw_action = await asyncio.to_thread(agent.act, attempt_action_spec)
+                            except asyncio.TimeoutError:
+                                timeout_secs = self._per_agent_timeout_secs
+                                logger.warning(
+                                    f"{agent_id}: decision timed out after {timeout_secs:.0f}s — "
+                                    "keeping existing waypoint"
+                                )
+                                return DecisionResult(payload=None, skip_downstream=True)
+
+                        parsed = self._extract_json_object(raw_action)
+                        if parsed is None:
+                            last_errors = ["response was not valid JSON"]
+                            continue
+
+                        last_errors = self._validate_decision_payload(
+                            parsed,
+                            offered_actions_set,
+                            offered_wait_reasons_set,
+                            offered_exit_ids_set,
+                        )
+                        if not last_errors:
+                            decision_payload = parsed
+                            break
+
+                    if decision_payload is None:
+                        decision_payload = self._build_fallback_decision(
+                            agent_id,
+                            offered_actions_set,
+                            offered_wait_reasons_set,
+                            offered_exit_ids_set,
+                        )
+                        repair_status = "fallback"
+                    elif attempts_used == 1:
+                        repair_status = "ok"
+                    elif attempts_used == 2:
+                        repair_status = "repair_1"
+                    else:
+                        repair_status = "repair_2"
+
+                    action = self._decision_payload_to_json(decision_payload)
+                    self.prompt_cache.cache_decision(agent_id, action)
+                    llm_was_called = True
+                    self._last_llm_decision_time[agent_id] = current_sim_time
+
+                    async with self._state_lock:
+                        self.llm_calls_made += 1
+                        self.last_observations[agent_id] = observation
+                        self.last_actions[agent_id] = action
+        if decision_payload is None:
+            return DecisionResult(payload=None)
+        return DecisionResult(
+            payload=decision_payload,
+            action_json=action,
+            llm_was_called=llm_was_called,
+            repair_status=repair_status,
+        )
+
+    def _build_exit_options(self, agent_id, position, zone_id, offered_exit_ids):
+        """Assemble structured routing signals for each offered exit.
+
+        Returns ``{exit_id -> ExitOption}`` carrying the three signals a
+        rule-based engine weighs — proximity (straight-line distance to the exit
+        coordinate), busyness (agents currently near that exit), and familiarity
+        (whether the exit is known to the agent given their knowledge profile and
+        zone).  The LLM engine ignores these numeric fields.
+        """
+        options: dict[str, ExitOption] = {}
+        registry = getattr(self.action_translator, "exit_registry", None)
+        cfg = self._agent_cfg.get(agent_id, {})
+        profile = cfg.get("knowledge_profile", "novice")
+        agent_level = str(cfg.get("level_id", "0"))
+
+        # Config-driven familiarity: exits this profile is expected to know in
+        # this zone (commuters additionally know their memorised commuter exits).
+        zone_exits = self._zone_known_exits.get(zone_id or "", {})
+        known_ids = set(zone_exits.get(profile, []))
+        if profile == "commuter":
+            known_ids |= set(zone_exits.get("commuter", []))
+
+        # Snapshot all agent positions once for the busyness count.
+        try:
+            all_positions = self.jps_sim.get_all_agent_positions() if self.jps_sim else {}
+        except Exception:
+            all_positions = {}
+        crowd_radius_sq = 5.0 ** 2
+
+        for exit_id in offered_exit_ids:
+            display = exit_id
+            try:
+                if registry is not None and hasattr(registry, "get_display_name"):
+                    display = registry.get_display_name(exit_id) or exit_id
+            except Exception:
+                display = exit_id
+
+            coords = None
+            try:
+                coords = self.action_translator._get_exit_coordinates(exit_id, agent_level)
+            except Exception:
+                coords = None
+
+            distance_m = None
+            crowd_count = 0
+            if coords is not None:
+                dx = position[0] - coords[0]
+                dy = position[1] - coords[1]
+                distance_m = (dx * dx + dy * dy) ** 0.5
+                for other_id, p in all_positions.items():
+                    if other_id == agent_id:
+                        continue
+                    if (p[0] - coords[0]) ** 2 + (p[1] - coords[1]) ** 2 <= crowd_radius_sq:
+                        crowd_count += 1
+
+            tags = tuple(self._exit_semantic_tags.get(exit_id, []))
+            options[exit_id] = ExitOption(
+                exit_id=exit_id,
+                display_name=display,
+                distance_m=distance_m,
+                crowd_count=crowd_count,
+                familiar=exit_id in known_ids,
+                semantic_tags=tags,
+            )
+        return options
 
     def _parse_json_response(self, response: str) -> dict[str, Any]:
         """Parse JSON response and expose assessment/action keys."""
