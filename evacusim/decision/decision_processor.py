@@ -199,6 +199,12 @@ class DecisionProcessor:
         self._goal_semantic_policies: list[dict[str, Any]] = station_layout.get(
             "goal_semantic_policies", []
         )
+        # Maps a platform zone (e.g. ``platform_3``) to the DOWN escalator(s) that
+        # reach it from the concourse.  Used to route a boarder to the escalator
+        # serving its target platform rather than the merely-nearest one.
+        self._platform_down_exits: dict[str, list[str]] = station_layout.get(
+            "platform_down_exits", {}
+        )
 
         # Pluggable decision engine (LLM by default). The engine turns a
         # DecisionContext into a DecisionResult; everything downstream is
@@ -586,6 +592,30 @@ class DecisionProcessor:
         """
         g = (goal or "").lower()
         return any(k in g for k in ("train", "platform", "board"))
+
+    def _preferred_connectors_for_target(
+        self, target: Any, offered_exit_ids: list[str]
+    ) -> tuple[str, ...]:
+        """Down-escalator(s) serving the agent's target platform, if offered.
+
+        ``target`` is the agent's journey destination, e.g. ``train_platform_3``
+        (boarders).  A ``train_platform_N`` / ``platform_N`` target is mapped to
+        the DOWN escalator(s) that reach ``platform_N`` via ``platform_down_exits``
+        in config, so the boarder descends via the escalator bank serving its
+        platform rather than the merely-nearest one.  Only ids actually in
+        *offered_exit_ids* are returned; an empty result means the caller should
+        fall back to generic tag-based routing.
+        """
+        if not self._platform_down_exits:
+            return ()
+        t = str(target or "").strip().lower()
+        if not t:
+            return ()
+        # Normalise "train_platform_3" -> "platform_3"; leave "platform_3" as-is.
+        platform_zone = t[len("train_") :] if t.startswith("train_platform_") else t
+        connectors = self._platform_down_exits.get(platform_zone, [])
+        offered = set(offered_exit_ids)
+        return tuple(c for c in connectors if c in offered)
 
     def clear_goal_for_redecision(self, agent_id: str) -> None:
         """Clear mutable goal state while preserving evacuation commitment."""
@@ -1389,6 +1419,14 @@ class DecisionProcessor:
                     for t in goal_policy.get("avoid_exit_tags", [])
                     if str(t).strip()
                 )
+            # Resolve the agent's concrete destination (its target platform) to
+            # the down-escalator that serves it, so a boarder descends via the
+            # correct escalator bank rather than the nearest one.  Only ids
+            # offered this cycle are kept, so a blocked connector falls back to
+            # the tag-based choice above.
+            preferred_exit_ids = self._preferred_connectors_for_target(
+                cfg.get("target"), offered_exit_ids
+            )
             ctx = DecisionContext(
                 agent_id=agent_id,
                 position=position,
@@ -1408,6 +1446,7 @@ class DecisionProcessor:
                 offered_exit_ids_set=offered_exit_ids_set,
                 prefer_exit_tags=prefer_exit_tags,
                 avoid_exit_tags=avoid_exit_tags,
+                preferred_exit_ids=preferred_exit_ids,
                 prompt_text=prompt_text,
             )
             result = await self._engine.decide(ctx)
