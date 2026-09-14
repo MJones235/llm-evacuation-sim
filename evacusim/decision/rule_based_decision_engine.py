@@ -100,6 +100,22 @@ class RuleBasedDecisionEngine:
                     reason="Boarding the waiting train: " + why,
                     ctx=ctx,
                 )
+            # Priority (a.5): head for the connector that serves THIS agent's
+            # target platform (e.g. the down-escalator for platform 3), when the
+            # processor resolved one and it is offered.  This routes a boarder to
+            # the correct escalator bank rather than the merely-nearest platform
+            # connector.
+            preferred_ids = {e for e in (ctx.preferred_exit_ids or ()) if e}
+            if "evacuate" in actions and preferred_ids:
+                targeted = [o for o in candidates if o.exit_id in preferred_ids]
+                if targeted:
+                    best, why = self._pick_best_exit(targeted)
+                    return self._move_payload(
+                        action="evacuate",
+                        exit_id=best.exit_id,
+                        reason="Advancing toward the target platform: " + why,
+                        ctx=ctx,
+                    )
             include = (prefer | self._DEFAULT_TRAIN_PREFER_TAGS) if prefer else self._DEFAULT_TRAIN_PREFER_TAGS
             preferred = self._filter_by_tags(candidates, include)
             if "evacuate" in actions and preferred:

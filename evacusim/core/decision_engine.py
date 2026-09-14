@@ -90,6 +90,16 @@ class DecisionContext:
     prefer_exit_tags: tuple[str, ...] = ()
     avoid_exit_tags: tuple[str, ...] = ()
 
+    # Specific exit ids the agent should route toward first — ahead of the
+    # generic ``prefer_exit_tags`` — because they lead to this agent's concrete
+    # destination.  For a boarder this is the down-escalator serving its target
+    # platform (e.g. a ``train_platform_3`` boarder gets ``escalator_a_down``),
+    # resolved from ``platform_down_exits`` in config.  Only ids actually offered
+    # this cycle are surfaced, so a blocked/unavailable connector falls back to
+    # the tag-based choice.  Structured-engine only; the LLM engine routes to a
+    # target platform through ``action_translator`` instead.
+    preferred_exit_ids: tuple[str, ...] = ()
+
     # LLM-only extras (ignored by non-LLM engines).
     prompt_text: str | None = None
     received_messages: list[str] | None = None
