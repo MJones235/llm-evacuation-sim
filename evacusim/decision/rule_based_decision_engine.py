@@ -68,6 +68,8 @@ class RuleBasedDecisionEngine:
     def _decide_payload(self, ctx: DecisionContext) -> dict[str, Any]:
         actions = ctx.offered_actions_set
         candidates = [ctx.exit_options[e] for e in ctx.offered_exit_ids if e in ctx.exit_options]
+        prefer = {t for t in (ctx.prefer_exit_tags or ()) if t}
+        avoid = {t for t in (ctx.avoid_exit_tags or ()) if t}
 
         # 1. Board a train when that is offered and the goal is train/platform-oriented.
         if "leave_by_train" in actions and self._goal_wants_train(ctx.goal):
@@ -78,9 +80,44 @@ class RuleBasedDecisionEngine:
                 ctx=ctx,
             )
 
-        # 2. Otherwise leave via the best-scoring evacuation exit.
+        # 2. Goal-directed movement toward a train/platform goal.
+        #    Priority (a): if a train is actually boardable now — an active
+        #    ``to_train`` exit is offered (the event layer only exposes a
+        #    train-platform exit while a train dwells) — board it immediately.
+        #    Priority (b): otherwise advance ONLY via a platform-ward connector
+        #    (e.g. a down-escalator tagged ``to_platform``). When neither is
+        #    reachable — e.g. already on the platform with no train dwelling —
+        #    WAIT for a train rather than leaving via a street or up exit. This
+        #    is what makes a boarder descend the concourse, hold on the platform,
+        #    and board the next available train.
+        if self._goal_wants_train(ctx.goal):
+            boardable = self._filter_by_tags(candidates, {"to_train"})
+            if "evacuate" in actions and boardable:
+                best, why = self._pick_best_exit(boardable)
+                return self._move_payload(
+                    action="evacuate",
+                    exit_id=best.exit_id,
+                    reason="Boarding the waiting train: " + why,
+                    ctx=ctx,
+                )
+            include = (prefer | self._DEFAULT_TRAIN_PREFER_TAGS) if prefer else self._DEFAULT_TRAIN_PREFER_TAGS
+            preferred = self._filter_by_tags(candidates, include)
+            if "evacuate" in actions and preferred:
+                best, why = self._pick_best_exit(preferred)
+                return self._move_payload(
+                    action="evacuate",
+                    exit_id=best.exit_id,
+                    reason="Advancing toward the platform: " + why,
+                    ctx=ctx,
+                )
+            if "wait" in actions:
+                return self._wait_payload(ctx, prefer="awaiting_information")
+            # No wait offered (unusual) — fall through to the generic handling.
+
+        # 3. Otherwise leave via the best-scoring exit, honouring avoid/prefer tags.
         if "evacuate" in actions and candidates:
-            best, why = self._pick_best_exit(candidates)
+            pool = self._apply_tag_preferences(candidates, prefer, avoid)
+            best, why = self._pick_best_exit(pool)
             return self._move_payload(
                 action="evacuate",
                 exit_id=best.exit_id,
@@ -117,6 +154,40 @@ class RuleBasedDecisionEngine:
     # ------------------------------------------------------------------ #
     # Scoring
     # ------------------------------------------------------------------ #
+    # Semantic tags a train/platform goal routes toward when the config supplies
+    # no explicit ``prefer_exit_tags`` policy. Deliberately excludes
+    # ``vertical_connector`` (which also tags up-escalators) so a boarder on the
+    # platform is not treated as "advancing" when it ascends to the concourse.
+    _DEFAULT_TRAIN_PREFER_TAGS = frozenset({"to_platform", "to_train"})
+
+    @staticmethod
+    def _filter_by_tags(
+        options: list[ExitOption], include: "frozenset[str] | set[str]"
+    ) -> list[ExitOption]:
+        """Options carrying at least one of the ``include`` semantic tags."""
+        inc = set(include)
+        return [o for o in options if set(o.semantic_tags) & inc]
+
+    @staticmethod
+    def _apply_tag_preferences(
+        options: list[ExitOption], prefer: set[str], avoid: set[str]
+    ) -> list[ExitOption]:
+        """Narrow ``options`` by goal policy: drop avoided tags, then keep preferred.
+
+        Each narrowing is applied only when it leaves at least one option, so a
+        policy never strands an agent with an empty candidate set.
+        """
+        pool = options
+        if avoid:
+            non_avoid = [o for o in pool if not (set(o.semantic_tags) & avoid)]
+            if non_avoid:
+                pool = non_avoid
+        if prefer:
+            preferred = [o for o in pool if set(o.semantic_tags) & prefer]
+            if preferred:
+                pool = preferred
+        return pool
+
     def _pick_best_exit(self, options: list[ExitOption]) -> tuple[ExitOption, str]:
         """Return (best_exit, explanation) by weighted proximity/busyness/familiarity."""
         prox_raw = [

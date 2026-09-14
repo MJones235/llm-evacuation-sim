@@ -79,6 +79,17 @@ class DecisionContext:
     offered_wait_reasons_set: set[str] = field(default_factory=set)
     offered_exit_ids_set: set[str] = field(default_factory=set)
 
+    # Goal-directed routing hints, resolved from ``goal_semantic_policies`` for
+    # this agent's (goal, zone).  ``prefer_exit_tags`` are semantic tags the
+    # agent should route toward (e.g. ``to_platform`` for a boarder); it should
+    # advance only via a preferred exit and otherwise wait, rather than leave via
+    # a non-preferred one.  ``avoid_exit_tags`` are tags to route away from
+    # (e.g. ``to_platform`` for someone leaving the station).  Empty when no
+    # policy matches.  Structured-engine only; the LLM engine ignores them (the
+    # same guidance reaches the LLM through the prompt text).
+    prefer_exit_tags: tuple[str, ...] = ()
+    avoid_exit_tags: tuple[str, ...] = ()
+
     # LLM-only extras (ignored by non-LLM engines).
     prompt_text: str | None = None
     received_messages: list[str] | None = None

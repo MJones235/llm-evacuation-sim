@@ -34,6 +34,12 @@ except ImportError:
 from evacusim.visualization.video_generation_helper import RoleColourMap
 
 
+def _fmt_clock(seconds: float) -> str:
+    """Format sim time (seconds since midnight, t=0) as a HH:MM:SS clock."""
+    s = int(seconds) % 86400
+    return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+
 class SpatialConcordiaViewer:
     """Real-time spatial viewer for Concordia simulation."""
 
@@ -75,7 +81,7 @@ class SpatialConcordiaViewer:
         )
 
         self.title_text = self.fig.suptitle(
-            "Concordia Station Evacuation - Multi-Level View | Time: 0.0s", fontsize=14
+            "Concordia Station Evacuation - Multi-Level View | Time: 00:00:00", fontsize=14
         )
         self.current_time = 0.0
 
@@ -382,7 +388,7 @@ class SpatialConcordiaViewer:
 
             # Update title with time
             self.title_text.set_text(
-                f"Concordia Station Evacuation - Real-Time View | Time: {self.current_time:.1f}s"
+                f"Concordia Station Evacuation - Real-Time View | Time: {_fmt_clock(self.current_time)}"
             )
 
             # Store the full data for use in other methods

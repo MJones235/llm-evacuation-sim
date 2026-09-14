@@ -217,6 +217,14 @@ class ConcordiaJuPedSimulation:
         else:
             self.agent_assigned_exits.pop(agent_id, None)
 
+        # A level that receives an agent is, by definition, no longer complete.
+        # step() latches is_complete the first time a level is empty and then
+        # short-circuits forever; without this reset a runtime-spawned agent
+        # (calibration) inserted into an already-emptied level would be frozen —
+        # step() would never iterate it.  Clearing the latch on insertion lets a
+        # re-populated level resume stepping.
+        self.is_complete = False
+
         logger.info(
             f"Added agent {agent_id} at {position} "
             f"with speed {walking_speed:.2f} m/s (JPS ID: {jps_id}, "

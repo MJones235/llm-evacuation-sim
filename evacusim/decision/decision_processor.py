@@ -560,12 +560,32 @@ class DecisionProcessor:
 
         action = str(decision_payload.get("action", ""))
         if action == "evacuate":
+            # A boarder heading to a platform reaches it via the ``evacuate``
+            # verb (the only "go to this exit" action), but descending to board
+            # a train is in-station movement, NOT a decision to leave. Never let
+            # it overwrite a train/platform goal with the evacuation goal —
+            # otherwise the next re-decision would route the boarder back out to
+            # a street exit. Emergency-evacuation agents never carry a train
+            # goal, so their commitment behaviour is unchanged.
+            current_goal = str(self.agent_goals.get(agent_id, "") or "")
+            if self._goal_is_train_oriented(current_goal):
+                return
             if agent_id not in self._evacuation_committed_agents:
                 logger.info(
                     f"{agent_id}: evacuation decision committed as persistent goal"
                 )
             self._evacuation_committed_agents.add(agent_id)
             self.agent_goals[agent_id] = self._evacuation_goal_text()
+
+    @staticmethod
+    def _goal_is_train_oriented(goal: str) -> bool:
+        """True when the goal is to reach a platform / board a train.
+
+        Mirrors the rule engine's train-goal detection so that goal-commitment
+        and routing agree on which agents are boarders.
+        """
+        g = (goal or "").lower()
+        return any(k in g for k in ("train", "platform", "board"))
 
     def clear_goal_for_redecision(self, agent_id: str) -> None:
         """Clear mutable goal state while preserving evacuation commitment."""
@@ -1350,6 +1370,25 @@ class DecisionProcessor:
             exit_options = self._build_exit_options(
                 agent_id, position, zone_id, offered_exit_ids
             )
+            # Resolve goal-directed routing hints (prefer/avoid semantic tags)
+            # from the configured goal→exit policies for this (goal, zone). The
+            # structured engine uses these to route a boarder toward the
+            # platform (and wait rather than leave via a street exit); the LLM
+            # engine ignores them (it gets the same guidance in prompt text).
+            goal_policy = self._get_goal_semantic_policy(zone_id, agent_goal)
+            prefer_exit_tags: tuple[str, ...] = ()
+            avoid_exit_tags: tuple[str, ...] = ()
+            if goal_policy:
+                prefer_exit_tags = tuple(
+                    str(t).strip()
+                    for t in goal_policy.get("prefer_exit_tags", [])
+                    if str(t).strip()
+                )
+                avoid_exit_tags = tuple(
+                    str(t).strip()
+                    for t in goal_policy.get("avoid_exit_tags", [])
+                    if str(t).strip()
+                )
             ctx = DecisionContext(
                 agent_id=agent_id,
                 position=position,
@@ -1367,6 +1406,8 @@ class DecisionProcessor:
                 offered_actions_set=offered_actions_set,
                 offered_wait_reasons_set=offered_wait_reasons_set,
                 offered_exit_ids_set=offered_exit_ids_set,
+                prefer_exit_tags=prefer_exit_tags,
+                avoid_exit_tags=avoid_exit_tags,
                 prompt_text=prompt_text,
             )
             result = await self._engine.decide(ctx)
