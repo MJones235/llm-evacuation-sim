@@ -36,7 +36,7 @@ pip install -e .
 Or from a study repo:
 
 ```bash
-pip install git+https://github.com/your-org/evacusim.git
+pip install git+https://github.com/MJones235/llm-evacuation-sim.git
 ```
 
 ## Usage
