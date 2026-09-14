@@ -22,6 +22,17 @@ logger = get_logger(__name__)
 matplotlib.use("Agg")  # Non-interactive backend for video generation
 
 
+def _fmt_clock(seconds: float) -> str:
+    """Format a sim-time offset (seconds since midnight) as a HH:MM:SS clock.
+
+    The simulation clock starts at midnight (t=0), so the elapsed sim time is
+    already the time of day.  Values >= 24 h wrap via modulo so a slightly
+    over-length run still reads as a clock.
+    """
+    s = int(seconds) % 86400
+    return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+
 class VideoGenerator:
     """Generates MP4 videos from simulation output data."""
 
@@ -230,7 +241,7 @@ class VideoGenerator:
             1, 2, figsize=(16, 8), gridspec_kw={"width_ratios": [1, 1]}
         )
 
-        title_text = fig.suptitle("Monument Station Evacuation | Time: 0.0s", fontsize=14)
+        title_text = fig.suptitle("Monument Station Evacuation | Time: 00:00:00", fontsize=14)
 
         # Setup Level 0 axes
         ax_level_0.set_title("Level 0 - Concourse", fontsize=12, fontweight="bold")
@@ -532,7 +543,7 @@ class VideoGenerator:
 
         # Update title
         time_val = frame_data["time"]
-        title_text.set_text(f"Monument Station Evacuation | Time: {time_val:.1f}s")
+        title_text.set_text(f"Monument Station Evacuation | Time: {_fmt_clock(time_val)}")
 
         # Draw blocked exits (if multi-level geometry, show on appropriate level)
         blocked_exits = frame_data.get("blocked_exits", [])
