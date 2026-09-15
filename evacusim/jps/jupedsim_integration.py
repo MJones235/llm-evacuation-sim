@@ -504,7 +504,15 @@ class ConcordiaJuPedSimulation:
         # For each exited agent, find which exit they likely used
         for agent_id in exited_agent_ids:
             assigned_exit = self.agent_assigned_exits.get(agent_id)
-            if assigned_exit in self.exit_manager.exit_coordinates:
+            # Train stages exist only for the dwell window and may already have
+            # been removed from exit_coordinates when JuPedSim processes the
+            # passenger removal. Preserve the explicit boarding assignment;
+            # otherwise nearest-exit fallback misclassifies the boarded agent as
+            # using an escalator and the multi-level wrapper transfers them up.
+            if assigned_exit and (
+                assigned_exit in self.exit_manager.exit_coordinates
+                or assigned_exit.startswith("train_platform_")
+            ):
                 exited[agent_id] = assigned_exit
                 logger.info(f"Agent {agent_id} exited through assigned exit {assigned_exit}")
                 self.agent_tracker.remove_agent(agent_id)

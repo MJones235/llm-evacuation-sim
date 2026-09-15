@@ -15,6 +15,7 @@ This module coordinates the cognitive layer (Concordia) decision-making process.
 import asyncio
 import hashlib
 import json
+import random
 import re
 from pathlib import Path
 from string import Template
@@ -22,6 +23,7 @@ from typing import Any
 
 from concordia.typing import entity as entity_lib
 from shapely.geometry import Point
+from shapely.ops import nearest_points
 
 from evacusim.utils.logger import get_logger
 from evacusim.decision.action_utils import extract_exit_name
@@ -616,6 +618,116 @@ class DecisionProcessor:
         connectors = self._platform_down_exits.get(platform_zone, [])
         offered = set(offered_exit_ids)
         return tuple(c for c in connectors if c in offered)
+
+    def _platform_approach_waypoint(
+        self, agent_id: str, position: tuple[float, float]
+    ) -> tuple[float, float] | None:
+        """Stable per-agent random point inside the assigned platform."""
+        target = str(self._agent_cfg.get(agent_id, {}).get("target", "")).lower()
+        platform_zone = target[len("train_") :] if target.startswith("train_platform_") else target
+        if not re.fullmatch(r"platform_[1-4]", platform_zone):
+            return None
+
+        polygon = self.action_translator.zones_polygons.get(platform_zone)
+        if polygon is None or polygon.is_empty:
+            return None
+        safe_polygon = polygon.buffer(-0.3)
+        if safe_polygon.is_empty:
+            safe_polygon = polygon
+
+        level_id = self.jps_sim.get_agent_level(agent_id)
+        level_sim = getattr(self.jps_sim, "simulations", {}).get(level_id)
+        combined = getattr(getattr(level_sim, "geometry_manager", None), "_combined_geometry", None)
+        if combined is not None and not combined.is_empty:
+            accessible = safe_polygon.intersection(combined.buffer(-0.05))
+            if not accessible.is_empty:
+                safe_polygon = accessible
+
+        seed_bytes = hashlib.sha256(f"{agent_id}:{platform_zone}".encode()).digest()[:8]
+        rng = random.Random(int.from_bytes(seed_bytes, "big"))
+        min_x, min_y, max_x, max_y = safe_polygon.bounds
+        for _ in range(500):
+            candidate = Point(rng.uniform(min_x, max_x), rng.uniform(min_y, max_y))
+            if (
+                safe_polygon.contains(candidate)
+                and candidate.distance(Point(position)) <= 30.0
+            ):
+                return (float(candidate.x), float(candidate.y))
+
+        waypoint = nearest_points(Point(position), safe_polygon)[1]
+        return (float(waypoint.x), float(waypoint.y))
+
+    def _configured_street_exit(self, agent_id: str) -> str | None:
+        """Configured final exit for an alighter, when it is a known street exit."""
+        target = str(self._agent_cfg.get(agent_id, {}).get("target", "")).strip().lower()
+        street_exits = set(self.station_layout.get("street_exits", ()))
+        return target if target in street_exits else None
+
+    def _defer_for_post_transfer_route(
+        self, agent_id: str, position: tuple[float, float]
+    ) -> bool:
+        """Advance local-egress and assigned-platform waypoints without stopping."""
+        exit_destinations = getattr(self.jps_sim, "transfer_exit_destinations", {})
+        if agent_id in exit_destinations:
+            return True
+
+        platform_waypoints = getattr(self.jps_sim, "transfer_platform_waypoints", {})
+        if agent_id in platform_waypoints:
+            waypoint = platform_waypoints[agent_id]
+            distance = ((position[0] - waypoint[0]) ** 2 + (position[1] - waypoint[1]) ** 2) ** 0.5
+            if distance > 2.0:
+                self._deferred_escalator_agents.add(agent_id)
+                return True
+            del platform_waypoints[agent_id]
+            logger.debug(f"{agent_id}: reached assigned platform — decision now permitted")
+            return False
+
+        escape_waypoints = getattr(self.jps_sim, "transfer_escape_waypoints", {})
+        if agent_id not in escape_waypoints:
+            return False
+
+        # Known journeys do not need to stop at the shared egress waypoint.
+        # Assign their final post-transfer route immediately from the landing;
+        # JuPedSim will naturally carry them through the escalator corridor.
+        platform_waypoint = self._platform_approach_waypoint(agent_id, position)
+        if platform_waypoint is not None:
+            del escape_waypoints[agent_id]
+            self.jps_sim.set_agent_target(agent_id, platform_waypoint)
+            platform_waypoints[agent_id] = platform_waypoint
+            self._deferred_escalator_agents.add(agent_id)
+            logger.debug(
+                f"{agent_id}: transferred — continuing directly to assigned platform "
+                f"at {platform_waypoint}"
+            )
+            return True
+
+        street_exit = self._configured_street_exit(agent_id)
+        if street_exit is not None:
+            del escape_waypoints[agent_id]
+            self.jps_sim.set_agent_destination_exit(agent_id, street_exit)
+            self.agent_destinations[agent_id] = street_exit
+            exit_destinations[agent_id] = street_exit
+            logger.debug(
+                f"{agent_id}: transferred — continuing directly to street exit "
+                f"{street_exit}"
+            )
+            return True
+
+        # Unknown journeys retain the local egress waypoint so they at least
+        # clear the escalator before asking the decision engine what to do next.
+        waypoint = escape_waypoints[agent_id]
+        distance = ((position[0] - waypoint[0]) ** 2 + (position[1] - waypoint[1]) ** 2) ** 0.5
+        if distance > 2.0:
+            self._deferred_escalator_agents.add(agent_id)
+            logger.debug(
+                f"{agent_id}: en route to post-transfer waypoint "
+                f"({distance:.1f}m away) — deferring decision"
+            )
+            return True
+
+        del escape_waypoints[agent_id]
+        logger.debug(f"{agent_id}: reached post-transfer waypoint — decision now permitted")
+        return False
 
     def clear_goal_for_redecision(self, agent_id: str) -> None:
         """Clear mutable goal state while preserving evacuation commitment."""
@@ -1229,26 +1341,10 @@ class DecisionProcessor:
                 logger.debug(f"{agent_id}: No position found, likely exited")
                 return
 
-            # Post-transfer escape waypoint: defer until the agent has physically
-            # walked to the random waypoint assigned after a level transfer.
-            # This ensures agents clear the escalator arrival area and do not
-            # stop and block the mouth before making their real decision.
-            _escape_wps = getattr(self.jps_sim, "transfer_escape_waypoints", {})
-            if agent_id in _escape_wps:
-                _ewp = _escape_wps[agent_id]
-                _dist = ((position[0] - _ewp[0]) ** 2 + (position[1] - _ewp[1]) ** 2) ** 0.5
-                if _dist > 2.0:
-                    self._deferred_escalator_agents.add(agent_id)
-                    logger.debug(
-                        f"{agent_id}: en route to post-transfer waypoint "
-                        f"({_dist:.1f}m away) — deferring decision"
-                    )
-                    return
-                else:
-                    del _escape_wps[agent_id]
-                    logger.debug(
-                        f"{agent_id}: reached post-transfer waypoint — decision now permitted"
-                    )
+            # Keep transferred boarders moving through two physical stages:
+            # clear the escalator locally, then enter their assigned platform.
+            if self._defer_for_post_transfer_route(agent_id, position):
+                return
 
             # While traversing escalator geometry (departure side), keep current
             # movement and defer until the agent leaves that area.

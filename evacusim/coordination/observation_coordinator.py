@@ -88,12 +88,19 @@ class ObservationCoordinator:
             known = self._agent_known_blocked.setdefault(agent_id, set())
             known.update(blocked_exits)
 
-    def generate_all_observations(self, current_sim_time: float) -> dict[str, str]:
+    def generate_all_observations(
+        self,
+        current_sim_time: float,
+        agent_ids: list[str] | set[str] | None = None,
+    ) -> dict[str, str]:
         """
-        Generate observations for all agents based on simulation state.
+        Generate observations for all or a selected subset of agents.
 
         Args:
             current_sim_time: Current simulation time in seconds
+            agent_ids: Optional IDs that will actually make decisions this cycle.
+                Nearby-agent state is still computed globally so selected agents
+                retain full awareness of surrounding pedestrians.
 
         Returns:
             Dict of agent_id -> observation string
@@ -122,7 +129,10 @@ class ObservationCoordinator:
         else:
             bulk_nearby = None  # Fallback: per-agent queries
 
-        for agent_id in self.concordia_agents.keys():
+        candidates = agent_ids if agent_ids is not None else self.concordia_agents.keys()
+        for agent_id in candidates:
+            if agent_id not in self.concordia_agents:
+                continue
             # Skip exited agents
             if agent_id in self.exited_agents:
                 continue

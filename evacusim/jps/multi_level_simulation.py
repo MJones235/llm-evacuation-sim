@@ -107,11 +107,17 @@ class MultiLevelJuPedSimulation:
         self._transfer_cooldown_steps: int = 100
         self._last_transfer_step: dict[str, int] = {}  # agent_id -> step number
 
-        # Post-transfer escape waypoints: the random target assigned to each
-        # agent after level transfer so they walk clear of the escalator mouth
-        # before the LLM fires. Decision processor reads this to defer prompts
-        # until the agent is within arrival_waypoint_reached_m of the target.
+        # Post-transfer escape waypoints: the local escalator egress target
+        # assigned after a transfer so agents clear the landing without being
+        # sent across the destination level. The decision processor defers
+        # prompts until the agent reaches this target.
         self.transfer_escape_waypoints: dict[str, tuple[float, float]] = {}
+        # Boarders continue from the local egress to their assigned platform
+        # before the decision engine is allowed to choose "wait for train".
+        self.transfer_platform_waypoints: dict[str, tuple[float, float]] = {}
+        # Alighters continue from the local egress to their configured street
+        # exit without pausing for another decision at the escalator mouth.
+        self.transfer_exit_destinations: dict[str, str] = {}
 
         # Exits currently blocked by scenario events.
         # Used by corridor-barrier enforcement so agents cannot enter blocked
@@ -689,25 +695,22 @@ class MultiLevelJuPedSimulation:
                 f"through {exit_name} at {spawn_pos}"
             )
 
-            # Give the agent a random temporary destination that is well clear of
-            # all escalator zones. JuPedSim paths through the corridor naturally;
-            # the LLM decision (queued immediately via consume_recently_transferred_agents)
-            # fires during transit and replaces this waypoint with the agent's real choice.
-            landing_origin = (float(edge.to_spawn_point[0]), float(edge.to_spawn_point[1]))
-            random_wp = self._pick_random_level_waypoint(
-                level_id=target_level,
-                away_from=landing_origin,
+            # Follow the escalator's explicit local egress direction. A random
+            # level-wide waypoint can send a passenger toward another platform
+            # bank before their target-platform routing resumes.
+            egress_wp = (
+                float(edge.to_egress_target[0]),
+                float(edge.to_egress_target[1]),
             )
-            if random_wp is not None:
-                try:
-                    self.simulations[target_level].set_agent_target(agent_id, random_wp)
-                    self.transfer_escape_waypoints[agent_id] = random_wp
-                    logger.debug(
-                        f"[TRANSFER] {agent_id} → escape waypoint {random_wp} "
-                        f"on level {target_level} (LLM deferred until reached)"
-                    )
-                except Exception as e:
-                    logger.debug(f"Could not set transfer waypoint for {agent_id}: {e}")
+            try:
+                self.simulations[target_level].set_agent_target(agent_id, egress_wp)
+                self.transfer_escape_waypoints[agent_id] = egress_wp
+                logger.debug(
+                    f"[TRANSFER] {agent_id} → local egress waypoint {egress_wp} "
+                    f"on level {target_level} (decision deferred until reached)"
+                )
+            except Exception as e:
+                logger.debug(f"Could not set transfer waypoint for {agent_id}: {e}")
 
         except Exception as e:
             logger.error(f"Failed to transfer agent {agent_id} to level {target_level}: {e}")

@@ -951,12 +951,14 @@ class HybridSimulationRunner:
                                     a for a in current_group if a not in self.exited_agents
                                 ]
 
-                            # Generate observations for all agents (even those not
-                            # deciding this cycle — their state may be read by others).
+                            # Format observations only for agents that will decide.
+                            # Nearby-agent lookup remains global, so these agents
+                            # still perceive non-deciding people around them.
                             with self.perf_timer.measure("generate_observations"):
                                 observations = (
                                     self.observation_coordinator.generate_all_observations(
-                                        self.current_sim_time
+                                        self.current_sim_time,
+                                        agent_ids=current_group,
                                     )
                                 )
                             # Process the current group's decisions in parallel
@@ -967,24 +969,12 @@ class HybridSimulationRunner:
                                     agent_ids=current_group,
                                 )
 
-                                # Agents can be intentionally deferred while still
-                                # inside escalator departure geometry. Re-queue
-                                # them for a targeted immediate cycle so they are
-                                # prompted as soon as they clear the escalator mouth.
-                                deferred_transfer_agents = set()
-                                if hasattr(self.decision_processor, "consume_deferred_escalator_agents"):
-                                    deferred_transfer_agents = {
-                                        a
-                                        for a in self.decision_processor.consume_deferred_escalator_agents()
-                                        if a not in self.exited_agents
-                                    }
-                                if deferred_transfer_agents:
-                                    self._pending_immediate_decisions.update(deferred_transfer_agents)
-                                    logger.debug(
-                                        f"Re-queued {len(deferred_transfer_agents)} escalator-deferred "
-                                        f"agent(s) for immediate follow-up decision: "
-                                        f"{deferred_transfer_agents}"
-                                    )
+                                # Deferred transfer agents already have an active
+                                # JuPedSim route. Reconsider them on the normal
+                                # cadence or an event override instead of polling
+                                # their progress through the full decision pipeline
+                                # every physics step.
+                                self.decision_processor.consume_deferred_escalator_agents()
 
                                 # Preserve global cadence on targeted immediate
                                 # cycles; only update last_decision_time for
