@@ -41,6 +41,10 @@ class MultiLevelJuPedSimulation:
         level_arrival_waypoints: dict[str, tuple[float, float]] | None = None,
         transfer_random_waypoint_min_distance_m: float = 10.0,
         initially_blocked_exits: set[str] | None = None,
+        escalator_admission_rate_per_sec: float = 1.0,
+        escalator_admission_burst: float = 2.0,
+        escalator_zone_occupancy_ceiling: int = 3,
+        escalator_reentry_backoff_steps: int = 60,
     ):
         """
         Initialize multi-level simulation.
@@ -59,6 +63,19 @@ class MultiLevelJuPedSimulation:
             initially_blocked_exits: Exits that are blocked from simulation start.
                 Their corridor geometry and exit stages are omitted so agents
                 physically cannot enter them.
+            escalator_admission_rate_per_sec: Max sustained rate at which agents
+                may be routed onto a single escalator exit, modelling single-lane
+                boarding throughput and preventing more agents from committing to
+                an escalator than its landing zone can absorb.
+            escalator_admission_burst: Token-bucket burst capacity for escalator
+                admission (see escalator_admission_rate_per_sec).
+            escalator_zone_occupancy_ceiling: Hard cap on agents already present
+                in an escalator's landing zone before further admissions are
+                denied outright, regardless of remaining rate-limit tokens.
+            escalator_reentry_backoff_steps: Steps an agent must wait after a
+                failed transfer before it can be automatically re-routed back
+                onto the same escalator, giving its forced re-decision time to
+                take effect instead of being shoved straight back into the jam.
         """
         self.dt = dt
         self.exit_radius = exit_radius
@@ -106,6 +123,9 @@ class MultiLevelJuPedSimulation:
         # arrival zone before a return trip could be triggered accidentally.
         self._transfer_cooldown_steps: int = 100
         self._last_transfer_step: dict[str, int] = {}  # agent_id -> step number
+        # Steps an agent must wait before being auto-reissued the same escalator
+        # exit after a failed transfer (see EscalatorController.record_transfer_failure).
+        self._reentry_backoff_steps: int = escalator_reentry_backoff_steps
 
         # Post-transfer escape waypoints: the local escalator egress target
         # assigned after a transfer so agents clear the landing without being
@@ -133,6 +153,10 @@ class MultiLevelJuPedSimulation:
             network_path=self.network_path,
             levels=self.levels,
             simulations=self.simulations,
+            dt=dt,
+            admission_rate_per_sec=escalator_admission_rate_per_sec,
+            admission_burst=escalator_admission_burst,
+            zone_occupancy_ceiling=escalator_zone_occupancy_ceiling,
         )
         registry_summary = self.escalator_controller.summary()
         logger.info(
@@ -181,6 +205,7 @@ class MultiLevelJuPedSimulation:
                     level_id=level_id,
                     position=pos,
                     level_sim=sim,
+                    current_step=self.current_step,
                 )
 
                 if not in_escalator_geometry:
@@ -353,6 +378,11 @@ class MultiLevelJuPedSimulation:
         # Step 2: Check for agents that exited through escalators and transfer them
         self._process_escalator_exits()
 
+        # Step 2b: Retry agents queued for escalator admission (denied entry to a
+        # saturated escalator earlier) now that a step has passed and capacity
+        # may have freed up.
+        self._drain_escalator_admission_queues()
+
         # Step 3: Step each level's simulation
         any_active = False
         for sim in self.simulations.values():
@@ -429,6 +459,42 @@ class MultiLevelJuPedSimulation:
                     f"Agent {agent_id} reached escalator exit {exit_name} on level {level_id} - initiating transfer"
                 )
                 self._transfer_agent_through_escalator(agent_id, level_id, exit_name)
+
+    def _drain_escalator_admission_queues(self) -> None:
+        """Retry agents queued for escalator admission, once per step.
+
+        An agent denied admission to an escalator (see
+        EscalatorController.try_admit) is queued rather than dropped, so it
+        boards as soon as capacity frees up instead of needing to physically
+        re-approach the corridor to trigger another attempt.
+        """
+        for edge_key, queue in self.escalator_controller.admission_queues.items():
+            from_level, exit_name = edge_key
+            level_sim = self.simulations.get(from_level)
+            while queue:
+                agent_id = queue[0]
+
+                # Drop stale entries: agent no longer tracked, no longer on the
+                # source level, or already routed elsewhere in the meantime.
+                if (
+                    level_sim is None
+                    or agent_id not in self.agent_levels
+                    or self.agent_levels[agent_id] != from_level
+                ):
+                    queue.pop(0)
+                    continue
+                current_exit = getattr(level_sim, "agent_assigned_exits", {}).get(agent_id)
+                if current_exit == exit_name:
+                    queue.pop(0)
+                    continue
+
+                if not self.escalator_controller.try_admit(
+                    from_level, exit_name, self.current_step
+                ):
+                    break  # head of queue still not admitted; retry next step
+
+                queue.pop(0)
+                level_sim.set_agent_destination_exit(agent_id, exit_name)
 
     def _enforce_blocked_escalator_corridors(self) -> set[str]:
         """Keep agents out of blocked escalator corridors.
@@ -563,6 +629,7 @@ class MultiLevelJuPedSimulation:
                     "restoring agent to source level"
                 ),
                 force_redecision=True,
+                failed_exit_name=exit_name,
             )
             return
 
@@ -580,6 +647,7 @@ class MultiLevelJuPedSimulation:
                     "restoring to source level"
                 ),
                 force_redecision=True,
+                failed_exit_name=exit_name,
             )
             return
 
@@ -598,6 +666,7 @@ class MultiLevelJuPedSimulation:
                     "restoring to source level"
                 ),
                 force_redecision=True,
+                failed_exit_name=exit_name,
             )
             return
 
@@ -619,18 +688,25 @@ class MultiLevelJuPedSimulation:
                     f"Invalid transfer spawn metadata for {exit_name}; restoring to source level"
                 ),
                 force_redecision=True,
+                failed_exit_name=exit_name,
             )
             return
 
         # Choose a spawn position that doesn't collide with:
-        #   (a) agents already present on the target level, and
+        #   (a) agents already present near the landing zone, and
         #   (b) other agents being transferred to this level in the same step.
+        # Scoped to the zone (not the whole level) so unrelated congestion
+        # elsewhere on the target level can't starve a landing zone that is
+        # actually empty, and so the "agents nearby" count logged below
+        # reflects the zone rather than the entire level's population.
         # JuPedSim rejects centres at or below roughly 0.4 m separation. Use a
         # margin above that threshold to avoid floating-point borderline
         # candidates passing our check and failing during add_agent().
         MIN_AGENT_SEP = 0.45
         existing_positions = (
-            list(self.simulations[target_level].get_all_agent_positions().values())
+            self.escalator_controller.get_zone_local_agent_positions(
+                target_zone_name, target_level
+            )
             + self._pending_spawn_positions
         )
 
@@ -674,6 +750,7 @@ class MultiLevelJuPedSimulation:
                     f"Transfer landing zone crowded for {exit_name}; restored to source level"
                 ),
                 force_redecision=True,
+                failed_exit_name=exit_name,
             )
             return
 
@@ -722,6 +799,7 @@ class MultiLevelJuPedSimulation:
                     "Restoring to source level"
                 ),
                 force_redecision=True,
+                failed_exit_name=exit_name,
             )
 
     def _restore_agent_to_source_level(
@@ -730,12 +808,26 @@ class MultiLevelJuPedSimulation:
         source_level: str,
         reason: str,
         force_redecision: bool = True,
+        failed_exit_name: str | None = None,
     ) -> None:
         """Re-spawn an agent on the source level after a failed transfer path.
 
         This guarantees an agent cannot silently disappear if transfer mapping,
         target-zone metadata, or landing-space placement fails.
+
+        When failed_exit_name is given, the deterministic corridor-reinforcement
+        logic (EscalatorController._apply_endpoint_motion) is blocked from
+        instantly re-issuing that same exit to this agent for
+        self._reentry_backoff_steps, giving the forced re-decision below a
+        chance to actually take effect instead of being overridden the moment
+        the agent is standing back in the corridor it was just bounced from.
         """
+        if failed_exit_name is not None:
+            self.escalator_controller.record_transfer_failure(
+                agent_id,
+                failed_exit_name,
+                until_step=self.current_step + self._reentry_backoff_steps,
+            )
         source_sim = self.simulations.get(source_level)
         if source_sim is None:
             logger.error(
@@ -930,6 +1022,7 @@ class MultiLevelJuPedSimulation:
 
         # Geometry-registry direction guard: if an escalator exit exists but has
         # no transfer edge from this level, it is an arrival-only endpoint here.
+        edge = None
         if exit_name.startswith("escalator_"):
             edge = self.escalator_controller.get_edge_for_exit(level_id, exit_name)
             if edge is None:
@@ -949,6 +1042,21 @@ class MultiLevelJuPedSimulation:
                 f"which doesn't exist on this level. Available exits: "
                 f"{list(level_sim.exit_manager.evacuation_exits.keys())}"
             )
+
+        # Escalator admission gate: a deliberate (decision-engine) choice to
+        # board a saturated escalator is queued rather than granted outright,
+        # so demand for a full landing zone doesn't outpace what it can
+        # absorb. The agent keeps its current journey until admitted (mirrors
+        # the "Request refused" precedent above).
+        if edge is not None and not self.escalator_controller.try_admit(
+            level_id, exit_name, self.current_step
+        ):
+            self.escalator_controller.enqueue_admission(level_id, exit_name, agent_id)
+            logger.debug(
+                f"[ADMISSION] {agent_id} denied entry to '{exit_name}' from level "
+                f"{level_id}; queued, keeping current journey."
+            )
+            return
 
         # Route to the exit on this level
         level_sim.set_agent_destination_exit(agent_id, exit_name)

@@ -35,6 +35,9 @@ class _EscalatorController:
     def get_spawn_point_for_edge(self, edge):
         return edge.to_spawn_point
 
+    def get_zone_local_agent_positions(self, zone_name, level_id, buffer_m=1.0):
+        return []
+
 
 def test_transfer_uses_local_escalator_egress_waypoint():
     edge = SimpleNamespace(

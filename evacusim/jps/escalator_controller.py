@@ -90,14 +90,45 @@ class EscalatorController:
         network_path: Path,
         levels: list[str],
         simulations: dict[str, Any],
+        dt: float = 0.05,
+        admission_rate_per_sec: float = 1.0,
+        admission_burst: float = 2.0,
+        zone_occupancy_ceiling: int = 3,
     ):
         self.network_path = Path(network_path)
         self.levels = [str(level) for level in levels]
         self.simulations = simulations
+        self.dt = dt
         self.endpoints: list[EscalatorEndpoint] = self._load_endpoints_from_geometry()
         self.registry = self._build_registry()
         self.agent_states: dict[str, EscalatorAgentState] = {}
         self._agent_motion_context: dict[str, str] = {}
+
+        # --- Admission control (rate-limited escalator boarding) ---
+        # Models each escalator's throughput as a single-lane token bucket plus
+        # a hard cap on how many agents may already be inside the landing zone.
+        # Without this, agents are routed toward the escalator corridor with no
+        # regard for whether the arrival zone on the other level has room, which
+        # can produce a self-reinforcing jam: a transfer failure bounces the
+        # agent back to the corridor mouth, which is then immediately re-routed
+        # into the same escalator, compounding the congestion that caused the
+        # failure until no agent can even reach the exit trigger anymore.
+        if admission_rate_per_sec <= 0:
+            raise ValueError("admission_rate_per_sec must be > 0")
+        self.admission_rate_per_sec = admission_rate_per_sec
+        self.admission_burst = admission_burst
+        self.zone_occupancy_ceiling = zone_occupancy_ceiling
+        self._admission_tokens: dict[tuple[str, str], float] = {}
+        self._admission_last_step: dict[tuple[str, str], int] = {}
+        # Agents denied admission are queued here (per (from_level, exit_name))
+        # instead of dropped, so they board as soon as capacity frees up.
+        self.admission_queues: dict[tuple[str, str], list[str]] = {}
+
+        # Short cooldown after a failed transfer preventing the deterministic
+        # corridor-reinforcement logic (_apply_endpoint_motion) from instantly
+        # re-issuing the same escalator to a just-bounced agent before the
+        # forced re-decision it triggers has a chance to take effect.
+        self._reentry_backoff: dict[str, tuple[str, int]] = {}
 
     @staticmethod
     def _parse_shape_string(shape_str: str) -> list[tuple[float, float]]:
@@ -395,12 +426,89 @@ class EscalatorController:
         """Return explicit arrival spawn point for a transfer edge."""
         return edge.to_spawn_point
 
+    def get_zone_local_agent_positions(
+        self, zone_name: str, level_id: str, buffer_m: float = 1.0
+    ) -> list[tuple[float, float]]:
+        """Positions of agents on *level_id* within *buffer_m* of the named zone.
+
+        Used both to gate escalator admission (is the landing zone full?) and to
+        pick a collision-free spawn point when transferring an agent in. Scoped
+        to the zone rather than the whole level, so unrelated congestion
+        elsewhere on the same level (e.g. a busy concourse) cannot starve a
+        landing zone that is actually empty.
+        """
+        zone_poly = self.get_zone_polygon(zone_name)
+        sim = self.simulations.get(str(level_id))
+        if zone_poly is None or sim is None:
+            return []
+        check_area = zone_poly.buffer(buffer_m)
+        return [
+            p
+            for p in sim.get_all_agent_positions().values()
+            if check_area.contains(Point(p))
+        ]
+
+    def get_zone_local_agent_count(
+        self, zone_name: str, level_id: str, buffer_m: float = 1.0
+    ) -> int:
+        return len(self.get_zone_local_agent_positions(zone_name, level_id, buffer_m))
+
+    def try_admit(self, from_level: str, exit_name: str, current_step: int) -> bool:
+        """Return True if an agent may be routed toward this escalator exit now.
+
+        Denies admission if the landing zone is already at/over its occupancy
+        ceiling, or if the escalator's boarding-rate token bucket is empty.
+        Escalator exits with no registered transfer edge (shouldn't normally
+        reach here) are always admitted, since there is no capacity to model.
+        """
+        edge = self.get_edge_for_exit(from_level, exit_name)
+        if edge is None:
+            return True
+
+        occupancy = self.get_zone_local_agent_count(edge.to_zone_name, edge.to_level)
+        if occupancy >= self.zone_occupancy_ceiling:
+            return False
+
+        edge_key = (str(from_level), exit_name)
+        last_step = self._admission_last_step.get(edge_key, current_step)
+        elapsed_s = max(0, current_step - last_step) * self.dt
+        tokens = min(
+            self.admission_burst,
+            self._admission_tokens.get(edge_key, self.admission_burst)
+            + elapsed_s * self.admission_rate_per_sec,
+        )
+        self._admission_last_step[edge_key] = current_step
+
+        if tokens < 1.0:
+            self._admission_tokens[edge_key] = tokens
+            return False
+
+        self._admission_tokens[edge_key] = tokens - 1.0
+        return True
+
+    def enqueue_admission(self, from_level: str, exit_name: str, agent_id: str) -> None:
+        """Queue an agent denied admission so it boards as soon as capacity allows."""
+        queue = self.admission_queues.setdefault((str(from_level), exit_name), [])
+        if agent_id not in queue:
+            queue.append(agent_id)
+
+    def record_transfer_failure(
+        self, agent_id: str, exit_name: str, until_step: int
+    ) -> None:
+        """Block the deterministic corridor logic from re-issuing *exit_name*
+        to *agent_id* until *until_step*, giving the forced re-decision that
+        follows a failed transfer a chance to take effect before the agent is
+        pushed straight back at the same escalator mouth.
+        """
+        self._reentry_backoff[agent_id] = (exit_name, until_step)
+
     def enforce_motion_for_agent(
         self,
         agent_id: str,
         level_id: str,
         position: tuple[float, float],
         level_sim: Any,
+        current_step: int = 0,
     ) -> bool:
         """Apply deterministic escalator direction control for one agent.
 
@@ -418,7 +526,7 @@ class EscalatorController:
             if not zone_poly.contains(p):
                 continue
 
-            self._apply_endpoint_motion(agent_id, endpoint, level_sim)
+            self._apply_endpoint_motion(agent_id, endpoint, level_sim, current_step)
             return True
 
         # 2) Corridor-based handling (continue last known escalator direction).
@@ -446,7 +554,7 @@ class EscalatorController:
                     corridor_endpoints[0],
                 )
 
-            self._apply_endpoint_motion(agent_id, selected_endpoint, level_sim)
+            self._apply_endpoint_motion(agent_id, selected_endpoint, level_sim, current_step)
             return True
 
         self._agent_motion_context.pop(agent_id, None)
@@ -457,6 +565,7 @@ class EscalatorController:
         agent_id: str,
         endpoint: EscalatorEndpoint,
         level_sim: Any,
+        current_step: int = 0,
     ) -> None:
         """Apply deterministic movement control for departure-role endpoints only.
 
@@ -473,8 +582,24 @@ class EscalatorController:
                 # increases route-churn under congestion and can trap agents near
                 # transfer mouths without ever crossing the exit threshold.
                 current_exit = getattr(level_sim, "agent_assigned_exits", {}).get(agent_id)
-                if current_exit != endpoint.exit_name:
-                    level_sim.set_agent_destination_exit(agent_id, endpoint.exit_name)
+                if current_exit == endpoint.exit_name:
+                    return
+
+                # Don't instantly re-commit an agent to the same escalator it
+                # was just bounced back from — give its forced re-decision a
+                # chance to land first (see record_transfer_failure).
+                backoff = self._reentry_backoff.get(agent_id)
+                if backoff is not None:
+                    backoff_exit, until_step = backoff
+                    if backoff_exit == endpoint.exit_name and current_step < until_step:
+                        return
+                    self._reentry_backoff.pop(agent_id, None)
+
+                if not self.try_admit(endpoint.level_id, endpoint.exit_name, current_step):
+                    self.enqueue_admission(endpoint.level_id, endpoint.exit_name, agent_id)
+                    return
+
+                level_sim.set_agent_destination_exit(agent_id, endpoint.exit_name)
 
     def set_agent_state(self, agent_id: str, state: EscalatorAgentState) -> None:
         """State primitive for later lifecycle-driven control."""
