@@ -14,6 +14,8 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 from shapely.geometry import Point, Polygon
+from shapely.ops import unary_union
+from shapely.prepared import prep
 
 from evacusim.utils.logger import get_logger
 
@@ -104,6 +106,19 @@ class EscalatorController:
         self.agent_states: dict[str, EscalatorAgentState] = {}
         self._agent_motion_context: dict[str, str] = {}
 
+        # Broad-phase filter for enforce_motion_for_agent: enforce_motion_for_agent
+        # is called for every active agent on every simulation step, but only
+        # agents actually inside an escalator zone/corridor need the per-endpoint
+        # scan. Precompute (once, here, not per-step) a single prepared union
+        # geometry per level covering every zone + corridor polygon on it, plus
+        # prepared versions of the individual polygons, so the hot path can reject
+        # the common case (agent nowhere near an escalator) with one cheap
+        # contains() check instead of N+M unindexed ones.
+        self._level_envelope: dict[str, Any] = {}
+        self._prepared_zone_polys: dict[str, Any] = {}
+        self._prepared_corridor_polys: dict[tuple[str, str], Any] = {}
+        self._build_motion_check_cache()
+
         # --- Admission control (rate-limited escalator boarding) ---
         # Models each escalator's throughput as a single-lane token bucket plus
         # a hard cap on how many agents may already be inside the landing zone.
@@ -129,6 +144,33 @@ class EscalatorController:
         # re-issuing the same escalator to a just-bounced agent before the
         # forced re-decision it triggers has a chance to take effect.
         self._reentry_backoff: dict[str, tuple[str, int]] = {}
+
+    def _build_motion_check_cache(self) -> None:
+        """Build the prepared-geometry caches used by enforce_motion_for_agent.
+
+        Must run after self.registry is built and after every level's
+        ConcordiaJuPedSimulation (and its geometry_manager.escalator_corridors)
+        has been constructed, since it reads corridor polygons from those
+        objects. Safe to call once at startup: zone/corridor geometry is static
+        for the lifetime of a run.
+        """
+        for level_id in self.levels:
+            level_key = str(level_id)
+            zone_polys: list[Polygon] = []
+            for ep in self.registry.endpoints_by_level.get(level_key, []):
+                poly = ep.transfer_zone_polygon
+                zone_polys.append(poly)
+                self._prepared_zone_polys[ep.transfer_zone_name] = prep(poly)
+
+            sim = self.simulations.get(level_key)
+            corridors = getattr(getattr(sim, "geometry_manager", None), "escalator_corridors", {}) or {}
+            corridor_polys: list[Polygon] = list(corridors.values())
+            for corridor_name, corridor_poly in corridors.items():
+                self._prepared_corridor_polys[(level_key, corridor_name)] = prep(corridor_poly)
+
+            all_polys = zone_polys + corridor_polys
+            if all_polys:
+                self._level_envelope[level_key] = prep(unary_union(all_polys))
 
     @staticmethod
     def _parse_shape_string(shape_str: str) -> list[tuple[float, float]]:
@@ -517,10 +559,19 @@ class EscalatorController:
         p = Point(position)
         level_key = str(level_id)
 
+        # Broad-phase reject: most agents on most steps are nowhere near an
+        # escalator. One prepared-geometry contains() check against the whole
+        # level's zone+corridor envelope is far cheaper than scanning every
+        # endpoint and corridor individually below.
+        envelope = self._level_envelope.get(level_key)
+        if envelope is not None and not envelope.contains(p):
+            self._agent_motion_context.pop(agent_id, None)
+            return False
+
         # 1) Zone-based handling (strongest signal; includes explicit role).
         level_endpoints = self.registry.endpoints_by_level.get(level_key, [])
         for endpoint in level_endpoints:
-            zone_poly = self.get_zone_polygon(endpoint.transfer_zone_name)
+            zone_poly = self._prepared_zone_polys.get(endpoint.transfer_zone_name)
             if zone_poly is None:
                 continue
             if not zone_poly.contains(p):
@@ -531,8 +582,9 @@ class EscalatorController:
 
         # 2) Corridor-based handling (continue last known escalator direction).
         corridors = getattr(level_sim.geometry_manager, "escalator_corridors", {})
-        for corridor_name, corridor_poly in corridors.items():
-            if not corridor_poly.contains(p):
+        for corridor_name in corridors:
+            corridor_poly = self._prepared_corridor_polys.get((level_key, corridor_name))
+            if corridor_poly is None or not corridor_poly.contains(p):
                 continue
 
             corridor_endpoints = self.registry.corridor_endpoints_by_level.get(

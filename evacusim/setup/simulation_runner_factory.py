@@ -84,15 +84,27 @@ class SimulationRunnerFactory:
 
         logger.info("Creating HybridSimulationRunner...")
 
-        # Persist full debug logs alongside run artifacts so transfer/discharge
-        # traces can be inspected after the run without relying on terminal output.
+        # Persist logs alongside run artifacts so transfer/discharge traces can
+        # be inspected after the run without relying on terminal output.
+        # DEBUG-level file logging emits several lines per physics step (zone
+        # transfers, escalator state, etc.), which is useful when debugging a
+        # specific run but adds real per-step formatting/IO overhead over a long
+        # run. Default to INFO; opt back into DEBUG via
+        # performance.file_log_level in the experiment config when needed.
         log_file = decisions_file.parent / "simulation.log"
+        file_log_level_name = str(performance_config.get("file_log_level", "INFO")).upper()
+        file_log_level = logging.getLevelName(file_log_level_name)
+        if not isinstance(file_log_level, int):
+            logger.warning(
+                f"Invalid performance.file_log_level {file_log_level_name!r}; defaulting to INFO"
+            )
+            file_log_level = logging.INFO
         setup_logger(
             log_file=log_file,
             console_level=logging.INFO,
-            file_level=logging.DEBUG,
+            file_level=file_log_level,
         )
-        logger.info(f"Per-run log file: {log_file}")
+        logger.info(f"Per-run log file: {log_file} (file_level={logging.getLevelName(file_log_level)})")
 
         try:
             runner = HybridSimulationRunner(
