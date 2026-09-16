@@ -42,8 +42,10 @@ class ExitOption:
     exit_id: str
     display_name: str
     distance_m: float | None = None
+    route_distance_m: float | None = None
     crowd_count: int = 0
     familiar: bool = False
+    visible: bool = False
     semantic_tags: tuple[str, ...] = ()
 
 
@@ -99,6 +101,12 @@ class DecisionContext:
     # the tag-based choice.  Structured-engine only; the LLM engine routes to a
     # target platform through ``action_translator`` instead.
     preferred_exit_ids: tuple[str, ...] = ()
+
+    # Exit selected on an earlier cycle. Engines may retain it while it remains
+    # in the policy-filtered candidate set, avoiding route oscillation caused by
+    # small crowd-count changes. A blocked or disallowed exit is not offered and
+    # therefore cannot be retained.
+    committed_exit_id: str | None = None
 
     # LLM-only extras (ignored by non-LLM engines).
     prompt_text: str | None = None

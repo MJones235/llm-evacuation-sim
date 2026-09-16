@@ -115,9 +115,6 @@ class MultiLevelJuPedSimulation:
         # Boarders continue from the local egress to their assigned platform
         # before the decision engine is allowed to choose "wait for train".
         self.transfer_platform_waypoints: dict[str, tuple[float, float]] = {}
-        # Alighters continue from the local egress to their configured street
-        # exit without pausing for another decision at the escalator mouth.
-        self.transfer_exit_destinations: dict[str, str] = {}
 
         # Exits currently blocked by scenario events.
         # Used by corridor-barrier enforcement so agents cannot enter blocked
@@ -892,6 +889,18 @@ class MultiLevelJuPedSimulation:
 
         level_id = self.agent_levels[agent_id]
         self.simulations[level_id].set_agent_target(agent_id, target)
+
+    def get_route_distance(
+        self,
+        agent_id: str,
+        start: tuple[float, float],
+        target: tuple[float, float],
+    ) -> float | None:
+        """Return navigable distance on the agent's current level."""
+        level_id = self.agent_levels.get(agent_id)
+        if level_id is None:
+            return None
+        return self.simulations[level_id].get_route_distance(start, target)
 
     def set_agent_destination_exit(self, agent_id: str, exit_name: str) -> None:
         """

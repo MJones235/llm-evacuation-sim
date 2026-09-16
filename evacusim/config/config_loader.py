@@ -223,6 +223,7 @@ class ConfigLoader:
               crowd_radius_m: 5.0        # optional, rule_based only
               rule_weights:              # optional, rule_based only
                 proximity: 0.5
+                visibility: 0.0
                 busyness: 0.3
                 familiarity: 0.2
         """
@@ -252,7 +253,7 @@ class ConfigLoader:
         if weights is not None:
             if not isinstance(weights, dict):
                 raise ValueError("decision.rule_weights must be a dictionary")
-            for key in ("proximity", "busyness", "familiarity"):
+            for key in ("proximity", "visibility", "busyness", "familiarity"):
                 if key not in weights:
                     continue
                 value = weights[key]

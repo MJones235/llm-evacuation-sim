@@ -651,17 +651,29 @@ class ActionExecutor:
                 f"({distance:.1f}m away)"
             )
         else:
-            # If the agent is already committed to boarding a train, preserve that
-            # routing rather than switching to a stand-still waypoint.  The "wait"
-            # semantically means the agent is heading to the platform doors and
-            # waiting for the train — they should keep walking there.
             current_dest = self.agent_destinations.get(agent_id, "")
-            if current_dest.startswith("train_platform_"):
+            agent_config = next((c for c in self.agent_configs if c["id"] == agent_id), {})
+            goal = str(agent_config.get("goal_state") or agent_config.get("initial_goal") or "")
+            train_oriented = any(word in goal.lower() for word in ("train", "platform", "board"))
+            preserve_boarding_route = (
+                train_oriented
+                and wait_reason != "route_blocked"
+                and (
+                    current_dest.startswith("train_platform_")
+                    or current_dest.endswith("_down")
+                )
+            )
+            if preserve_boarding_route:
+                self.agent_action[agent_id] = "moving"
                 logger.debug(
-                    f"[WAIT] {agent_id} routed to '{current_dest}' — preserving train boarding route"
+                    f"[WAIT] {agent_id} routed to '{current_dest}' — preserving "
+                    "active boarding route"
                 )
             else:
-                # All other wait types: stand still at current position
+                # A stationary waypoint replaces the physical journey. Clear its
+                # logical commitment as well, otherwise a later choice of the same
+                # exit is incorrectly treated as an already-active route.
+                self.agent_destinations.pop(agent_id, None)
                 logger.debug(f"[WAIT] {agent_id} at {current_position} staying still")
                 self.jps_sim.set_agent_target(agent_id, current_position)
 

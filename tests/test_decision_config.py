@@ -22,7 +22,12 @@ class DecisionSectionValidationTests(unittest.TestCase):
                 "decision": {
                     "engine": "rule_based",
                     "crowd_radius_m": 4.0,
-                    "rule_weights": {"proximity": 0.5, "busyness": 0.3, "familiarity": 0.2},
+                    "rule_weights": {
+                        "proximity": 0.35,
+                        "visibility": 0.5,
+                        "busyness": 0.05,
+                        "familiarity": 0.1,
+                    },
                 }
             }
         )
@@ -65,14 +70,20 @@ class DecisionEngineFactoryTests(unittest.TestCase):
                 "decision": {
                     "engine": "rule_based",
                     "crowd_radius_m": 7.5,
-                    "rule_weights": {"proximity": 0.6, "busyness": 0.25, "familiarity": 0.15},
+                    "rule_weights": {
+                        "proximity": 0.35,
+                        "visibility": 0.5,
+                        "busyness": 0.05,
+                        "familiarity": 0.1,
+                    },
                 }
             }
         )
         self.assertIsInstance(engine, RuleBasedDecisionEngine)
-        self.assertEqual(engine.w_proximity, 0.6)
-        self.assertEqual(engine.w_busyness, 0.25)
-        self.assertEqual(engine.w_familiarity, 0.15)
+        self.assertEqual(engine.w_proximity, 0.35)
+        self.assertEqual(engine.w_visibility, 0.5)
+        self.assertEqual(engine.w_busyness, 0.05)
+        self.assertEqual(engine.w_familiarity, 0.1)
         self.assertEqual(engine.crowd_radius_m, 7.5)
 
     def test_rule_based_defaults_when_weights_absent(self):
@@ -81,6 +92,7 @@ class DecisionEngineFactoryTests(unittest.TestCase):
         )
         self.assertIsInstance(engine, RuleBasedDecisionEngine)
         self.assertEqual(engine.w_proximity, 0.5)
+        self.assertEqual(engine.w_visibility, 0.0)
         self.assertEqual(engine.w_busyness, 0.3)
         self.assertEqual(engine.w_familiarity, 0.2)
 

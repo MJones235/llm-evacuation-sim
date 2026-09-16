@@ -1,6 +1,6 @@
 """Unit tests for the LLM-free RuleBasedDecisionEngine (Feature B, B4/B6).
 
-Each proximity/busyness/familiarity signal is isolated via the weights, and
+Each route-distance/visibility/busyness/familiarity signal is isolated via the weights, and
 every produced payload is checked against the *real* decision schema validator
 (DecisionProcessor._validate_decision_payload) so the rule engine's output is
 guaranteed interchangeable with the LLM engine's downstream.
@@ -130,6 +130,57 @@ class RuleBasedEngineTests(unittest.TestCase):
         busy_eng = RuleBasedDecisionEngine(w_proximity=0.0, w_busyness=1.0, w_familiarity=0.0)
         self.assertEqual(_decide(prox_eng, _ctx(opts, offered, ids)).payload["exit_id"], "near_busy")
         self.assertEqual(_decide(busy_eng, _ctx(opts, offered, ids)).payload["exit_id"], "far_quiet")
+
+    def test_visible_exit_can_beat_hidden_exit(self):
+        eng = RuleBasedDecisionEngine(
+            w_proximity=0.35,
+            w_visibility=0.50,
+            w_busyness=0.05,
+            w_familiarity=0.10,
+        )
+        opts = [
+            ExitOption(
+                "grey", "Grey Street", route_distance_m=20.0,
+                crowd_count=0, familiar=True, visible=False,
+            ),
+            ExitOption(
+                "blackett", "Blackett Street", route_distance_m=24.0,
+                crowd_count=0, familiar=True, visible=True,
+            ),
+        ]
+        ctx = _ctx(opts, ["evacuate", "wait"], ["grey", "blackett"])
+        self.assertEqual(_decide(eng, ctx).payload["exit_id"], "blackett")
+
+    def test_route_distance_is_used_instead_of_straight_line_distance(self):
+        eng = RuleBasedDecisionEngine(
+            w_proximity=1.0,
+            w_visibility=0.0,
+            w_busyness=0.0,
+            w_familiarity=0.0,
+        )
+        opts = [
+            ExitOption("indirect", "Indirect", distance_m=5.0, route_distance_m=50.0),
+            ExitOption("direct", "Direct", distance_m=15.0, route_distance_m=20.0),
+        ]
+        ctx = _ctx(opts, ["evacuate", "wait"], ["indirect", "direct"])
+        self.assertEqual(_decide(eng, ctx).payload["exit_id"], "direct")
+
+    def test_committed_exit_is_retained_while_still_available(self):
+        eng = RuleBasedDecisionEngine(w_proximity=1.0)
+        opts = [
+            ExitOption("old", "Old route", route_distance_m=30.0),
+            ExitOption("new", "New route", route_distance_m=10.0),
+        ]
+        ctx = _ctx(opts, ["evacuate", "wait"], ["old", "new"])
+        ctx.committed_exit_id = "old"
+        self.assertEqual(_decide(eng, ctx).payload["exit_id"], "old")
+
+    def test_unavailable_committed_exit_is_replaced(self):
+        eng = RuleBasedDecisionEngine(w_proximity=1.0)
+        opts = [ExitOption("available", "Available route", route_distance_m=10.0)]
+        ctx = _ctx(opts, ["evacuate", "wait"], ["available"])
+        ctx.committed_exit_id = "blocked"
+        self.assertEqual(_decide(eng, ctx).payload["exit_id"], "available")
 
     def test_ties_are_deterministic_first(self):
         eng = RuleBasedDecisionEngine()

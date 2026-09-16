@@ -6,7 +6,8 @@ the station — and picks a route by scoring the offered exits on a weighted
 combination of three signals carried on each
 :class:`~evacusim.core.decision_engine.ExitOption`:
 
-* **proximity** — closer exits score higher (inverse straight-line distance),
+* **proximity** — shorter navigable routes score higher,
+* **visibility** — exits in direct line of sight score higher,
 * **busyness** — less crowded exits score higher,
 * **familiarity** — exits the agent already knows score higher.
 
@@ -34,19 +35,21 @@ _TRAIN_GOAL_KEYWORDS = ("train", "platform", "board")
 
 
 class RuleBasedDecisionEngine:
-    """Route by weighting proximity, busyness, and familiarity."""
+    """Route by weighting distance, visibility, busyness, and familiarity."""
 
     def __init__(
         self,
         w_proximity: float = 0.5,
         w_busyness: float = 0.3,
         w_familiarity: float = 0.2,
+        w_visibility: float = 0.0,
         crowd_radius_m: float = 5.0,
         pace: str = _DEFAULT_PACE,
     ) -> None:
         self.w_proximity = float(w_proximity)
         self.w_busyness = float(w_busyness)
         self.w_familiarity = float(w_familiarity)
+        self.w_visibility = float(w_visibility)
         self.crowd_radius_m = float(crowd_radius_m)
         self.pace = pace
 
@@ -133,6 +136,17 @@ class RuleBasedDecisionEngine:
         # 3. Otherwise leave via the best-scoring exit, honouring avoid/prefer tags.
         if "evacuate" in actions and candidates:
             pool = self._apply_tag_preferences(candidates, prefer, avoid)
+            committed = next(
+                (option for option in pool if option.exit_id == ctx.committed_exit_id),
+                None,
+            )
+            if committed is not None:
+                return self._move_payload(
+                    action="evacuate",
+                    exit_id=committed.exit_id,
+                    reason=f"Continuing toward the previously chosen {committed.display_name}.",
+                    ctx=ctx,
+                )
             best, why = self._pick_best_exit(pool)
             return self._move_payload(
                 action="evacuate",
@@ -205,9 +219,11 @@ class RuleBasedDecisionEngine:
         return pool
 
     def _pick_best_exit(self, options: list[ExitOption]) -> tuple[ExitOption, str]:
-        """Return (best_exit, explanation) by weighted proximity/busyness/familiarity."""
+        """Return the best exit by route distance, visibility, crowding, and familiarity."""
         prox_raw = [
-            (1.0 / (1.0 + o.distance_m)) if o.distance_m is not None else 0.0
+            (1.0 / (1.0 + (o.route_distance_m or o.distance_m)))
+            if (o.route_distance_m or o.distance_m) is not None
+            else 0.0
             for o in options
         ]
         busy_raw = [float(-o.crowd_count) for o in options]
@@ -216,24 +232,42 @@ class RuleBasedDecisionEngine:
 
         best_idx = 0
         best_score = float("-inf")
+        scored_options: list[tuple[ExitOption, float]] = []
         for i, o in enumerate(options):
             fam = 1.0 if o.familiar else 0.0
+            visible = 1.0 if o.visible else 0.0
             score = (
                 self.w_proximity * prox_n[i]
+                + self.w_visibility * visible
                 + self.w_busyness * busy_n[i]
                 + self.w_familiarity * fam
             )
+            scored_options.append((o, score))
             # Strictly-greater keeps the first exit on ties → deterministic.
             if score > best_score:
                 best_score = score
                 best_idx = i
 
         best = options[best_idx]
-        dist_txt = f"{best.distance_m:.1f}m" if best.distance_m is not None else "unknown distance"
+        effective_distance = best.route_distance_m or best.distance_m
+        dist_txt = (
+            f"{effective_distance:.1f}m route"
+            if effective_distance is not None
+            else "unknown route distance"
+        )
+        candidate_summary = "; ".join(
+            f"{option.exit_id}: score={score:.3f}, "
+            f"route={option.route_distance_m or option.distance_m or float('nan'):.1f}m, "
+            f"visible={'yes' if option.visible else 'no'}, crowd={option.crowd_count}, "
+            f"familiar={'yes' if option.familiar else 'no'}"
+            for option, score in scored_options
+        )
         why = (
             f"Chose {best.display_name} ({dist_txt}, {best.crowd_count} nearby, "
+            f"{'visible' if best.visible else 'not visible'}, "
             f"{'familiar' if best.familiar else 'unfamiliar'}) as the best weighted "
-            f"trade-off of proximity, busyness, and familiarity."
+            f"trade-off of route distance, visibility, busyness, and familiarity. "
+            f"Candidates: {candidate_summary}."
         )
         return best, why
 

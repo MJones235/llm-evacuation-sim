@@ -67,6 +67,7 @@ class ConcordiaJuPedSimulation:
         self.geometry_manager = GeometryManager(network_path, dt, level_id,
                                                 initially_blocked_exits=initially_blocked_exits)
         self.simulation = self.geometry_manager.simulation
+        self._routing_engine = jps.RoutingEngine(self.geometry_manager._combined_geometry)
         self.stage_manager = StageManager(self.simulation)
 
         self.exit_manager = ExitManager(
@@ -314,6 +315,24 @@ class ConcordiaJuPedSimulation:
         )
 
         logger.info(f"Set target for agent {agent_id} to {safe_target}")
+
+    def get_route_distance(
+        self,
+        start: tuple[float, float],
+        target: tuple[float, float],
+    ) -> float | None:
+        """Return the JuPedSim route length between two points."""
+        try:
+            waypoints = self._routing_engine.compute_waypoints(start, target)
+            if len(waypoints) < 2:
+                return 0.0
+            return sum(
+                ((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
+                for a, b in zip(waypoints, waypoints[1:])
+            )
+        except Exception as exc:
+            logger.debug(f"Could not calculate route distance {start} -> {target}: {exc}")
+            return None
 
     def _coerce_target_inside_walkable(
         self,

@@ -155,10 +155,15 @@ class DecisionProcessor:
         self._escalator_deferral_timeout_secs: float = 12.0
         self._escalator_progress_threshold_m: float = 0.4
         self._escalator_deferral_state: dict[str, dict[str, Any]] = {}
+        # One-shot bypass for an alighter's first concourse decision. Arrival
+        # and departure corridors overlap geometrically, so the generic guard
+        # would otherwise suppress the street-exit choice and leave the agent
+        # stopped at the temporary egress waypoint.
+        self._post_transfer_exit_choice_agents: set[str] = set()
         # Agents deferred this cycle because they are still traversing an
-        # escalator departure zone/corridor. The coordinator can re-queue these
-        # IDs for an immediate follow-up cycle so they are prompted as soon as
-        # they clear the escalator mouth.
+        # escalator departure zone/corridor. The coordinator clears this set;
+        # they are reconsidered on normal cadence or an event override while
+        # their current JuPedSim route continues uninterrupted.
         self._deferred_escalator_agents: set[str] = set()
         # Initialize prompt cache for intelligent LLM call reduction
         self.prompt_cache = PromptCache(enable_detailed_logging=True)
@@ -657,20 +662,10 @@ class DecisionProcessor:
         waypoint = nearest_points(Point(position), safe_polygon)[1]
         return (float(waypoint.x), float(waypoint.y))
 
-    def _configured_street_exit(self, agent_id: str) -> str | None:
-        """Configured final exit for an alighter, when it is a known street exit."""
-        target = str(self._agent_cfg.get(agent_id, {}).get("target", "")).strip().lower()
-        street_exits = set(self.station_layout.get("street_exits", ()))
-        return target if target in street_exits else None
-
     def _defer_for_post_transfer_route(
         self, agent_id: str, position: tuple[float, float]
     ) -> bool:
         """Advance local-egress and assigned-platform waypoints without stopping."""
-        exit_destinations = getattr(self.jps_sim, "transfer_exit_destinations", {})
-        if agent_id in exit_destinations:
-            return True
-
         platform_waypoints = getattr(self.jps_sim, "transfer_platform_waypoints", {})
         if agent_id in platform_waypoints:
             waypoint = platform_waypoints[agent_id]
@@ -701,17 +696,15 @@ class DecisionProcessor:
             )
             return True
 
-        street_exit = self._configured_street_exit(agent_id)
-        if street_exit is not None:
+        agent_level = self.jps_sim.get_agent_level(agent_id)
+        current_goal = self.agent_goals.get(agent_id, "")
+        if agent_level == "0" and not self._goal_is_train_oriented(current_goal):
             del escape_waypoints[agent_id]
-            self.jps_sim.set_agent_destination_exit(agent_id, street_exit)
-            self.agent_destinations[agent_id] = street_exit
-            exit_destinations[agent_id] = street_exit
+            self._post_transfer_exit_choice_agents.add(agent_id)
             logger.debug(
-                f"{agent_id}: transferred — continuing directly to street exit "
-                f"{street_exit}"
+                f"{agent_id}: transferred to concourse — choosing a street exit"
             )
-            return True
+            return False
 
         # Unknown journeys retain the local egress waypoint so they at least
         # clear the escalator before asking the decision engine what to do next.
@@ -1348,7 +1341,8 @@ class DecisionProcessor:
 
             # While traversing escalator geometry (departure side), keep current
             # movement and defer until the agent leaves that area.
-            if self._agent_is_on_escalator(agent_id):
+            choosing_exit_after_transfer = agent_id in self._post_transfer_exit_choice_agents
+            if self._agent_is_on_escalator(agent_id) and not choosing_exit_after_transfer:
                 if self._should_defer_escalator_decision(agent_id, current_sim_time, position):
                     self._deferred_escalator_agents.add(agent_id)
                     logger.debug(f"{agent_id}: in escalator departure context — deferring decision")
@@ -1494,7 +1488,7 @@ class DecisionProcessor:
             # injected engine (LLM by default, rule-based when configured).
             # Everything below this block is engine-agnostic.
             exit_options = self._build_exit_options(
-                agent_id, position, zone_id, offered_exit_ids
+                agent_id, position, zone_id, offered_exit_ids, observation
             )
             # Resolve goal-directed routing hints (prefer/avoid semantic tags)
             # from the configured goal→exit policies for this (goal, zone). The
@@ -1543,6 +1537,7 @@ class DecisionProcessor:
                 prefer_exit_tags=prefer_exit_tags,
                 avoid_exit_tags=avoid_exit_tags,
                 preferred_exit_ids=preferred_exit_ids,
+                committed_exit_id=self.agent_destinations.get(agent_id),
                 prompt_text=prompt_text,
             )
             result = await self._engine.decide(ctx)
@@ -1654,6 +1649,9 @@ class DecisionProcessor:
 
             with self.perf_timer.measure("apply_to_jupedsim", is_parallel=True):
                 self.action_executor.execute_action(agent_id, translated, current_sim_time)
+
+            if new_exit and not new_exit.startswith("escalator_"):
+                self._post_transfer_exit_choice_agents.discard(agent_id)
 
             logger.info(f"{agent_id} action: {action[:100]}...")
 
@@ -1867,20 +1865,27 @@ class DecisionProcessor:
             repair_status=repair_status,
         )
 
-    def _build_exit_options(self, agent_id, position, zone_id, offered_exit_ids):
+    def _build_exit_options(
+        self, agent_id, position, zone_id, offered_exit_ids, observation=""
+    ):
         """Assemble structured routing signals for each offered exit.
 
         Returns ``{exit_id -> ExitOption}`` carrying the three signals a
-        rule-based engine weighs — proximity (straight-line distance to the exit
-        coordinate), busyness (agents currently near that exit), and familiarity
-        (whether the exit is known to the agent given their knowledge profile and
-        zone).  The LLM engine ignores these numeric fields.
+        rule-based engine weighs: navigable route distance, line-of-sight
+        visibility, busyness, and familiarity. The LLM engine ignores these
+        numeric fields.
         """
         options: dict[str, ExitOption] = {}
         registry = getattr(self.action_translator, "exit_registry", None)
         cfg = self._agent_cfg.get(agent_id, {})
         profile = cfg.get("knowledge_profile", "novice")
-        agent_level = str(cfg.get("level_id", "0"))
+        live_level = None
+        try:
+            if self.jps_sim and hasattr(self.jps_sim, "get_agent_level"):
+                live_level = self.jps_sim.get_agent_level(agent_id)
+        except Exception:
+            live_level = None
+        agent_level = str(live_level if live_level is not None else cfg.get("level_id", "0"))
 
         # Config-driven familiarity: exits this profile is expected to know in
         # this zone (commuters additionally know their memorised commuter exits).
@@ -1888,6 +1893,14 @@ class DecisionProcessor:
         known_ids = set(zone_exits.get(profile, []))
         if profile == "commuter":
             known_ids |= set(zone_exits.get("commuter", []))
+
+        visible_names: set[str] = set()
+        line_match = _RE_VISIBLE_EXITS_LINE.search(observation)
+        if line_match:
+            visible_names = {
+                match.group(1).strip()
+                for match in _RE_EXITS_LINE_ENTRY.finditer(line_match.group(1))
+            }
 
         # Snapshot all agent positions once for the busyness count.
         try:
@@ -1911,11 +1924,19 @@ class DecisionProcessor:
                 coords = None
 
             distance_m = None
+            route_distance_m = None
             crowd_count = 0
             if coords is not None:
                 dx = position[0] - coords[0]
                 dy = position[1] - coords[1]
                 distance_m = (dx * dx + dy * dy) ** 0.5
+                try:
+                    if self.jps_sim and hasattr(self.jps_sim, "get_route_distance"):
+                        route_distance_m = self.jps_sim.get_route_distance(
+                            agent_id, position, coords
+                        )
+                except Exception:
+                    route_distance_m = None
                 for other_id, p in all_positions.items():
                     if other_id == agent_id:
                         continue
@@ -1927,8 +1948,10 @@ class DecisionProcessor:
                 exit_id=exit_id,
                 display_name=display,
                 distance_m=distance_m,
+                route_distance_m=route_distance_m,
                 crowd_count=crowd_count,
                 familiar=exit_id in known_ids,
+                visible=display in visible_names,
                 semantic_tags=tags,
             )
         return options

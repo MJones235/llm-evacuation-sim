@@ -166,6 +166,7 @@ class SimulationRunnerFactory:
                 w_proximity=float(weights.get("proximity", 0.5)),
                 w_busyness=float(weights.get("busyness", 0.3)),
                 w_familiarity=float(weights.get("familiarity", 0.2)),
+                w_visibility=float(weights.get("visibility", 0.0)),
                 crowd_radius_m=float(decision_config.get("crowd_radius_m", 5.0)),
             )
             logger.info(

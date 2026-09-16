@@ -54,7 +54,6 @@ def test_transfer_uses_local_escalator_egress_waypoint():
     simulation.current_step = 10
     simulation.transfer_escape_waypoints = {}
     simulation.transfer_platform_waypoints = {}
-    simulation.transfer_exit_destinations = {}
 
     simulation._transfer_agent_through_escalator(
         "passenger", "0", "escalator_a_down"
@@ -72,6 +71,7 @@ def _processor(simulation, agent_configs, zones=None):
     processor.station_layout = {"street_exits": ["grey_street", "blackett_street"]}
     processor.agent_destinations = {}
     processor._deferred_escalator_agents = set()
+    processor._post_transfer_exit_choice_agents = set()
     return processor
 
 
@@ -83,7 +83,6 @@ def test_reaching_egress_distributes_agents_across_assigned_platform():
             "passenger_2": (-31.80, 40.56),
         },
         transfer_platform_waypoints={},
-        transfer_exit_destinations={},
         target=None,
         simulations={},
     )
@@ -108,11 +107,10 @@ def test_reaching_egress_distributes_agents_across_assigned_platform():
     assert simulation.transfer_escape_waypoints == {}
 
 
-def test_reaching_concourse_egress_continues_to_configured_exit():
+def test_concourse_transfer_requests_exit_choice_without_stopping():
     simulation = SimpleNamespace(
         transfer_escape_waypoints={"alighter": (42.2, 38.42)},
         transfer_platform_waypoints={},
-        transfer_exit_destinations={},
         routed_exit=None,
         simulations={},
     )
@@ -120,13 +118,14 @@ def test_reaching_concourse_egress_continues_to_configured_exit():
         simulation, "routed_exit", exit_id
     )
     simulation.get_agent_level = lambda agent_id: "0"
-    processor = _processor(simulation, {"alighter": {"target": "grey_street"}})
+    processor = _processor(simulation, {"alighter": {"target": ""}})
+    processor.agent_goals = {"alighter": "Leave the station."}
 
-    assert processor._defer_for_post_transfer_route("alighter", (29.24, 38.48))
-    assert simulation.routed_exit == "grey_street"
-    assert simulation.transfer_exit_destinations["alighter"] == "grey_street"
-    assert processor.agent_destinations["alighter"] == "grey_street"
+    assert not processor._defer_for_post_transfer_route("alighter", (29.24, 38.48))
+    assert simulation.routed_exit is None
+    assert processor.agent_destinations == {}
     assert simulation.transfer_escape_waypoints == {}
+    assert processor._post_transfer_exit_choice_agents == {"alighter"}
 
 
 def test_boarded_agent_is_not_reclassified_as_escalator_exit():
