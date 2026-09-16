@@ -76,6 +76,19 @@ class ExitTracker:
 
         for agent_id in list(self.concordia_agents.keys()):
             if agent_id not in self.exited_agents and agent_id not in current_positions:
+                # Multi-level transfers can produce a one-step gap between an
+                # agent leaving one JuPedSim instance and becoming visible in
+                # the destination instance. agent_levels remains authoritative
+                # during that gap. Do not classify the agent as evacuated or it
+                # will be excluded from every later decision after transfer.
+                tracked_levels = getattr(self.jps_sim, "agent_levels", {})
+                if agent_id in tracked_levels:
+                    logger.debug(
+                        f"{agent_id} temporarily absent during level transfer "
+                        f"(tracked on level {tracked_levels[agent_id]})"
+                    )
+                    continue
+
                 # Agent has disappeared - validate they actually reached an exit
                 exit_name = self.agent_destinations.get(agent_id, "unknown")
                 last_position = self.last_known_positions.get(agent_id)
