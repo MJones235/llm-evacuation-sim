@@ -7,6 +7,7 @@ without delays for LLM responses.
 """
 
 import json
+import math
 from pathlib import Path
 
 import matplotlib
@@ -16,6 +17,7 @@ from matplotlib.patches import Polygon as MPLPolygon
 
 from evacusim.utils.logger import get_logger
 from evacusim.visualization.video_generation_helper import RoleColourMap
+from evacusim.visualization.train_geometry import compute_train_polygons
 
 logger = get_logger(__name__)
 
@@ -80,24 +82,12 @@ class VideoGenerator:
         if not self.time_series:
             raise ValueError("No position data found in output file")
 
-        # Derive the initial agent set and track train-boarded agents across frames.
-        # An agent is considered to have boarded a train when they vanish from the
-        # positions dict while their last recorded destination was a train_platform_*.
-        self._initial_agents: set[str] = (
-            set(self.time_series[0]["positions"].keys()) if self.time_series else set()
-        )
-        # Cumulative map: agent_id -> last known destination (updated each frame)
-        self._last_known_destination: dict[str, str] = {}
-        # Running count of agents confirmed to have boarded trains
-        self._boarded_count: int = 0
-        self._boarded_agents: set[str] = set()
-
-        # Pre-computed train rectangles (one per platform) for visualisation.
+        # Pre-computed train polygons (one per platform) for visualisation.
         # Keyed by exit name, e.g. "train_platform_1".
-        self.train_rects: dict[str, dict] = self._compute_train_rects()
-        if self.train_rects:
+        self.train_polygons = compute_train_polygons(self.geometry or {})
+        if self.train_polygons:
             logger.info(
-                f"Pre-computed train rects for: {list(self.train_rects.keys())}"
+                f"Pre-computed train polygons for: {list(self.train_polygons.keys())}"
             )
 
         logger.info(
@@ -331,23 +321,6 @@ class VideoGenerator:
                     polygon = MPLPolygon(coords, fill=True, alpha=0.4, color="black")
                     ax.add_patch(polygon)
 
-        # Draw train boarding zones (jupedsim.train_entrance polygons on level -1).
-        # Draw as solid green markers only — the platform number label lives on the
-        # larger platform walkable area drawn below.
-        if "train_entrance_areas" in geom:
-            for name, coords in geom["train_entrance_areas"].items():
-                if coords:
-                    polygon = MPLPolygon(
-                        coords,
-                        fill=True,
-                        alpha=0.85,
-                        facecolor="#00CC44",
-                        edgecolor="white",
-                        linewidth=1.5,
-                        zorder=5,
-                    )
-                    ax.add_patch(polygon)
-
         # Label each named platform walkable area (platform_1, platform_2, …)
         # with a prominent number so the platform is easy to identify.
         if "walkable_areas" in geom:
@@ -409,6 +382,9 @@ class VideoGenerator:
                         coords_list.extend(coords)
 
         if coords_list:
+            if level_name == "level_-1":
+                for coords in self.train_polygons.values():
+                    coords_list.extend(coords)
             xs = [c[0] for c in coords_list]
             ys = [c[1] for c in coords_list]
             x_min, x_max = min(xs), max(xs)
@@ -419,112 +395,6 @@ class VideoGenerator:
 
             ax.set_xlim(x_min - pad_x, x_max + pad_x)
             ax.set_ylim(y_min - pad_y, y_max + pad_y)
-
-    def _get_train_entrance_areas(self) -> dict[str, list]:
-        """Return train_entrance_areas coord dict from geometry (level -1 only)."""
-        if not self.geometry:
-            return {}
-        if "levels" in self.geometry:
-            geom = self.geometry["levels"].get("level_-1", {})
-        else:
-            geom = self.geometry
-        return geom.get("train_entrance_areas", {})
-
-    def _compute_train_rects(self) -> dict[str, dict]:
-        """Pre-compute the on-screen bounding box for each train from geometry.
-
-        For every ``train_platform_N`` entrance area the method:
-        1. Finds the matching ``platform_N`` walkable-area polygon on level -1.
-        2. Determines whether the platform runs vertically or horizontally.
-        3. Uses the entrance centroid to pick which long side of the platform
-           the train is on (left/right for vertical, bottom/top for horizontal).
-        4. Returns a tight rectangle that sits just outside that edge, sized to
-           the full length of the platform and ~2.8 m wide (tube train width).
-
-        Returns:
-            Dict mapping exit_name (e.g. ``"train_platform_1"``) to a rect dict
-            with keys ``x_min``, ``x_max``, ``y_min``, ``y_max``,
-            ``platform_num``.
-        """
-        train_rects: dict[str, dict] = {}
-        if not self.geometry or "levels" not in self.geometry:
-            return train_rects
-
-        geom_m1 = self.geometry["levels"].get("level_-1", {})
-        walkable = geom_m1.get("walkable_areas", {})
-        train_entrances = geom_m1.get("train_entrance_areas", {})
-
-        TRAIN_WIDTH = 2.8   # metres — approximate tube car width
-        GAP = 0.3           # metres gap between platform edge and train body
-
-        for exit_name, entrance_coords in train_entrances.items():
-            platform_num = exit_name.rsplit("_", 1)[-1]
-            platform_name = f"platform_{platform_num}"
-            platform_coords = walkable.get(platform_name)
-            if not platform_coords or len(platform_coords) < 3:
-                logger.debug(f"No walkable area for {platform_name}, skipping train rect")
-                continue
-
-            # Platform bounding box
-            pxs = [c[0] for c in platform_coords]
-            pys = [c[1] for c in platform_coords]
-            px_min, px_max = min(pxs), max(pxs)
-            py_min, py_max = min(pys), max(pys)
-            pcx = (px_min + px_max) / 2
-            pcy = (py_min + py_max) / 2
-
-            # Entrance centroid (used only if no explicit track_side is given)
-            exs = [c[0] for c in entrance_coords]
-            eys = [c[1] for c in entrance_coords]
-            ecx = sum(exs) / len(exs)
-            ecy = sum(eys) / len(eys)
-
-            p_width = px_max - px_min
-            p_height = py_max - py_min
-
-            # Use explicit track_side from XML when available; fall back to a
-            # geometric heuristic otherwise so new stations work without the
-            # attribute (assuming entrance marker is on the track-facing face).
-            track_sides = geom_m1.get("train_track_sides", {})
-            side = track_sides.get(exit_name)
-
-            if side is None:
-                # Heuristic: entrance centroid relative to platform centre.
-                # entrance centroid >= platform centre (x) → entrance is on
-                # the right-hand face → track is on the LEFT, and vice versa.
-                if p_height >= p_width:
-                    side = "left" if ecx >= pcx else "right"
-                else:
-                    side = "below" if ecy > pcy else "above"
-
-            if side == "left":
-                tx_min = px_min - GAP - TRAIN_WIDTH
-                tx_max = px_min - GAP
-                ty_min, ty_max = py_min, py_max
-            elif side == "right":
-                tx_min = px_max + GAP
-                tx_max = px_max + GAP + TRAIN_WIDTH
-                ty_min, ty_max = py_min, py_max
-            elif side == "above":
-                tx_min, tx_max = px_min, px_max
-                ty_min = py_max + GAP
-                ty_max = py_max + GAP + TRAIN_WIDTH
-            else:  # "below"
-                tx_min, tx_max = px_min, px_max
-                ty_min = py_min - GAP - TRAIN_WIDTH
-                ty_max = py_min - GAP
-
-            train_rects[exit_name] = {
-                "x_min": tx_min, "x_max": tx_max,
-                "y_min": ty_min, "y_max": ty_max,
-                "platform_num": platform_num,
-            }
-            logger.debug(
-                f"Train rect for {exit_name}: x=[{tx_min:.2f},{tx_max:.2f}] "
-                f"y=[{ty_min:.2f},{ty_max:.2f}]"
-            )
-
-        return train_rects
 
     def _draw_frame(self, axes_dict, frame_data, title_text):
         """
@@ -630,97 +500,42 @@ class VideoGenerator:
                 )
                 ax.text(x, y + 1, agent_id, ha="center", fontsize=8, label="_agent")
 
-        # Update last-known destination from this frame's agent_states.
-        # Also detect agents who have just boarded a train (disappeared while
-        # their last destination pointed at a train_platform_*).
-        agent_states = frame_data.get("agent_states", {})
-        for agent_id, state in agent_states.items():
-            dest = (state.get("destination") or "")
-            if dest:
-                self._last_known_destination[agent_id] = dest
-
-        current_agents = set(positions.keys())
-        for agent_id in self._initial_agents - current_agents - self._boarded_agents:
-            dest = self._last_known_destination.get(agent_id, "")
-            if dest.startswith("train_platform_"):
-                self._boarded_agents.add(agent_id)
-
-        self._boarded_count = len(self._boarded_agents)
-
-        # Draw train rectangles on the platform panel (level -1) for every
+        # Draw train bodies on the platform panel (level -1) for every
         # train that is currently present in the station.
         active_exits = set(frame_data.get("active_train_exits", []))
-        if "-1" in axes_dict and self.train_rects:
+        if "-1" in axes_dict and self.train_polygons:
             ax_plat = axes_dict["-1"]
-            for exit_name, rect in self.train_rects.items():
+            for exit_name, coords in self.train_polygons.items():
                 if exit_name not in active_exits:
                     continue
-                # Tube-carriage colour: dark silver body, yellow stripe
                 train_patch = MPLPolygon(
-                    [
-                        (rect["x_min"], rect["y_min"]),
-                        (rect["x_max"], rect["y_min"]),
-                        (rect["x_max"], rect["y_max"]),
-                        (rect["x_min"], rect["y_max"]),
-                    ],
+                    coords,
                     closed=True,
-                    facecolor="#B0B8C1",
-                    edgecolor="#4A4A4A",
+                    facecolor="#D7DEE2",
+                    edgecolor="#26343A",
                     linewidth=1.5,
-                    alpha=0.92,
+                    alpha=0.96,
                     zorder=7,
                     label="_agent",
                 )
                 ax_plat.add_patch(train_patch)
-                # Yellow door-stripe along the platform-facing edge
-                p_num = rect["platform_num"]
-                x_mid = (rect["x_min"] + rect["x_max"]) / 2
-                y_mid = (rect["y_min"] + rect["y_max"]) / 2
-                train_width = rect["x_max"] - rect["x_min"]
-                train_height = rect["y_max"] - rect["y_min"]
-                label_txt = f"TRAIN P{p_num}"
-                # Place the label at the centre of the train
+                x_mid = sum(point[0] for point in coords) / len(coords)
+                y_mid = sum(point[1] for point in coords) / len(coords)
+                edge_dx = coords[1][0] - coords[0][0]
+                edge_dy = coords[1][1] - coords[0][1]
+                label_rotation = math.degrees(math.atan2(edge_dy, edge_dx))
+                if label_rotation > 90:
+                    label_rotation -= 180
+                elif label_rotation <= -90:
+                    label_rotation += 180
                 ax_plat.text(
-                    x_mid, y_mid, label_txt,
+                    x_mid,
+                    y_mid,
+                    f"TRAIN P{exit_name.rsplit('_', 1)[-1]}",
                     ha="center", va="center",
                     fontsize=7, color="#222222", fontweight="bold",
-                    rotation=0 if train_width > train_height else 90,
+                    rotation=label_rotation,
                     zorder=8, clip_on=True,
-                    label="_agent",
-                )
-
-        # Compact train/boarding status badge on the platform panel (level -1).
-        # Only shown when the train is present (rectangle covers that) or after departure.
-        if "-1" in axes_dict:
-            ax_plat = axes_dict["-1"]
-            boarded = self._boarded_count
-            if active_exits:
-                platforms = " ".join(
-                    f"P{n.rsplit('_',1)[-1]}" for n in sorted(active_exits)
-                )
-                status_str = f"[TRAIN] Boarding: {platforms}   Boarded: {boarded}"
-                status_color = "#006600"
-                face_color = "#CCFFCC"
-                ax_plat.text(
-                    0.02, 0.97,
-                    status_str,
-                    transform=ax_plat.transAxes,
-                    ha="left", va="top",
-                    fontsize=8, color=status_color,
-                    bbox=dict(boxstyle="round,pad=0.25", facecolor=face_color, alpha=0.85),
-                    label="_agent",
-                )
-            elif boarded > 0:
-                status_str = f"Train departed   Boarded: {boarded}"
-                status_color = "#555555"
-                face_color = "#F0F0F0"
-                ax_plat.text(
-                    0.02, 0.97,
-                    status_str,
-                    transform=ax_plat.transAxes,
-                    ha="left", va="top",
-                    fontsize=8, color=status_color,
-                    bbox=dict(boxstyle="round,pad=0.25", facecolor=face_color, alpha=0.85),
                     label="_agent",
                 )
 
