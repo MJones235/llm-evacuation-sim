@@ -54,6 +54,7 @@ class SimulationRunnerFactory:
         sim_config = config.get("simulation", {})
         max_steps = sim_config.get("max_iterations", 200)
         decision_interval = sim_config.get("decision_interval", 5.0)
+        start_time_s = float(sim_config.get("start_time_s", 0.0))
 
         # Video generation settings
         video_config = config.get("video", {})
@@ -102,6 +103,7 @@ class SimulationRunnerFactory:
                 embedder=embedder,
                 decision_interval=decision_interval,
                 max_steps=max_steps,
+                start_time_s=start_time_s,
                 output_file=decisions_file,
                 enable_video=enable_video,
                 monitoring_config=monitoring_config,
@@ -113,6 +115,7 @@ class SimulationRunnerFactory:
                 pre_built_agent_roles=pre_built_agent_roles,
                 decision_engine=decision_engine,
                 spawn_controller=spawn_controller,
+                defer_initial_decisions=start_time_s > 0,
             )
             logger.info("HybridSimulationRunner initialized")
         except Exception as e:
@@ -125,6 +128,21 @@ class SimulationRunnerFactory:
         # Configure events
         SimulationRunnerFactory._load_events(runner, config)
         SimulationRunnerFactory._load_calibration_train_events(runner, calibration_timetable)
+        discarded = 0
+        if runner.spawn_controller is not None and start_time_s > 0:
+            discarded = runner.spawn_controller.discard_before(start_time_s)
+        if start_time_s > 0:
+            runner.event_manager.prepare_for_start_time(start_time_s)
+            if runner._bootstrap_initial_decisions_enabled:
+                runner.last_decision_time = (
+                    start_time_s - runner._group_decision_interval
+                )
+                runner._bootstrap_initial_decisions()
+            logger.info(
+                "Simulation starts at %.1fs; discarded %d earlier passenger arrivals",
+                start_time_s,
+                discarded,
+            )
 
         return runner
 

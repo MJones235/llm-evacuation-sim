@@ -61,6 +61,40 @@ class EventManager:
         self._train_departure_sender_labels: dict[str, str] = {}
         self._train_departure_announce: dict[str, bool] = {}
 
+    def prepare_for_start_time(self, start_time_s: float) -> None:
+        """Consume events before a non-zero simulation start time.
+
+        Persistent exit blockages are applied. A train whose dwell overlaps the
+        start remains active for only its remaining dwell. Earlier announcements
+        and completed train visits are skipped rather than replayed at startup.
+        """
+        import math
+
+        for event in self.scheduled_events:
+            event_time = float(event.get("time", 0.0))
+            if event_time >= start_time_s:
+                continue
+
+            repeat_interval = event.get("repeat_interval")
+            if repeat_interval:
+                intervals = math.floor((start_time_s - event_time) / repeat_interval)
+                event["_last_fired"] = event_time + intervals * repeat_interval
+                continue
+
+            event_type = event.get("type", "")
+            if event_type == "block_exit":
+                self._fire_block_exit(event, start_time_s)
+            elif event_type == "train_arrival":
+                dwell = float(event.get("dwell_seconds", 30.0))
+                departure_time = event_time + dwell
+                if departure_time > start_time_s:
+                    active_event = dict(event)
+                    active_event["dwell_seconds"] = departure_time - start_time_s
+                    self._fire_train_arrival(
+                        active_event, start_time_s, None, None, None, None
+                    )
+            event["_fired"] = True
+
     def check_and_trigger_events(
         self,
         current_sim_time: float,

@@ -187,6 +187,14 @@ class ConfigLoader:
         if "network_path" not in sim_config:
             raise ValueError("simulation.network_path is required in configuration")
 
+        start_time_s = sim_config.get("start_time_s", 0.0)
+        if (
+            not isinstance(start_time_s, int | float)
+            or isinstance(start_time_s, bool)
+            or not 0 <= start_time_s < 86400
+        ):
+            raise ValueError("simulation.start_time_s must be between 0 and 86399 seconds")
+
         # Validate multi_level (optional)
         if "multi_level" in sim_config:
             multi_level = sim_config["multi_level"]

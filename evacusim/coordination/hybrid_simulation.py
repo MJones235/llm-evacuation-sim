@@ -114,6 +114,7 @@ class HybridSimulationRunner:
         embedder: Any,  # Sentence embedder function
         decision_interval: float = 5.0,
         max_steps: int = 3600,
+        start_time_s: float = 0.0,
         output_file: Path | None = None,
         enable_video: bool = False,
         monitoring_config: dict[str, Any] | None = None,
@@ -125,6 +126,7 @@ class HybridSimulationRunner:
         pre_built_agent_roles: dict | None = None,
         decision_engine=None,
         spawn_controller=None,
+        defer_initial_decisions: bool = False,
     ):
         """
         Initialize the hybrid simulation runner.
@@ -137,6 +139,7 @@ class HybridSimulationRunner:
             embedder: Sentence embedding function
             decision_interval: Time between Concordia decisions (seconds)
             max_steps: Maximum simulation steps
+            start_time_s: Absolute simulation clock time at the first step.
             output_file: Path to output file for saving results
             enable_video: Whether to track position history for video generation
             monitoring_config: Optional monitoring configuration dict with keys
@@ -156,6 +159,8 @@ class HybridSimulationRunner:
                 ``jps_sim.dt`` seconds have elapsed, matching wall-clock to
                 simulation time (useful for live viewers).  When False the
                 simulation runs as fast as possible.  Defaults to False.
+            defer_initial_decisions: Delay bootstrap until the factory has
+                prepared event state for a non-zero absolute start time.
         """
         self.jps_sim = jupedsim_simulation
         self.station_layout = station_layout
@@ -163,6 +168,7 @@ class HybridSimulationRunner:
         self.embedder = embedder
         self.decision_interval = decision_interval
         self.max_steps = max_steps
+        self.start_time_s = max(0.0, float(start_time_s))
         self.output_file = output_file
         self.enable_video = enable_video
         self.pace_to_realtime = pace_to_realtime
@@ -261,8 +267,8 @@ class HybridSimulationRunner:
 
         # Tracking
         # Seeded below once group cadence is known.
-        self.last_decision_time = 0.0
-        self.current_sim_time = 0.0
+        self.last_decision_time = self.start_time_s
+        self.current_sim_time = self.start_time_s
         self.current_step = 0  # Track current simulation step for logging
         self.agent_decisions: dict[str, dict[str, Any]] = {}
         self.last_observations: dict[str, str] = {}  # Cache observations for change detection
@@ -431,15 +437,16 @@ class HybridSimulationRunner:
         # before their group's turn fires.
         self._pending_immediate_decisions: set[str] = set()
 
-        # Bootstrap: run a full all-agent decision cycle at t=0 so every agent
-        # has an LLM-chosen destination before physics starts. Can be disabled
-        # via performance.bootstrap_initial_decisions: false if needed.
+        # Bootstrap: run a full all-agent decision cycle at the configured start
+        # time so every agent has a destination before physics starts.
         self._bootstrap_initial_decisions_enabled = bool(
             self.performance_config.get("bootstrap_initial_decisions", True)
         )
-        if self._bootstrap_initial_decisions_enabled:
-            self.last_decision_time = -self._group_decision_interval
+        if self._bootstrap_initial_decisions_enabled and not defer_initial_decisions:
+            self.last_decision_time = self.start_time_s - self._group_decision_interval
             self._bootstrap_initial_decisions()
+        elif self._bootstrap_initial_decisions_enabled:
+            logger.info("Deferring bootstrap decisions until start-time state is prepared.")
         else:
             logger.info(
                 "Skipping t=0 all-agent bootstrap decisions; using staggered runtime decisions."
@@ -455,10 +462,17 @@ class HybridSimulationRunner:
         Adds the agent to JuPedSim, registers an LLM-free ``NoOpAgent`` in the
         shared ``concordia_agents`` map (so exit/observation/decision machinery
         picks it up on the next cycle), and hands its config to the decision
-        processor.  The agent spawns with a default JuPedSim destination so it
-        moves immediately; the rule-based engine re-routes it by goal on its
-        first decision.  Returns False (and logs) if physical insertion fails
-        (e.g. the spawn point is occupied).
+        processor.  The agent spawns holding at its spawn point (no implicit
+        destination) so it doesn't move on the level's default street-exit
+        journey before the rule-based engine assigns its real route on its
+        first decision; ``get_default_exit()`` always returns the first exit
+        registered for the level (``blackett_street`` here), so a spawn point
+        placed inside — or near — that exit's own polygon would otherwise be
+        detected as "arrived" and removed before ever getting a decision (this
+        is why blackett_street-spawned boarders were vanishing at spawn while
+        the same exit worked fine for alighters leaving through it).  Returns
+        False (and logs) if physical insertion fails (e.g. the spawn point is
+        occupied).
         """
         agent_id = cfg["id"]
         walking_speed = float(cfg.get("walking_speed", 1.34))
@@ -466,12 +480,12 @@ class HybridSimulationRunner:
             if hasattr(self.jps_sim, "simulations"):
                 self.jps_sim.add_agent(
                     agent_id, position, walking_speed=walking_speed,
-                    level_id=str(level_id), assign_default_destination=True,
+                    level_id=str(level_id), assign_default_destination=False,
                 )
             else:
                 self.jps_sim.add_agent(
                     agent_id, position, walking_speed=walking_speed,
-                    assign_default_destination=True,
+                    assign_default_destination=False,
                 )
         except Exception as e:
             # Expected occasionally (occupied point, jitter outside walkable);
@@ -608,14 +622,14 @@ class HybridSimulationRunner:
         return None
 
     def _bootstrap_initial_decisions(self) -> None:
-        """Run one decision cycle at t=0 before the first JuPedSim step.
+        """Run one decision cycle at the configured time before the first step.
 
         At bootstrap we process ALL agents regardless of group so every agent
         has an initial journey before physics starts.
         """
         try:
-            logger.info("Bootstrapping initial agent decisions at t=0.0s")
-            initial_time = 0.0
+            initial_time = self.start_time_s
+            logger.info(f"Bootstrapping initial agent decisions at t={initial_time:.1f}s")
             observations = self.observation_coordinator.generate_all_observations(initial_time)
             self.last_decision_time = self.decision_processor.process_all_agents(
                 observations, initial_time
@@ -663,7 +677,7 @@ class HybridSimulationRunner:
                     step_start = time.perf_counter()
                     self.current_step = step
                     force_immediate_decision_cycle = False
-                    self.current_sim_time = step * self.jps_sim.dt
+                    self.current_sim_time = self.start_time_s + step * self.jps_sim.dt
 
                     # Feature A: spawn passengers whose Poisson/timetable arrival
                     # time has been reached BEFORE stepping physics, so a run that
@@ -787,6 +801,9 @@ class HybridSimulationRunner:
                                 f"{transferred_agents}"
                             )
                             for _tid in transferred_agents:
+                                # Defensive recovery for any observer that saw
+                                # the source/destination handoff gap as an exit.
+                                self.exited_agents.discard(_tid)
                                 self.agent_destinations.pop(_tid, None)
                                 self.decision_processor.clear_goal_for_redecision(_tid)
                                 self.decision_processor.prompt_cache.clear_agent(_tid)
