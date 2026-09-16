@@ -46,10 +46,22 @@ class PoissonSchedulerTests(unittest.TestCase):
         sched = build_arrival_schedule([], timetable, _SPAWN_CFG, seed=0)
         train = [e for e in sched if e.source == "train"]
         self.assertEqual(len(train), 20)
-        at_120 = [e for e in train if e.time_s == 120.0]
-        self.assertEqual(len(at_120), 15)
+        from_first_train = [e for e in train if 121.0 <= e.time_s <= 132.0]
+        self.assertEqual(len(from_first_train), 15)
+        self.assertGreater(len({e.time_s for e in from_first_train}), 1)
         self.assertTrue(all(e.dest_exit == "street_exit_a" for e in train))
         self.assertTrue(all(e.level == "-1" for e in train))
+
+    def test_train_passengers_are_distributed_across_configured_doors(self):
+        cfg = dict(_SPAWN_CFG, train_door_counts={"1": 4})
+        timetable = [TrainArrival(120.0, "1", 10, 30.0)]
+
+        train = build_arrival_schedule([], timetable, cfg, seed=4)
+
+        self.assertEqual([event.door_index for event in train].count(0), 3)
+        self.assertEqual([event.door_index for event in train].count(1), 3)
+        self.assertEqual([event.door_index for event in train].count(2), 2)
+        self.assertEqual([event.door_index for event in train].count(3), 2)
 
     def test_output_is_time_sorted(self):
         intervals = [UsageInterval(0, 600, "entrance_a", 120)]
@@ -64,6 +76,31 @@ class PoissonSchedulerTests(unittest.TestCase):
         sched = build_arrival_schedule(intervals, [], cfg, seed=3)
         dests = {e.dest_exit for e in sched if e.source == "entrance"}
         self.assertEqual(dests, {"train_platform_1", "train_platform_2"})
+
+    def test_destinations_respect_platform_service_windows(self):
+        cfg = dict(_SPAWN_CFG, entrance_dest_exits=["train_platform_1", "train_platform_4"])
+        intervals = [UsageInterval(0, 1000, "entrance_a", 2000)]
+        timetable = [
+            TrainArrival(0.0, "1", 0, 30.0),
+            TrainArrival(1000.0, "1", 0, 30.0),
+            TrainArrival(800.0, "4", 0, 30.0),
+            TrainArrival(1000.0, "4", 0, 30.0),
+        ]
+
+        entrance = [
+            event
+            for event in build_arrival_schedule(intervals, timetable, cfg, seed=7)
+            if event.source == "entrance"
+        ]
+
+        self.assertTrue(
+            all(
+                event.dest_exit == "train_platform_1"
+                for event in entrance
+                if event.time_s < 200
+            )
+        )
+        self.assertIn("train_platform_4", {event.dest_exit for event in entrance if event.time_s >= 200})
 
 
 if __name__ == "__main__":

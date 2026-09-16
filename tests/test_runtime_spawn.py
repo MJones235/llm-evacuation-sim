@@ -23,12 +23,14 @@ class _FakeMultiSim:
     def __init__(self, fail_ids=()):
         self.added = []
         self._fail_ids = set(fail_ids)
+        self.default_destination_flags = []
 
     def add_agent(self, agent_id, position, walking_speed=1.34, level_id="0",
                   assign_default_destination=True):
         if agent_id in self._fail_ids:
             raise RuntimeError("occupied spawn point")
         self.added.append((agent_id, position, level_id))
+        self.default_destination_flags.append(assign_default_destination)
 
 
 class _FakeSingleSim:
@@ -36,10 +38,12 @@ class _FakeSingleSim:
 
     def __init__(self):
         self.added = []
+        self.default_destination_flags = []
 
     def add_agent(self, agent_id, position, walking_speed=1.34,
                   assign_default_destination=True):
         self.added.append((agent_id, position))
+        self.default_destination_flags.append(assign_default_destination)
 
 
 class _FakeProcessor:
@@ -72,6 +76,7 @@ def _make_runner(jps_sim, controller):
     r.decision_processor = _FakeProcessor()
     r.spawn_log = []
     r.spawn_controller = controller
+    r._pending_immediate_decisions = set()
     return r
 
 
@@ -93,6 +98,11 @@ class RuntimeSpawnTests(unittest.TestCase):
         self.assertTrue(all(isinstance(a, NoOpAgent) for a in r.concordia_agents.values()))
         # Level routing preserved: one on "0", one on "-1".
         self.assertEqual({lvl for _, _, lvl in sim.added}, {"0", "-1"})
+        # Spawned agents must NOT get the level's default (street-exit) journey:
+        # a spawn point that happens to sit inside that exit's own polygon
+        # (e.g. blackett_street, the first-registered exit) would otherwise be
+        # detected as "arrived" and removed before ever getting a real decision.
+        self.assertEqual(sim.default_destination_flags, [False, False])
 
         HybridSimulationRunner._spawn_arrivals(r, 100.0)
         self.assertEqual(len(r.concordia_agents), 3)  # remaining event consumed once

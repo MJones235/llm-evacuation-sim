@@ -7,7 +7,11 @@ from evacusim.calibration.spawn_controller import RuntimeSpawnController
 
 _SPAWN_POINTS = {
     "entrance_a": {"level": "0", "xy": [10.0, 5.0]},
-    "1": {"level": "-1", "xy": [20.0, -3.0]},
+    "1": {
+        "level": "-1",
+        "xy": [20.0, -3.0],
+        "door_points": [[20.0, -3.0], [20.0, 3.0]],
+    },
 }
 
 
@@ -36,6 +40,13 @@ class PopDueTests(unittest.TestCase):
         self.assertEqual(len(c), 3)
         self.assertEqual(c.total, 3)
 
+    def test_discard_before_skips_backlog_but_keeps_boundary_event(self):
+        c = RuntimeSpawnController(_schedule(), _SPAWN_POINTS)
+
+        self.assertEqual(c.discard_before(5.0), 2)
+        self.assertEqual(c.remaining, 1)
+        self.assertEqual(c.pop_due(5.0), [_schedule()[-1]])
+
 
 class BuildCfgTests(unittest.TestCase):
     def test_entrance_cfg_fields(self):
@@ -52,11 +63,13 @@ class BuildCfgTests(unittest.TestCase):
         self.assertFalse(cfg["is_injured"])
 
     def test_train_cfg_fields(self):
-        c = RuntimeSpawnController(_schedule(), _SPAWN_POINTS, seed=2, jitter_m=0.0)
-        ev = SpawnEvent(1.0, "train", "1", "-1", "street_exit_a")
+        c = RuntimeSpawnController(
+            _schedule(), _SPAWN_POINTS, seed=2, jitter_m=0.0, train_door_jitter_m=0.0
+        )
+        ev = SpawnEvent(1.0, "train", "1", "-1", "street_exit_a", door_index=1)
         cfg, pos, level = c.build_agent_cfg(ev)
         self.assertEqual(level, "-1")
-        self.assertEqual(pos, (20.0, -3.0))
+        self.assertEqual(pos, (20.0, 3.0))
         self.assertEqual(cfg["initial_zone"], "platform")
         self.assertEqual(cfg["target"], "street_exit_a")
         self.assertIn("leave", cfg["goal_state"].lower())  # exit goal, no train keyword

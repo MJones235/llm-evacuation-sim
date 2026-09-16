@@ -214,6 +214,14 @@ class SimulationRunnerFactory:
             "entrance_dest_exits": calibration.get("entrance_dest_exits", []),
             "platform_level": str(calibration.get("platform_level", "-1")),
             "platform_exit": calibration.get("platform_exit", ""),
+            "train_door_counts": {
+                str(platform): len(point.get("door_points", []))
+                for platform, point in spawn_points.items()
+                if str(platform).isdigit() and point.get("door_points")
+            },
+            "train_alighting_duration_s": calibration.get(
+                "train_alighting_duration_s", 12.0
+            ),
         }
         seed = int(calibration.get("seed", 0))
         schedule = build_arrival_schedule(intervals, timetable, spawn_cfg, seed=seed)
@@ -223,6 +231,7 @@ class SimulationRunnerFactory:
             spawn_points,
             seed=seed,
             jitter_m=float(calibration.get("spawn_jitter_m", 0.5)),
+            train_door_jitter_m=float(calibration.get("train_door_jitter_m", 0.3)),
             walking_speed=float(calibration.get("walking_speed", 1.34)),
             knowledge_profile=calibration.get("knowledge_profile", "novice"),
         )

@@ -64,6 +64,32 @@ class CalibrationValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ConfigLoader._validate_calibration_section(_base_calibration(entrance_dest_exits="x"))
 
+    def test_simulation_start_time_range(self):
+        base = {
+            "agents": {"count": 0, "knowledge_profiles": {"test": 1}},
+            "simulation": {"network_path": "network", "start_time_s": 27000},
+            "station": {
+                "knowledge": {
+                    "base_memories": ["Test station."],
+                    "profiles": {"test": ["Test knowledge."]},
+                }
+            },
+        }
+        ConfigLoader.validate_config(base)
+        for invalid in (-1, 86400, "07:30", True):
+            cfg = {
+                "agents": {"count": 0, "knowledge_profiles": {"test": 1}},
+                "simulation": {"network_path": "network", "start_time_s": invalid},
+                "station": {
+                    "knowledge": {
+                        "base_memories": ["Test station."],
+                        "profiles": {"test": ["Test knowledge."]},
+                    }
+                },
+            }
+            with self.assertRaises(ValueError):
+                ConfigLoader.validate_config(cfg)
+
 
 class FactoryWiringTests(unittest.TestCase):
     def test_build_calibration_disabled_returns_none(self):

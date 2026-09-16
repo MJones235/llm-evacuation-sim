@@ -35,6 +35,7 @@ class RuntimeSpawnController:
         spawn_points: dict[str, dict[str, Any]],
         seed: int = 0,
         jitter_m: float = 0.5,
+        train_door_jitter_m: float = 0.3,
         walking_speed: float = 1.34,
         knowledge_profile: str = "novice",
     ) -> None:
@@ -46,6 +47,7 @@ class RuntimeSpawnController:
         # Independent RNG for position jitter; derived from seed so runs are reproducible.
         self._rng = random.Random((seed * 2654435761) & 0xFFFFFFFF)
         self._jitter_m = float(jitter_m)
+        self._train_door_jitter_m = float(train_door_jitter_m)
         self._walking_speed = float(walking_speed)
         self._knowledge_profile = knowledge_profile
 
@@ -73,6 +75,16 @@ class RuntimeSpawnController:
         if self._cursor < len(self._schedule):
             return self._schedule[self._cursor].time_s
         return None
+
+    def discard_before(self, start_time_s: float) -> int:
+        """Discard scheduled arrivals strictly before an absolute start time."""
+        initial_cursor = self._cursor
+        while (
+            self._cursor < len(self._schedule)
+            and self._schedule[self._cursor].time_s < start_time_s
+        ):
+            self._cursor += 1
+        return self._cursor - initial_cursor
 
     def pop_due(self, current_sim_time: float) -> list[SpawnEvent]:
         """Return (and consume) all events with ``time_s <= current_sim_time``.
@@ -103,9 +115,18 @@ class RuntimeSpawnController:
                 f"No spawn_point configured for '{event.location_id}' "
                 f"(source={event.source}); known: {sorted(self._spawn_points)}"
             )
-        base_x, base_y = float(sp["xy"][0]), float(sp["xy"][1])
+        base_xy = sp["xy"]
+        door_points = sp.get("door_points", [])
+        if event.source == "train" and door_points and event.door_index is not None:
+            base_xy = door_points[event.door_index % len(door_points)]
+        base_x, base_y = float(base_xy[0]), float(base_xy[1])
         level = str(sp.get("level", event.level))
-        radius = self._jitter_m * (1.0 + float(attempt))
+        base_jitter = (
+            self._train_door_jitter_m
+            if event.source == "train" and door_points
+            else self._jitter_m
+        )
+        radius = base_jitter * (1.0 + float(attempt))
         r = radius * math.sqrt(self._rng.random())
         theta = self._rng.uniform(0.0, 2.0 * math.pi)
         return (base_x + r * math.cos(theta), base_y + r * math.sin(theta)), level
