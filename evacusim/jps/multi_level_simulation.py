@@ -625,7 +625,10 @@ class MultiLevelJuPedSimulation:
         # Choose a spawn position that doesn't collide with:
         #   (a) agents already present on the target level, and
         #   (b) other agents being transferred to this level in the same step.
-        MIN_AGENT_SEP = 0.4
+        # JuPedSim rejects centres at or below roughly 0.4 m separation. Use a
+        # margin above that threshold to avoid floating-point borderline
+        # candidates passing our check and failing during add_agent().
+        MIN_AGENT_SEP = 0.45
         existing_positions = (
             list(self.simulations[target_level].get_all_agent_positions().values())
             + self._pending_spawn_positions
