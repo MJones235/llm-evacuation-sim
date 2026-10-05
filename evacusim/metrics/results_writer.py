@@ -5,6 +5,7 @@ Handles saving simulation results to JSON files, both incrementally
 during simulation (for live viewing) and final results at completion.
 """
 
+import csv
 import json
 from pathlib import Path
 from typing import Any
@@ -140,6 +141,41 @@ class ResultsWriter:
             logger.warning(f"Failed to save position sidecar: {e}")
 
     @staticmethod
+    def _save_exit_log(
+        path: Path,
+        exit_log: list[dict[str, Any]],
+        spawn_log: list[dict[str, Any]] | None,
+    ) -> None:
+        """Write exit_log.csv, enriched with each agent's spawn provenance."""
+        spawn_by_id = {entry["id"]: entry for entry in (spawn_log or [])}
+        fields = [
+            "agent_id",
+            "exit_name",
+            "intended_exit",
+            "exit_distance_m",
+            "time_s",
+            "level",
+            "x",
+            "y",
+            "validated",
+            "spawn_source",
+            "spawn_location",
+            "spawn_time_s",
+        ]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            for record in exit_log:
+                spawn = spawn_by_id.get(record["agent_id"], {})
+                row = dict(record)
+                row["spawn_source"] = spawn.get("source", "")
+                row["spawn_location"] = spawn.get("location", "")
+                row["spawn_time_s"] = spawn.get("time_s", "")
+                writer.writerow({k: row.get(k, "") for k in fields})
+        logger.info(f"Exit log ({len(exit_log)} records) saved to {path}")
+
+    @staticmethod
     def save_final_results(
         output_path: Path,
         agent_decisions: dict[str, Any],
@@ -156,6 +192,9 @@ class ResultsWriter:
         llm_provider: Any,
         agent_levels: dict[str, str] | None = None,
         agent_roles: dict[str, str] | None = None,
+        *,
+        exit_log: list[dict[str, Any]] | None = None,
+        spawn_log: list[dict[str, Any]] | None = None,
     ) -> None:
         """
         Save final simulation results with all reports.
@@ -175,6 +214,12 @@ class ResultsWriter:
             performance_report: Performance timing report
             llm_provider: LLM provider instance for cost tracking
             agent_levels: Final level for each agent (multi-level simulations)
+            exit_log: Per-agent evacuation records, written as exit_log.csv
+            spawn_log: Runtime spawn records, joined onto exit_log for provenance
+
+        Note:
+            exit_log/spawn_log are keyword-only because the existing call sites
+            pass every other argument positionally.
         """
         # Extract route changes for analytics
         route_changes = []
@@ -231,6 +276,13 @@ class ResultsWriter:
         with open(financial_report_path, "w") as f:
             f.write(financial_report)
         logger.info(f"Financial report saved to {financial_report_path}")
+
+        # Per-agent exit log, joined with spawn provenance so each row says
+        # where the person came from as well as where they left.
+        if exit_log is not None:
+            ResultsWriter._save_exit_log(
+                output_path.parent / "exit_log.csv", exit_log, spawn_log
+            )
 
         # Save all analytics
         AnalyticsGenerator.save_all_analytics(

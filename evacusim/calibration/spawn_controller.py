@@ -36,7 +36,10 @@ class RuntimeSpawnController:
         seed: int = 0,
         jitter_m: float = 0.5,
         train_door_jitter_m: float = 0.3,
-        walking_speed: float = 1.34,
+        walking_speed_mean: float = 1.34,
+        walking_speed_std: float = 0.0,
+        walking_speed_min: float = 0.3,
+        walking_speed_max: float = 2.2,
         knowledge_profile: str = "novice",
     ) -> None:
         # Schedule must already be time-sorted (build_arrival_schedule guarantees this).
@@ -44,12 +47,31 @@ class RuntimeSpawnController:
         self._spawn_points = dict(spawn_points)
         self._cursor = 0
         self._counter = 0
-        # Independent RNG for position jitter; derived from seed so runs are reproducible.
+        # Independent RNG for position jitter and walking speed; derived from
+        # seed so runs are reproducible. Shared between the two uses (rather
+        # than a second Random instance) so the whole controller's output is
+        # a deterministic function of `seed` alone.
         self._rng = random.Random((seed * 2654435761) & 0xFFFFFFFF)
         self._jitter_m = float(jitter_m)
         self._train_door_jitter_m = float(train_door_jitter_m)
-        self._walking_speed = float(walking_speed)
+        self._walking_speed_mean = float(walking_speed_mean)
+        self._walking_speed_std = float(walking_speed_std)
+        self._walking_speed_min = float(walking_speed_min)
+        self._walking_speed_max = float(walking_speed_max)
         self._knowledge_profile = knowledge_profile
+
+    def _sample_walking_speed(self) -> float:
+        """Per-agent walking speed, normally distributed and clamped.
+
+        `walking_speed_std=0` (the default) collapses this to the fixed
+        `walking_speed_mean` for every agent — `random.gauss` with sigma=0
+        returns mu deterministically, so no separate code path is needed.
+        Clamped to [walking_speed_min, walking_speed_max] since an unclamped
+        normal can sample non-physical (near-zero or negative) speeds when
+        std is large relative to mean, which JuPedSim can't handle.
+        """
+        speed = self._rng.gauss(self._walking_speed_mean, self._walking_speed_std)
+        return max(self._walking_speed_min, min(self._walking_speed_max, speed))
 
     def __len__(self) -> int:
         return len(self._schedule)
@@ -157,7 +179,7 @@ class RuntimeSpawnController:
             "agent_role": "passenger",
             "target": event.dest_exit,
             "knowledge_profile": self._knowledge_profile,
-            "walking_speed": self._walking_speed,
+            "walking_speed": self._sample_walking_speed(),
             "goal_state": goal,
             "initial_goal": goal,
             "is_injured": False,

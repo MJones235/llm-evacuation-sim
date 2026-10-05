@@ -244,7 +244,10 @@ class SimulationRunnerFactory:
             seed=seed,
             jitter_m=float(calibration.get("spawn_jitter_m", 0.5)),
             train_door_jitter_m=float(calibration.get("train_door_jitter_m", 0.3)),
-            walking_speed=float(calibration.get("walking_speed", 1.34)),
+            walking_speed_mean=float(calibration.get("walking_speed_mean", 1.34)),
+            walking_speed_std=float(calibration.get("walking_speed_std", 0.0)),
+            walking_speed_min=float(calibration.get("walking_speed_min", 0.3)),
+            walking_speed_max=float(calibration.get("walking_speed_max", 2.2)),
             knowledge_profile=calibration.get("knowledge_profile", "novice"),
         )
         # Retained for the end-of-run calibration report (expected vs realised).

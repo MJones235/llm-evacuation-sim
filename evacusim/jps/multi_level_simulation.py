@@ -614,7 +614,7 @@ class MultiLevelJuPedSimulation:
         edge = self.escalator_controller.get_edge_for_exit(current_level, exit_name)
         if edge is None:
             available = [
-                (e.from_level, e.escalator_id, e.direction)
+                (e.from_level, e.from_exit_name, e.to_level)
                 for e in self.escalator_controller.registry.edges
             ]
             logger.error(

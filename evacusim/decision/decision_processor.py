@@ -1059,12 +1059,19 @@ class DecisionProcessor:
             pass
         return None
 
-    def _agent_is_on_escalator(self, agent_id: str) -> bool:
-        """Return True if the agent is actively traversing an escalator departure path.
+    def _agent_is_on_escalator(self, agent_id: str) -> tuple[bool, bool]:
+        """Return (on_escalator, in_corridor) for the agent.
 
-        Only **departure** zones and escalator corridors warrant deferral: an
-        agent in those areas is physically mid-journey on an escalator and
-        interrupting them would stall the flow.
+        on_escalator is True if the agent is actively traversing an escalator
+        departure path — either the physical corridor or a departure transfer
+        zone — and warrants deferral: an agent in those areas is physically
+        mid-journey on an escalator and interrupting them would stall the flow.
+
+        in_corridor distinguishes the corridor case specifically. An agent
+        already inside the corridor is committed to the escalator with no
+        realistic alternative (reversing against the flow of a moving
+        escalator is not a real option), unlike one still in the departure
+        zone approaching it, who can still switch to a different escalator.
 
         **Arrival** zones are explicitly excluded: an agent in an arrival zone
         has already completed the escalator journey and is awaiting a fresh
@@ -1072,10 +1079,10 @@ class DecisionProcessor:
         blocking because they end up silently skipped every cycle.
         """
         if not self.jps_sim:
-            return False
+            return False, False
         pos = self.jps_sim.get_agent_position(agent_id)
         if pos is None:
-            return False
+            return False, False
         level_id = None
         if hasattr(self.jps_sim, "agent_levels"):
             level_id = self.jps_sim.agent_levels.get(agent_id)
@@ -1085,14 +1092,14 @@ class DecisionProcessor:
         else:
             sim = self.jps_sim
         if sim is None:
-            return False
+            return False, False
         p = Point(pos)
 
         # Corridor check — any corridor is a departure path regardless of role.
         corridors = getattr(getattr(sim, "geometry_manager", None), "escalator_corridors", {})
         for poly in corridors.values():
             if poly.covers(p) or poly.contains(p):
-                return True
+                return True, True
 
         # Transfer-zone check — departure zones only (multi-level).
         controller = getattr(self.jps_sim, "escalator_controller", None)
@@ -1103,22 +1110,32 @@ class DecisionProcessor:
                     continue
                 zone_poly = controller.get_zone_polygon(ep.transfer_zone_name)
                 if zone_poly is not None and (zone_poly.covers(p) or zone_poly.contains(p)):
-                    return True
+                    return True, False
 
-        return False
+        return False, False
 
     def _should_defer_escalator_decision(
         self,
         agent_id: str,
         current_sim_time: float,
         position: tuple[float, float],
+        in_corridor: bool,
     ) -> bool:
         """Return True when escalator-context decision deferral should continue.
 
         Agents can queue in escalator departure geometry during congestion.
         If they are not making progress for too long, indefinite deferral causes
         a deadlock where they never re-evaluate alternatives. This guardrail
-        allows periodic re-decisions only for stalled agents.
+        allows periodic re-decisions only for stalled agents — but only when a
+        re-decision is something the agent could actually act on.
+
+        An agent already inside the physical corridor (in_corridor=True) has
+        no alternative route: reversing against the flow of a moving
+        escalator is not realistic. A stall there is logged for diagnostics
+        (it reflects a genuine pedestrian density gridlock, not indecision)
+        but never escalated to "allow re-decision" — there is nothing a fresh
+        decision could change, and re-running exit selection every cycle for
+        an agent that cannot move differently is pure overhead.
         """
         state = self._escalator_deferral_state.get(agent_id)
         if state is None:
@@ -1139,6 +1156,14 @@ class DecisionProcessor:
         state["last_position"] = position
         stalled_for = current_sim_time - float(state.get("last_progress_time", current_sim_time))
         if stalled_for < self._escalator_deferral_timeout_secs:
+            return True
+
+        if in_corridor:
+            logger.info(
+                f"{agent_id}: escalator-context stall ({stalled_for:.1f}s) inside "
+                "the corridor — no alternative route available, continuing to defer"
+            )
+            state["last_progress_time"] = current_sim_time
             return True
 
         # Let this cycle through so the LLM can break a potential escalator jam.
@@ -1342,8 +1367,11 @@ class DecisionProcessor:
             # While traversing escalator geometry (departure side), keep current
             # movement and defer until the agent leaves that area.
             choosing_exit_after_transfer = agent_id in self._post_transfer_exit_choice_agents
-            if self._agent_is_on_escalator(agent_id) and not choosing_exit_after_transfer:
-                if self._should_defer_escalator_decision(agent_id, current_sim_time, position):
+            on_escalator, in_corridor = self._agent_is_on_escalator(agent_id)
+            if on_escalator and not choosing_exit_after_transfer:
+                if self._should_defer_escalator_decision(
+                    agent_id, current_sim_time, position, in_corridor
+                ):
                     self._deferred_escalator_agents.add(agent_id)
                     logger.debug(f"{agent_id}: in escalator departure context — deferring decision")
                     return

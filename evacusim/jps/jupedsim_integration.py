@@ -12,6 +12,7 @@ Features:
     - Real-time position tracking for visualization
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,15 @@ from evacusim.jps.geometry_manager import GeometryManager
 from evacusim.jps.stage_manager import StageManager
 
 logger = get_logger(__name__)
+
+# Matches JuPedSim's native "Point (x, y) is outside of accessible area" error,
+# raised from inside Simulation.iterate() under extreme local pedestrian
+# density (the collision-avoidance solver's per-step position update can
+# overshoot the walkable navmesh boundary). See
+# ConcordiaJuPedSimulation._recover_from_step_exception.
+_OUTSIDE_ACCESSIBLE_AREA_RE = re.compile(
+    r"Point \(([-\d.eE]+),\s*([-\d.eE]+)\) is outside of accessible area"
+)
 
 
 class ConcordiaJuPedSimulation:
@@ -242,8 +252,15 @@ class ConcordiaJuPedSimulation:
         if self.is_complete:
             return False
 
-        # Run JuPedSim step
-        self.simulation.iterate()
+        # Snapshot positions before iterating so a failed iterate() can still
+        # be matched back to the agent nearest the reported bad point (see
+        # _recover_from_step_exception).
+        positions_before = self.agent_tracker.get_all_positions()
+        try:
+            self.simulation.iterate()
+        except Exception as exc:
+            if not self._recover_from_step_exception(exc, positions_before):
+                raise
         self.current_step += 1
 
         # Check if any agents remain
@@ -252,6 +269,64 @@ class ConcordiaJuPedSimulation:
             self.is_complete = True
             return False
 
+        return True
+
+    def _recover_from_step_exception(
+        self, exc: Exception, positions_before: dict[str, tuple[float, float]]
+    ) -> bool:
+        """Attempt one recovery from a JuPedSim step failure, for exactly the
+        known "outside of accessible area" density-overflow case (see
+        _OUTSIDE_ACCESSIBLE_AREA_RE) — this is a pre-existing JuPedSim
+        numerical fragility under extreme local crowding, not something
+        admission throttling upstream can fully rule out. Any other
+        exception is left untouched (returns False immediately) so it
+        propagates and aborts the run exactly as before.
+
+        Removes the agent nearest the reported point (using positions from
+        just before the failed iterate() call, since the simulation's own
+        state at the moment of the exception is not something we can safely
+        introspect) and retries iterate() once. If the retry also raises
+        anything, gives up and returns False — callers then treat this
+        exactly like the pre-recovery behavior (log, abort), so a failed
+        recovery attempt is never worse than not attempting one.
+        """
+        match = _OUTSIDE_ACCESSIBLE_AREA_RE.search(str(exc))
+        if match is None:
+            return False
+        bad_point = (float(match.group(1)), float(match.group(2)))
+
+        nearest_agent_id: str | None = None
+        nearest_dist_sq: float | None = None
+        for agent_id, pos in positions_before.items():
+            dist_sq = (pos[0] - bad_point[0]) ** 2 + (pos[1] - bad_point[1]) ** 2
+            if nearest_dist_sq is None or dist_sq < nearest_dist_sq:
+                nearest_dist_sq, nearest_agent_id = dist_sq, agent_id
+        if nearest_agent_id is None:
+            return False
+
+        jps_id = self.agent_tracker.get_jps_id(nearest_agent_id)
+        if jps_id is None:
+            return False
+
+        try:
+            self.simulation.mark_agent_for_removal(jps_id)
+            self.simulation.iterate()
+        except Exception as retry_exc:
+            logger.error(
+                f"Recovery retry failed on level {self.level_id} after "
+                f"marking {nearest_agent_id} for removal: {retry_exc}"
+            )
+            return False
+
+        self.agent_tracker.agent_ids.pop(nearest_agent_id, None)
+        self.agent_tracker.jps_to_concordia.pop(jps_id, None)
+        self.agent_assigned_exits.pop(nearest_agent_id, None)
+        logger.warning(
+            f"Removed agent {nearest_agent_id} (JPS id {jps_id}, "
+            f"~{nearest_dist_sq ** 0.5:.2f}m from the reported point) to recover "
+            f"from a JuPedSim density-overflow step failure on level "
+            f"{self.level_id}: {exc}"
+        )
         return True
 
     def get_agent_position(self, agent_id: str) -> tuple[float, float] | None:

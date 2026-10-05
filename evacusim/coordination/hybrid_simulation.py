@@ -284,6 +284,10 @@ class HybridSimulationRunner:
         self.event_manager = EventManager(station_layout, jupedsim_simulation)
 
         # Exit tracking with validation
+        # Every agent that leaves, with the exit it used and the time it did so.
+        # Serialised as exit_log.csv; nothing else persists this.
+        self.exit_log: list[dict[str, Any]] = []
+
         self.exit_tracker = ExitTracker(
             concordia_agents=self.concordia_agents,
             exited_agents=self.exited_agents,
@@ -291,6 +295,7 @@ class HybridSimulationRunner:
             jps_sim=jupedsim_simulation,
             station_layout=station_layout,  # For exit validation
             exit_validation_radius=15.0,  # Agents must be within 15m of exit
+            exit_log=self.exit_log,
         )
 
         # Waiting and information seeking tracking
@@ -778,6 +783,19 @@ class HybridSimulationRunner:
                                     self.exited_agents.add(_cid)
                                     self.agent_destinations[_cid] = _exit_name
                                     self.decision_processor.agent_goals.pop(_cid, None)
+                                    self.exit_log.append(
+                                        {
+                                            "agent_id": _cid,
+                                            "exit_name": _exit_name,
+                                            "intended_exit": _exit_name,
+                                            "exit_distance_m": "",
+                                            "time_s": round(self.current_sim_time, 2),
+                                            "level": "-1",
+                                            "x": "",
+                                            "y": "",
+                                            "validated": True,
+                                        }
+                                    )
 
                     # Record population snapshot every simulation minute
                     self.population_monitor.record_snapshot(
@@ -1193,6 +1211,8 @@ class HybridSimulationRunner:
                 self.llm_provider,
                 agent_levels,
                 self.agent_roles if self.agent_roles else None,
+                exit_log=self.exit_log,
+                spawn_log=self.spawn_log,
             )
             logger.info(f"Partial results saved to {self.output_file}")
 
