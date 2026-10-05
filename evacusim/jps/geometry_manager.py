@@ -12,9 +12,9 @@ import jupedsim as jps
 
 from evacusim.utils.logger import get_logger
 from evacusim.jps.geometry_processor import GeometryProcessor
+from evacusim.escalators.spec_loader import load_combs
 from evacusim.jps.geometry_loader import (
     load_entrance_areas,
-    load_escalator_endpoints,
     load_escalator_corridors,
     load_exit_thresholds,
     load_obstacles,
@@ -74,37 +74,16 @@ class GeometryManager:
             self.platform_areas,
             self.obstacles,
             self.escalator_corridors,
-            self.escalator_endpoints,
+            self.escalator_combs,
             self.exit_thresholds,
             self.train_entrance_areas,
         ) = self._load_geometry()
 
-        self.escalator_exit_bindings: dict[str, dict[str, str]] = {}
-        for ep in self.escalator_endpoints:
-            if ep.get("role") != "departure":
-                continue
-            exit_name = ep.get("exit_name")
-            if not exit_name:
-                continue
-            self.escalator_exit_bindings[exit_name] = {
-                "transfer_zone": ep.get("transfer_zone", ""),
-                "corridor": ep.get("corridor", ""),
-                "endpoint_id": ep.get("endpoint_id", ""),
-            }
-
-        # Snapshot of escalator transfer-zone polygons taken before any blockage
-        # removal so that StationLayoutBuilder can still compute entrance positions
-        # for blocked escalators (whose TZ is popped from walkable_areas below).
-        self.escalator_transfer_zones: dict[str, object] = {
-            ep.get("transfer_zone", ""): self.walkable_areas.get(ep.get("transfer_zone", ""))
-            for ep in self.escalator_endpoints
-            if ep.get("transfer_zone", "") in self.walkable_areas
-        }
-
-        # Remove corridor + transfer-zone polygons for pre-blocked escalators so
-        # agents physically cannot enter the shaft from simulation start.
-        if self._initially_blocked_exits:
-            self._apply_initial_blockages()
+        # Escalators are not floor: riders leave the floor simulation at the
+        # boarding comb and travel on a conveyor (evacusim.escalators). Remove
+        # every corridor and transfer zone from the navmesh; the corridors are
+        # kept only for drawing, and the comb records locate the landings.
+        self._detach_escalators()
 
         # Create JuPedSim simulation
         logger.info("Initializing JuPedSim simulation...")
@@ -154,7 +133,7 @@ class GeometryManager:
         platform_areas = load_platform_areas(str(geom_file))
         obstacles = load_obstacles(str(geom_file))
         escalator_corridors = load_escalator_corridors(str(geom_file))
-        escalator_endpoints = load_escalator_endpoints(str(geom_file))
+        escalator_combs = load_combs(geom_file, str(self.level_id))
         exit_thresholds = load_exit_thresholds(str(geom_file))
         train_entrance_areas = load_train_entrance_areas(str(geom_file))
         if exit_thresholds:
@@ -173,7 +152,7 @@ class GeometryManager:
         logger.info(f"  Loaded {len(obstacles)} obstacles")
         logger.info(f"  Integrated {len(fixed_obstacles)} obstacles into walkable areas")
         logger.info(f"  Loaded {len(escalator_corridors)} escalator corridors")
-        logger.info(f"  Loaded {len(escalator_endpoints)} escalator endpoints")
+        logger.info(f"  Loaded {len(escalator_combs)} escalator combs")
 
         return (
             walkable_areas,
@@ -182,7 +161,7 @@ class GeometryManager:
             platform_areas,
             fixed_obstacles,
             escalator_corridors,
-            escalator_endpoints,
+            escalator_combs,
             exit_thresholds,
             train_entrance_areas,
         )
@@ -220,97 +199,40 @@ class GeometryManager:
 
         return simulation
 
-    def _apply_initial_blockages(self) -> None:
-        """Remove corridor and transfer-zone polygons for pre-blocked escalators.
+    def _detach_escalators(self) -> None:
+        """Remove every escalator corridor and transfer zone from the walkable floor.
 
-        Called once at init before the JuPedSim simulation is created.  Works by
-        mutating ``walkable_areas`` and ``walkable_areas_with_obstacles`` in-place
-        so that ``_create_simulation`` builds the navmesh without those zones.
-
-        Also records the centroid of each blocked transfer-zone in
-        ``self.blocked_exit_positions`` *before* removal so that visibility
-        checks (LOS) can still locate the physical position of a blocked exit.
+        Also records, for escalators blocked from the start, the landing point in
+        front of their boarding comb in ``blocked_exit_positions`` so visibility
+        checks can still locate them.
         """
         from shapely.ops import unary_union as _union
 
-        level = str(self.level_id)
-        for exit_name in self._initially_blocked_exits:
-            binding = self.escalator_exit_bindings.get(exit_name)
-            if binding is None:
-                continue
+        from evacusim.jps.geometry_processor import GeometryProcessor
 
-            # Collect corridor + transfer-zone polygons for this escalator on this level.
-            shapes = []
-            corr_key = binding.get("corridor", "")
-            if corr_key in self.escalator_corridors:
-                shapes.append(self.escalator_corridors[corr_key])
-            tz_key = binding.get("transfer_zone", "")
-            if tz_key and tz_key in self.walkable_areas:
-                tz_polygon = self.walkable_areas[tz_key]
-                shapes.append(tz_polygon)
-                # Record the platform-level entrance of this escalator corridor
-                # as the blocked exit position.  This uses the same algorithm as
-                # StationLayoutBuilder._escalator_entrance_position so that the
-                # waypoint matches the firefighter spawn position exactly: find
-                # the corridor edge farthest from the TZ centre (= the bottom /
-                # platform-facing edge) and step 1.5 m outward along its normal.
-                try:
-                    import math as _math
-                    corr_poly = self.escalator_corridors.get(corr_key)
-                    if corr_poly is not None:
-                        _coords = list(corr_poly.exterior.coords)[:-1]
-                        _n = len(_coords)
-                        _ref_x, _ref_y = tz_polygon.centroid.x, tz_polygon.centroid.y
-                        _best_dist, _best_mid, _best_normal = -1.0, (0.0, 0.0), (0.0, 1.0)
-                        for _i in range(_n):
-                            _p1, _p2 = _coords[_i], _coords[(_i + 1) % _n]
-                            _mid = ((_p1[0] + _p2[0]) / 2.0, (_p1[1] + _p2[1]) / 2.0)
-                            _dist = _math.hypot(_mid[0] - _ref_x, _mid[1] - _ref_y)
-                            if _dist > _best_dist:
-                                _best_dist = _dist
-                                _best_mid = _mid
-                                _dx, _dy = _p2[0] - _p1[0], _p2[1] - _p1[1]
-                                _ln = _math.hypot(_dx, _dy)
-                                if _ln < 1e-9:
-                                    continue
-                                _nx1, _ny1 = -_dy / _ln, _dx / _ln
-                                _dot1 = _nx1 * (_ref_x - _mid[0]) + _ny1 * (_ref_y - _mid[1])
-                                _best_normal = (_nx1, _ny1) if _dot1 < 0 else (_dy / _ln, -_dx / _ln)
-                        pos = (_best_mid[0] + _best_normal[0] * 1.5,
-                               _best_mid[1] + _best_normal[1] * 1.5)
-                        self.blocked_exit_positions[exit_name] = pos
-                        logger.debug(
-                            f"Stored blocked exit position for '{exit_name}': "
-                            f"({pos[0]:.3f}, {pos[1]:.3f}) [firefighter entrance]"
-                        )
-                    else:
-                        centroid = tz_polygon.centroid
-                        self.blocked_exit_positions[exit_name] = (centroid.x, centroid.y)
-                except Exception:
-                    pass
-                # Remove the transfer zone from the walkable areas dicts so
-                # ExitManager never registers a stage inside it.
-                self.walkable_areas.pop(tz_key, None)
-                self.walkable_areas_with_obstacles.pop(tz_key, None)
-
-            if not shapes:
-                logger.debug(f"No geometry found to block for '{exit_name}' on level {level}")
-                continue
-
+        zones = [k for k in self.walkable_areas if k.startswith("esc.")]
+        shapes = list(self.escalator_corridors.values()) + [self.walkable_areas[k] for k in zones]
+        for key in zones:
+            self.walkable_areas.pop(key, None)
+            self.walkable_areas_with_obstacles.pop(key, None)
+        if shapes:
             removal = _union(shapes).buffer(0.02)
-            # Subtract from every remaining walkable area that overlaps.
             for key in list(self.walkable_areas_with_obstacles):
                 poly = self.walkable_areas_with_obstacles[key]
                 if poly.intersects(removal):
-                    from evacusim.jps.geometry_processor import GeometryProcessor
                     new_poly = GeometryProcessor.fix_topology(poly.difference(removal))
-                    if not new_poly.is_empty and hasattr(new_poly, 'exterior'):
+                    if new_poly.is_empty:
+                        self.walkable_areas_with_obstacles.pop(key)
+                    else:
                         self.walkable_areas_with_obstacles[key] = new_poly
 
-            logger.info(
-                f"🚧 Pre-blocked '{exit_name}' on level {level}: "
-                f"removed corridor '{corr_key}' and transfer zone '{tz_key}' from navmesh"
-            )
+        for comb in self.escalator_combs:
+            if comb["role"] == "entry" and comb["exit_name"] in self._initially_blocked_exits:
+                (ax, ay), (bx, by) = comb["a"], comb["b"]
+                nx, ny = comb["floor_normal"]
+                self.blocked_exit_positions[comb["exit_name"]] = (
+                    (ax + bx) / 2 + nx * 1.5, (ay + by) / 2 + ny * 1.5)
+                logger.info(f"🚧 Pre-blocked '{comb['exit_name']}' on level {self.level_id}")
 
     def add_obstacle_polygon(self, obstacle_poly) -> None:
         """Remove *obstacle_poly* from the walkable geometry and call switch_geometry.

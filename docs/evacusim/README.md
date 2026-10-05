@@ -9,7 +9,7 @@ This directory contains comprehensive technical documentation for evacusim imple
 3. Use [packages/README.md](packages/README.md) for package responsibilities and data contracts.
 4. Use [function-reference/README.md](function-reference/README.md) for full function-by-function coverage.
 5. Review [design-decisions.md](design-decisions.md) and [risk-register.md](risk-register.md) for review and improvement planning.
-6. Track the escalator reliability rewrite in [escalator-rewrite-spec.md](escalator-rewrite-spec.md).
+6. Escalators are conveyors detached from the floor simulation: see [deep-dives/escalators-and-level-transfer.md](deep-dives/escalators-and-level-transfer.md).
 7. Use deep dives for critical mechanics across simulation, orchestration, cognition, and analytics:
    - [deep-dives/README.md](deep-dives/README.md)
    - [deep-dives/bootstrap-and-dependency-wiring.md](deep-dives/bootstrap-and-dependency-wiring.md)

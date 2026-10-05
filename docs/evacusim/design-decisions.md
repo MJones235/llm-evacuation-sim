@@ -36,7 +36,7 @@ Key references:
 ## Multi-Level Simulation by Transfer, Not Continuous Vertical Physics
 
 Decision:
-- Separate simulation instance per level and transfer agents across escalator zones.
+- Separate simulation instance per level; escalators are conveyors between them, not floor (riders leave the floor simulation while riding).
 
 Benefits:
 - Practical decomposition of geometry and routing concerns.

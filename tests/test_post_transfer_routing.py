@@ -4,66 +4,6 @@ from shapely.geometry import Point
 
 from evacusim.decision.decision_processor import DecisionProcessor
 from evacusim.jps.jupedsim_integration import ConcordiaJuPedSimulation
-from evacusim.jps.multi_level_simulation import MultiLevelJuPedSimulation
-
-
-class _TargetLevelSimulation:
-    def __init__(self):
-        self.target = None
-
-    def get_all_agent_positions(self):
-        return {}
-
-    def add_agent(self, agent_id, position, assign_default_destination):
-        self.agent_id = agent_id
-        self.position = position
-
-    def set_agent_target(self, agent_id, target):
-        self.target = target
-
-
-class _EscalatorController:
-    def __init__(self, edge):
-        self.edge = edge
-
-    def get_edge_for_exit(self, current_level, exit_name):
-        return self.edge
-
-    def get_zone_polygon(self, zone_name):
-        return Point(self.edge.to_spawn_point).buffer(1.0)
-
-    def get_spawn_point_for_edge(self, edge):
-        return edge.to_spawn_point
-
-    def get_zone_local_agent_positions(self, zone_name, level_id, buffer_m=1.0):
-        return []
-
-
-def test_transfer_uses_local_escalator_egress_waypoint():
-    edge = SimpleNamespace(
-        to_level="-1",
-        to_zone_name="esc.A.zone.platform.arrival",
-        to_spawn_point=(-24.87, 40.56),
-        to_egress_target=(-31.80, 40.56),
-    )
-    target_sim = _TargetLevelSimulation()
-    simulation = MultiLevelJuPedSimulation.__new__(MultiLevelJuPedSimulation)
-    simulation.simulations = {"-1": target_sim}
-    simulation.escalator_controller = _EscalatorController(edge)
-    simulation._pending_spawn_positions = []
-    simulation.agent_levels = {}
-    simulation.recently_transferred_agents = set()
-    simulation._last_transfer_step = {}
-    simulation.current_step = 10
-    simulation.transfer_escape_waypoints = {}
-    simulation.transfer_platform_waypoints = {}
-
-    simulation._transfer_agent_through_escalator(
-        "passenger", "0", "escalator_a_down"
-    )
-
-    assert target_sim.target == (-31.80, 40.56)
-    assert simulation.transfer_escape_waypoints["passenger"] == (-31.80, 40.56)
 
 
 def _processor(simulation, agent_configs, zones=None):

@@ -53,7 +53,7 @@ The system runs physics at high frequency and decisions at lower frequency, with
 
 - Prompt caching for LLM cost and latency reduction.
 - Staggered decision groups to smooth API load.
-- Level-transfer manager for escalator-based movement across separate level simulations.
+- Escalators as two-lane conveyors detached from the per-level floor simulations (`evacusim/escalators`).
 - Spatial analyzer for zone identification, line-of-sight, and visible exits.
 - Event-driven overrides to force immediate reactions to critical changes.
 

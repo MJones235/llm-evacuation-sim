@@ -14,7 +14,7 @@ Features:
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import jupedsim as jps
 from shapely.geometry import Point
@@ -88,13 +88,15 @@ class ConcordiaJuPedSimulation:
             level_id=self.level_id,
             exit_thresholds=self.geometry_manager.exit_thresholds,
             train_entrance_areas=self.geometry_manager.train_entrance_areas,
-            escalator_endpoints=self.geometry_manager.escalator_endpoints,
-            initially_blocked_exits=initially_blocked_exits,
         )
 
         self.agent_tracker = AgentTracker(self.simulation)
         self.last_known_positions: dict[str, tuple[float, float]] = {}
         self.agent_assigned_exits: dict[str, str] = {}
+        # Called with an agent id whenever this level re-routes that agent
+        # (new target or exit). EscalatorSystem uses it to notice an agent
+        # leaving an escalator queue for something else.
+        self.route_listener: Callable[[str], None] | None = None
 
         logger.info(
             f"JuPedSim simulation initialized: "
@@ -102,79 +104,6 @@ class ConcordiaJuPedSimulation:
             f"{len(self.geometry_manager.entrance_areas)} entrances, "
             f"{len(self.exit_manager.evacuation_exits)} exits"
         )
-
-    def add_geometry_obstacle_for_exit(self, exit_name: str) -> None:
-        """Record the platform-facing entrance position for a runtime-blocked exit.
-
-        JuPedSim geometry modification (switch_geometry) reliably fails for
-        escalator exits because any barrier that seals the corridor entrance
-        disconnects the exit stage in the transfer zone, causing a
-        'stages outside of geometry' error.  Exit stages cannot be removed
-        at runtime, so navmesh modification is not feasible here.
-
-        Instead this method computes and stores the platform-facing corridor
-        entrance position in ``geometry_manager.blocked_exit_positions`` so
-        that proximity-based re-routing checks fire *before* agents enter the
-        corridor, rather than after they reach the far (TZ) end.
-
-        For startup pre-blocking (t<=0), GeometryManager._apply_initial_blockages
-        still removes the full shaft from the navmesh.
-        """
-        import math as _math
-
-        binding = getattr(self.geometry_manager, "escalator_exit_bindings", {}).get(exit_name)
-        if binding is None:
-            return
-        corridor_name = binding.get("corridor", "")
-        corridor_poly = self.geometry_manager.escalator_corridors.get(corridor_name)
-        if corridor_poly is None:
-            logger.warning(
-                f"No corridor polygon '{corridor_name}' found — cannot record entrance position"
-            )
-            return
-
-        tz_key = binding.get("transfer_zone", "")
-        tz_poly = self.geometry_manager.walkable_areas.get(tz_key) if tz_key else None
-        if tz_poly is None:
-            logger.warning(
-                f"No transfer-zone polygon '{tz_key}' for '{exit_name}' — cannot compute entrance"
-            )
-            return
-
-        # Find the corridor edge that is farthest from the TZ centroid.
-        # That edge is the platform-facing entrance mouth.  Step 1.5 m outward
-        # (away from the TZ, toward the platform) to get a point just outside the
-        # corridor entrance — agents will be intercepted there, before entry.
-        try:
-            _coords = list(corridor_poly.exterior.coords)[:-1]
-            _n = len(_coords)
-            _ref_x, _ref_y = tz_poly.centroid.x, tz_poly.centroid.y
-            _best_dist, _best_mid, _best_normal = -1.0, (0.0, 0.0), (0.0, 1.0)
-            for _i in range(_n):
-                _p1, _p2 = _coords[_i], _coords[(_i + 1) % _n]
-                _mid = ((_p1[0] + _p2[0]) / 2.0, (_p1[1] + _p2[1]) / 2.0)
-                _dist = _math.hypot(_mid[0] - _ref_x, _mid[1] - _ref_y)
-                if _dist > _best_dist:
-                    _best_dist = _dist
-                    _best_mid = _mid
-                    _dx, _dy = _p2[0] - _p1[0], _p2[1] - _p1[1]
-                    _ln = _math.hypot(_dx, _dy)
-                    if _ln < 1e-9:
-                        continue
-                    _nx1, _ny1 = -_dy / _ln, _dx / _ln
-                    _dot1 = _nx1 * (_ref_x - _mid[0]) + _ny1 * (_ref_y - _mid[1])
-                    _best_normal = (_nx1, _ny1) if _dot1 < 0 else (_dy / _ln, -_dx / _ln)
-            entrance_pos = (
-                _best_mid[0] + _best_normal[0] * 1.5,
-                _best_mid[1] + _best_normal[1] * 1.5,
-            )
-            self.geometry_manager.blocked_exit_positions[exit_name] = entrance_pos
-            logger.info(
-                f"🚧 '{exit_name}': recorded corridor entrance at {entrance_pos} "
-                f"(proximity checks will intercept agents before they enter)"
-            )
-        except Exception as e:
-            logger.warning(f"Could not compute entrance position for '{exit_name}': {e}")
 
     def add_agent(
         self,
@@ -356,6 +285,8 @@ class ConcordiaJuPedSimulation:
         if not self.agent_tracker.is_agent_active(agent_id):
             logger.debug(f"Cannot set target for agent {agent_id} - already exited")
             return
+        if self.route_listener is not None:
+            self.route_listener(agent_id)
 
         jps_id = self.agent_tracker.get_jps_id(agent_id)
         safe_target = self._coerce_target_inside_walkable(target)
@@ -478,6 +409,8 @@ class ConcordiaJuPedSimulation:
         if not self.agent_tracker.is_agent_active(agent_id):
             logger.debug(f"Cannot set exit for agent {agent_id} - already exited")
             return
+        if self.route_listener is not None:
+            self.route_listener(agent_id)
 
         jps_id = self.agent_tracker.get_jps_id(agent_id)
         stage_id, journey_id = self.exit_manager.get_exit_ids(exit_name)

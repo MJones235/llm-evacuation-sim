@@ -74,6 +74,14 @@ class VideoGenerator:
             logger.info(f"Loaded roles for {len(self.agent_roles)} director agent(s)")
         self._colour_map = RoleColourMap.from_roles(self.agent_roles)
 
+        # Escalator conveyor geometry (written next to the results); riders are
+        # drawn on their own panel and projected onto the floor plans.
+        self.escalator_geometry: dict = {}
+        esc_path = Path(output_file).parent / "escalators.json"
+        if esc_path.exists():
+            with open(esc_path) as f:
+                self.escalator_geometry = json.load(f)
+
         # Build level bounds from geometry for coordinate-based inference
         self.level_bounds = self._build_level_bounds()
 
@@ -194,6 +202,7 @@ class VideoGenerator:
                         "agent_states": frame.get("agent_states", {}),
                         "active_train_exits": frame.get("active_train_exits", []),
                         "agent_levels": frame.get("agent_levels"),
+                        "escalators": frame.get("escalators"),
                     }
                 )
         else:
@@ -226,10 +235,19 @@ class VideoGenerator:
         Returns:
             (fig, axes_dict, title_text)
         """
-        # Create 2 subplots for Level 0 and Level -1
-        fig, (ax_level_0, ax_level_m1) = plt.subplots(
-            1, 2, figsize=(16, 8), gridspec_kw={"width_ratios": [1, 1]}
-        )
+        # Two floor plans side by side; with escalators, a conveyor strip
+        # panel spans the bottom (riders are on no floor while riding).
+        if self.escalator_geometry:
+            fig = plt.figure(figsize=(16, 11))
+            grid = fig.add_gridspec(2, 2, height_ratios=[3.2, 1.25], hspace=0.28)
+            ax_level_0 = fig.add_subplot(grid[0, 0])
+            ax_level_m1 = fig.add_subplot(grid[0, 1])
+            ax_escalators = fig.add_subplot(grid[1, :])
+        else:
+            fig, (ax_level_0, ax_level_m1) = plt.subplots(
+                1, 2, figsize=(16, 8), gridspec_kw={"width_ratios": [1, 1]}
+            )
+            ax_escalators = None
 
         title_text = fig.suptitle("Monument Station Evacuation | Time: 00:00:00", fontsize=14)
 
@@ -256,7 +274,80 @@ class VideoGenerator:
             self._set_limits_from_geometry(ax_level_m1, "level_-1")
 
         axes_dict = {"0": ax_level_0, "-1": ax_level_m1}
+        if ax_escalators is not None:
+            self._setup_escalator_axes(ax_escalators)
+            axes_dict["escalators"] = ax_escalators
         return fig, axes_dict, title_text
+
+    # Okabe-Ito: blue / vermillion stay distinct under common colour-vision deficiencies.
+    LANE_COLOURS = {"stand": "#0072B2", "walk": "#D55E00"}
+    _LANE_ROW = {"stand": 0.0, "walk": 0.42}
+
+    def _escalator_rows(self) -> list[str]:
+        return sorted(self.escalator_geometry, key=lambda n: self.escalator_geometry[n]["letter"])
+
+    def _setup_escalator_axes(self, ax) -> None:
+        """One row per escalator, two lane tracks, x = metres along the incline."""
+        names = self._escalator_rows()
+        max_len = max(g["length_m"] for g in self.escalator_geometry.values())
+        ticks, labels = [], []
+        for i, name in enumerate(names):
+            g = self.escalator_geometry[name]
+            arrow = "↑" if g["direction"] == "up" else "↓"
+            for lane, dy in self._LANE_ROW.items():
+                y = i + dy
+                ax.plot([0, g["length_m"]], [y, y], color="#C8CDD0", linewidth=6,
+                        solid_capstyle="butt", zorder=1)
+                ticks.append(y)
+                labels.append(f"{g['letter']}{arrow} {lane}" if lane == "stand" else "walk")
+            ax.plot([g["length_m"]] * 2, [i - 0.15, i + 0.57], color="#555555", linewidth=1)
+        ax.set_yticks(ticks)
+        ax.set_yticklabels(labels, fontsize=8)
+        ax.set_ylim(len(names) - 0.4, -0.3)
+        ax.set_xlim(-7.5, max_len + 4.5)
+        ax.axvline(0, color="#555555", linewidth=1)
+        ax.set_xlabel("Distance along escalator from boarding comb (m)   ·   queue at left, alighting comb at right")
+        ax.set_title("Escalators (conveyor model)", fontsize=12, fontweight="bold")
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for lane, colour in self.LANE_COLOURS.items():
+            ax.plot([], [], "o", color=colour, label=f"{lane} lane")
+        ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), fontsize=8, frameon=False, ncol=2)
+
+    def _draw_escalators(self, axes_dict: dict, frame_data: dict) -> None:
+        from evacusim.escalators.drawing import rider_floor_position
+
+        state = frame_data.get("escalators") or {}
+        ax = axes_dict.get("escalators")
+        for i, name in enumerate(self._escalator_rows()):
+            esc = state.get(name)
+            if esc is None:
+                continue
+            g = self.escalator_geometry[name]
+            for lane, colour in self.LANE_COLOURS.items():
+                riders = [r for r in esc.get("riders", []) if r[1] == lane]
+                if ax is not None and riders:
+                    ax.plot([r[2] for r in riders], [i + self._LANE_ROW[lane]] * len(riders),
+                            "o", color=colour, markersize=5, markeredgecolor="white",
+                            markeredgewidth=0.5, zorder=3, label="_agent")
+                for agent_id, _, s in riders:
+                    level, x, y = rider_floor_position(g, s, lane)
+                    floor_ax = axes_dict.get(level)
+                    if floor_ax is not None:
+                        floor_ax.plot(x, y, "s", color=colour, markersize=5,
+                                      markeredgecolor="white", markeredgewidth=0.5,
+                                      zorder=6, label="_agent")
+            if ax is None:
+                continue
+            queue = esc.get("queue", {})
+            waiting = sum(queue.values())
+            if waiting:
+                ax.text(-0.6, i + 0.21, f"{waiting} queueing", ha="right", va="center",
+                        fontsize=8, color="#333333", label="_agent")
+            status = "CLOSED" if esc.get("closed") else ("PAUSED" if esc.get("stalled") else "")
+            if status:
+                ax.text(g["length_m"] + 0.6, i + 0.21, status, ha="left", va="center",
+                        fontsize=8, color="#B00020", fontweight="bold", label="_agent")
 
     def _draw_geometry(self, ax, level_name: str = None):
         """Draw station geometry on axes for a specific level."""
@@ -499,6 +590,9 @@ class VideoGenerator:
                     label="_agent",
                 )
                 ax.text(x, y + 1, agent_id, ha="center", fontsize=8, label="_agent")
+
+        if self.escalator_geometry:
+            self._draw_escalators(axes_dict, frame_data)
 
         # Draw train bodies on the platform panel (level -1) for every
         # train that is currently present in the station.

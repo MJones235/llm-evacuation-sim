@@ -1030,6 +1030,11 @@ class HybridSimulationRunner:
                                 if hasattr(self.jps_sim, "agent_levels")
                                 else None
                             ),
+                            escalators=(
+                                self.jps_sim.escalator_system.frame_snapshot()
+                                if hasattr(self.jps_sim, "escalator_system")
+                                else None
+                            ),
                         )
 
                     # Lightweight positions sidecar — every 10 steps (0.5 s).
@@ -1213,6 +1218,7 @@ class HybridSimulationRunner:
                 self.agent_roles if self.agent_roles else None,
                 exit_log=self.exit_log,
                 spawn_log=self.spawn_log,
+                escalator_system=getattr(self.jps_sim, "escalator_system", None),
             )
             logger.info(f"Partial results saved to {self.output_file}")
 

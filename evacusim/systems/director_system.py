@@ -91,6 +91,7 @@ Director agents are registered in the shared ``agent_roles`` dict so that
 nearby Concordia agents can see their role label in observations.
 """
 
+import math
 from typing import Any
 
 from evacusim.utils.logger import get_logger
@@ -673,71 +674,41 @@ class DirectorSystem:
         target_level: str,
         jps_sim: Any,
     ) -> None:
-        """
-        Set the agent's target to the nearest *departure* escalator zone on
-        ``current_level`` that leads toward ``target_level``.
-
-        Only zones whose direction suffix matches the travel direction are
-        considered (``_down`` when descending, ``_up`` when ascending).  This
-        avoids routing the agent into arrival-only zones which would trigger a
-        direction-violation and reroute them back via an evacuation exit.
-        """
-        controller = getattr(jps_sim, "escalator_controller", None)
-        if controller is None:
+        """Send the agent to the nearest open escalator from ``current_level`` to ``target_level``."""
+        escalators = getattr(jps_sim, "escalator_system", None)
+        if escalators is None:
             logger.debug(
                 f"[{self.system_name}] {agent_id}: cross-level patrol requested but "
-                "sim has no escalator_controller — cannot route to escalator."
+                "sim has no escalator system — cannot route to escalator."
             )
             return
 
-        candidate_edges = [
-            edge
-            for edge in controller.registry.edges
-            if edge.from_level == str(current_level) and edge.to_level == str(target_level)
+        # Nearest open escalator boarding on this level towards target_level.
+        # Staff queue and ride like everyone else.
+        candidates = [
+            (math.dist(position, e.landing_point), name)
+            for name, e in escalators.escalators.items()
+            if e.spec.from_level == str(current_level) and e.spec.to_level == str(target_level)
+            and not e.conveyor.closed
         ]
-        if not candidate_edges:
+        if not candidates:
             logger.warning(
-                f"[{self.system_name}] {agent_id}: no escalator transfer edges "
-                f"found on level {current_level} — cannot route to next patrol waypoint."
+                f"[{self.system_name}] {agent_id}: no open escalator from level "
+                f"{current_level} to {target_level} — cannot route to next patrol waypoint."
             )
             return
-
-        # Pick the nearest departure transfer zone and route to its explicit exit.
-        # JuPedSim only removes an agent from a level (triggering the transfer)
-        # when they reach a registered *exit* stage, not a plain waypoint.  We
-        # must use set_agent_evacuation_exit so the agent is properly processed
-        # by _process_escalator_exits on the next step.
-        best_edge = None
-        best_dist = float("inf")
-        for edge in candidate_edges:
-            poly = controller.get_zone_polygon(edge.from_zone_name)
-            if poly is None:
-                continue
-            c = poly.centroid
-            d = (position[0] - c.x) ** 2 + (position[1] - c.y) ** 2
-            if d < best_dist:
-                best_dist = d
-                best_edge = edge
-
-        if best_edge is not None:
-            exit_name = best_edge.from_exit_name
-            try:
-                if exit_name and hasattr(jps_sim, "set_agent_destination_exit"):
-                    jps_sim.set_agent_destination_exit(agent_id, exit_name)
-                    logger.debug(
-                        f"[{self.system_name}] {agent_id} routed to escalator exit "
-                        f"'{exit_name}' (level {current_level} → {target_level})"
-                    )
-                else:
-                    logger.warning(
-                        f"[{self.system_name}] {agent_id}: destination-exit routing "
-                        f"API unavailable; no fallback applied for '{exit_name}'"
-                    )
-            except Exception as exc:
-                logger.warning(
-                    f"[{self.system_name}] {agent_id}: could not route to escalator "
-                    f"'{exit_name}': {exc}"
-                )
+        exit_name = min(candidates)[1]
+        try:
+            jps_sim.set_agent_destination_exit(agent_id, exit_name)
+            logger.debug(
+                f"[{self.system_name}] {agent_id} routed to escalator "
+                f"'{exit_name}' (level {current_level} → {target_level})"
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[{self.system_name}] {agent_id}: could not route to escalator "
+                f"'{exit_name}': {exc}"
+            )
 
     def _resolve_patrol_waypoints(
         self,

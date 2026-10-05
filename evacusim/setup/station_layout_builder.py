@@ -8,7 +8,6 @@ This module is responsible for:
 - Handling walkable areas and obstacles
 """
 
-import math
 from typing import Any
 
 from shapely.geometry import Point
@@ -155,35 +154,17 @@ class StationLayoutBuilder:
                             display = f"Escalator {letter} (going down)"
                         custom_exit_display_names[esc_zone] = display
 
-        # Compute escalator entrance positions from corridor geometry and add them
-        # to zones_polygons so that director agent spawn_positions can reference
-        # them by zone name (e.g. zone: "escalator_d_entrance_L0").
-        # Zone keys are level-scoped (e.g. "escalator_d_entrance_L0",
-        # "escalator_d_entrance_L-1") to avoid collision between top and bottom
-        # entrances of the same escalator shaft.
+        # Escalator entrance positions (1.5 m out from each comb onto its
+        # landing) as zones, so director agent spawn_positions can reference
+        # them by name (e.g. zone: "escalator_d_entrance_L0"). Keys are
+        # level-scoped: each escalator has a comb on both levels.
         if hasattr(jps_sim, "simulations"):
             for level_id, level_sim in jps_sim.simulations.items():
-                gm = level_sim.geometry_manager
-                for corr_name, corr_poly in gm.escalator_corridors.items():
-                    parts = corr_name.split(".")
-                    if len(parts) != 4 or parts[0] != "esc" or parts[2] != "corridor":
-                        continue
-                    esc_letter = parts[1].lower()
-
-                    tz_source = getattr(gm, "escalator_transfer_zones", gm.walkable_areas)
-                    tz_key = next(
-                        (
-                            k
-                            for k in tz_source
-                            if k.startswith(f"esc.{parts[1]}.zone.") and k.endswith((".departure", ".arrival"))
-                        ),
-                        None,
-                    )
-                    tz_poly = tz_source.get(tz_key) if tz_key else None
-                    pos = StationLayoutBuilder._escalator_entrance_position(
-                        corr_poly, tz_poly, offset=1.5
-                    )
-                    zone_key = f"escalator_{esc_letter}_entrance_L{level_id}"
+                for comb in getattr(level_sim.geometry_manager, "escalator_combs", []):
+                    (ax, ay), (bx, by) = comb["a"], comb["b"]
+                    nx, ny = comb["floor_normal"]
+                    pos = ((ax + bx) / 2 + nx * 1.5, (ay + by) / 2 + ny * 1.5)
+                    zone_key = f"escalator_{comb['letter'].lower()}_entrance_L{level_id}"
                     all_zone_polygons[zone_key] = Point(pos).buffer(0.3)
 
         station_layout = {
@@ -269,70 +250,3 @@ class StationLayoutBuilder:
         """
         min_x, min_y, max_x, max_y = polygon.bounds
         return {"x_min": min_x, "x_max": max_x, "y_min": min_y, "y_max": max_y}
-
-    @staticmethod
-    def _escalator_entrance_position(
-        corridor_poly,
-        tz_poly,
-        offset: float = 1.5,
-    ) -> tuple[float, float]:
-        """
-        Find the concourse-side entrance of an escalator corridor and return a
-        point *offset* metres outside it, suitable for positioning a fire marshal.
-
-        The algorithm selects the corridor edge whose midpoint is farthest from
-        the escalator transfer-zone centre (i.e. the edge facing the concourse),
-        then steps outward along that edge's outward-facing normal.
-
-        Args:
-            corridor_poly: Shapely Polygon of the escalator corridor.
-            tz_poly: Shapely Polygon of the matching transfer zone, used to
-                determine which corridor edge faces away from the escalator.
-                May be None, in which case the edge with the highest mean-y
-                value is used as a fallback.
-            offset: How many metres outside the entrance edge to place the point.
-
-        Returns:
-            (x, y) coordinate of the suggested marshal position.
-        """
-        coords = list(corridor_poly.exterior.coords)[:-1]  # drop closing repeat
-        n = len(coords)
-        if n < 3:
-            c = corridor_poly.centroid
-            return (c.x, c.y)
-
-        # Reference point inside the escalator zone (opposite side from concourse)
-        if tz_poly is not None:
-            ref_x, ref_y = tz_poly.centroid.x, tz_poly.centroid.y
-        else:
-            # Fallback: use centroid of the corridor itself
-            ref_x, ref_y = corridor_poly.centroid.x, corridor_poly.centroid.y
-
-        best_dist = -1.0
-        best_mid: tuple[float, float] = (0.0, 0.0)
-        best_normal: tuple[float, float] = (0.0, 1.0)
-
-        for i in range(n):
-            p1 = coords[i]
-            p2 = coords[(i + 1) % n]
-            mid = ((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
-            dist = math.hypot(mid[0] - ref_x, mid[1] - ref_y)
-            if dist > best_dist:
-                best_dist = dist
-                best_mid = mid
-                # Compute the outward-facing unit normal for this edge
-                dx, dy = p2[0] - p1[0], p2[1] - p1[1]
-                length = math.hypot(dx, dy)
-                if length < 1e-9:
-                    continue
-                # Two candidate normals (perpendicular to edge)
-                nx1, ny1 = -dy / length,  dx / length
-                nx2, ny2 =  dy / length, -dx / length
-                # Choose the normal that points AWAY from the ref (TZ centre)
-                dot1 = nx1 * (ref_x - mid[0]) + ny1 * (ref_y - mid[1])
-                best_normal = (nx1, ny1) if dot1 < 0 else (nx2, ny2)
-
-        return (
-            best_mid[0] + best_normal[0] * offset,
-            best_mid[1] + best_normal[1] * offset,
-        )

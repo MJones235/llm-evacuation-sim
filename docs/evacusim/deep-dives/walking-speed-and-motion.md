@@ -26,14 +26,14 @@ Behavior:
 - Following behavior can sync speed with target agent when close.
 - Wait-related behaviors can enforce low-speed defaults.
 
-## Escalator Overrides
+## Escalators
 
-Per-step enforcement:
-- [MultiLevelJuPedSimulation._enforce_escalator_constraints](../function-reference/jps__multi_level_simulation.md)
-
-Behavior:
-- Escalator zone occupancy can override low desired speed to belt-floor value.
-- Protects against unrealistic stalling while on escalators.
+Agents are off the floor while riding an escalator (see
+[escalators-and-level-transfer.md](escalators-and-level-transfer.md)): standers
+move at belt speed, walkers at belt speed plus a fraction of their own floor
+speed. Each agent's own walking speed (`MultiLevelJuPedSimulation.agent_base_speed`)
+is restored when they step off. Queueing agents get a shorter JuPedSim
+`time_gap` so boarding lines close up.
 
 ## Related Motion Control APIs
 

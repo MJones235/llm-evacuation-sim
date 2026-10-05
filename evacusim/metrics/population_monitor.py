@@ -25,6 +25,9 @@ following keys:
     * ``"exited"``  — cumulative count of agents who have fully evacuated
       (``level`` / area settings are ignored).
     * ``"level"``   — count active agents filtered by level and/or area.
+    * ``"escalator_queue"`` — agents queueing for any escalator.
+    * ``"on_escalator"``    — agents riding any escalator (they are on no
+      floor, so no ``"level"`` zone counts them).
 
 ``level`` (str, optional)
     JuPedSim level ID (e.g. ``"0"``, ``"-1"``).
@@ -37,24 +40,25 @@ following keys:
     starts with any of these prefix strings.
 
 Area pattern matching searches these geometry sources:
-* ``transfer_manager.escalator_zones``  (multi-level simulations)
 * Each level's ``geometry_manager.walkable_areas_with_obstacles``
 * Each level's ``geometry_manager.escalator_corridors``
 * Each level's ``geometry_manager.platform_areas``
 
 Default zones (used when ``monitoring`` is absent from the config)
 ------------------------------------------------------------------
-The defaults replicate the four standard zones for a two-level station
+The defaults replicate the standard zones for a two-level station
 (concourse + underground platforms, e.g. Monument Station):
 
 1. ``left_station``     — cumulative exits  (type: ``exited``)
 2. ``concourse``        — level ``"0"`` agents
-3. ``escalator_bottom`` — level ``"-1"`` agents in ``L-1_esc*`` polygons
-4. ``platform``         — level ``"-1"`` agents *not* in ``L-1_esc*`` polygons
+3. ``escalator_queue``  — agents queueing for any escalator  (type: ``escalator_queue``)
+4. ``on_escalator``     — agents riding any escalator      (type: ``on_escalator``)
+5. ``platform``         — level ``"-1"`` agents
 """
 
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -78,16 +82,19 @@ DEFAULT_ZONE_SPECS: list[dict] = [
         "level": "0",
     },
     {
-        "name": "escalator_bottom",
-        "description": "Agents at the bottom of escalators (level -1, escalator zones)",
-        "level": "-1",
-        "area_patterns": ["L-1_esc"],
+        "name": "escalator_queue",
+        "description": "Agents queueing for an escalator (either level)",
+        "type": "escalator_queue",
+    },
+    {
+        "name": "on_escalator",
+        "description": "Agents riding an escalator",
+        "type": "on_escalator",
     },
     {
         "name": "platform",
         "description": "Agents on a platform (level -1)",
         "level": "-1",
-        "exclude_area_patterns": ["L-1_esc"],
     },
 ]
 
@@ -184,6 +191,9 @@ class PopulationMonitor:
             if zone["type"] == "exited":
                 self.counts[zone["name"]].append(len(exited_agents))
                 continue
+            if zone["type"] in ("on_escalator", "escalator_queue"):
+                self.counts[zone["name"]].append(self._escalator_count(zone["type"]))
+                continue
 
             count = 0
             for agent_id, pos in positions.items():
@@ -214,7 +224,10 @@ class PopulationMonitor:
         count_summary = "  ".join(f"{z['name']}={self.counts[z['name']][-1]}" for z in self._zones)
         logger.debug(f"[PopulationMonitor] t={sim_time:.0f}s  {count_summary}")
 
-        self._next_record_time += self.interval
+        # Next snapshot on the interval grid after *this* one. (Incrementing
+        # from 0 made runs that start mid-day record every step until the
+        # timer caught up with the clock.)
+        self._next_record_time = (math.floor(sim_time / self.interval) + 1) * self.interval
 
     def display_summary(self) -> None:
         """
@@ -392,13 +405,21 @@ class PopulationMonitor:
             )
         return resolved
 
+    def _escalator_count(self, zone_type: str) -> int:
+        """Riders on any escalator, or people queueing for one."""
+        escalators = getattr(self.jps_sim, "escalator_system", None)
+        if escalators is None:
+            return 0
+        if zone_type == "on_escalator":
+            return sum(e.conveyor.rider_count() for e in escalators.escalators.values())
+        return sum(len(q) for q in escalators.queue.values())
+
     def _collect_polygons_by_prefix(self, prefix: str) -> list:
         """
         Return all named Shapely polygons from the simulation whose name
         starts with *prefix*.
 
         Searches, where available:
-        * ``transfer_manager.escalator_zones``  (multi-level)
         * Each level's ``geometry_manager.walkable_areas_with_obstacles``
         * Each level's ``geometry_manager.escalator_corridors``
         * Each level's ``geometry_manager.platform_areas``
@@ -411,10 +432,7 @@ class PopulationMonitor:
                     polys.append(poly)
 
         if hasattr(self.jps_sim, "simulations"):
-            # Multi-level: transfer manager + all level geometry managers
-            transfer_manager = getattr(self.jps_sim, "transfer_manager", None)
-            if transfer_manager is not None:
-                _scan(transfer_manager.escalator_zones)
+            # Multi-level: all level geometry managers
             for level_sim in self.jps_sim.simulations.values():
                 gm = level_sim.geometry_manager
                 _scan(gm.walkable_areas_with_obstacles)

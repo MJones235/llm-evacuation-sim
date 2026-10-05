@@ -72,31 +72,17 @@ class JuPedSimSetup:
                 f"Loading multi-level station geometry from {network_path} "
                 f"(levels: {', '.join(levels)})..."
             )
-            escalator_belt_speed = sim_config.get("escalator_belt_speed", 0.5)
-            level_arrival_waypoints = sim_config.get("level_arrival_waypoints", {})
-            transfer_random_waypoint_min_distance_m = sim_config.get(
-                "transfer_random_waypoint_min_distance_m", 10.0
-            )
+            calibration = config.get("calibration") or {}
             jps_sim = MultiLevelJuPedSimulation(
                 network_path=network_path,
                 dt=dt,
                 exit_radius=10.0,
                 levels=levels,
-                escalator_belt_speed=escalator_belt_speed,
-                level_arrival_waypoints=level_arrival_waypoints,
-                transfer_random_waypoint_min_distance_m=transfer_random_waypoint_min_distance_m,
                 initially_blocked_exits=initially_blocked_exits,
-                escalator_admission_rate_per_sec=sim_config.get(
-                    "escalator_admission_rate_per_sec", 1.0
-                ),
-                escalator_admission_burst=sim_config.get("escalator_admission_burst", 2.0),
-                escalator_zone_occupancy_ceiling=sim_config.get(
-                    "escalator_zone_occupancy_ceiling", 3
-                ),
-                escalator_reentry_backoff_steps=sim_config.get(
-                    "escalator_reentry_backoff_steps", 60
-                ),
+                escalator_config=sim_config.get("escalators"),
+                escalator_seed=int(calibration.get("seed", 0)),
             )
+            jps_sim.clock_offset_s = float(sim_config.get("start_time_s", 0.0))
             logger.info("Multi-level JuPedSim simulation created successfully")
         else:
             # Single-level mode (backward compatible)

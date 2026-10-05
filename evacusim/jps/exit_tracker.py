@@ -99,6 +99,10 @@ class ExitTracker:
                         f"(tracked on level {tracked_levels[agent_id]})"
                     )
                     continue
+                # Riding an escalator: off every floor, but still in the station.
+                in_transit = getattr(self.jps_sim, "is_agent_in_transit", None)
+                if in_transit is not None and in_transit(agent_id):
+                    continue
 
                 # Agent has disappeared - validate they actually reached an exit
                 exit_name = self.agent_destinations.get(agent_id, "unknown")

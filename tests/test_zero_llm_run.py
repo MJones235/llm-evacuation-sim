@@ -45,7 +45,6 @@ class _FakeJps:
 
     def __init__(self, positions):
         self._positions = dict(positions)
-        self.escalator_controller = None
 
     def get_agent_position(self, agent_id):
         return self._positions.get(agent_id)

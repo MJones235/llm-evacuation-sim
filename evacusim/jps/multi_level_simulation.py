@@ -5,17 +5,12 @@ Manages multiple levels (concourse + platforms) and agent transfers between them
 via escalators. Each level has its own JuPedSim simulation instance.
 """
 
-import math
-import random
 from pathlib import Path
 from typing import Any
 
-from shapely.geometry import Point
-from shapely.ops import nearest_points
-
+from evacusim.escalators.spec_loader import build_specs
+from evacusim.escalators.system import EscalatorSystem
 from evacusim.utils.logger import get_logger
-from evacusim.coordination.level_transfer_manager import LevelTransferManager
-from evacusim.jps.escalator_controller import EscalatorController
 from evacusim.jps.jupedsim_integration import (
     ConcordiaJuPedSimulation,
 )
@@ -37,14 +32,9 @@ class MultiLevelJuPedSimulation:
         dt: float = 0.05,
         exit_radius: float = 10.0,
         levels: list[str] | None = None,
-        escalator_belt_speed: float = 0.5,
-        level_arrival_waypoints: dict[str, tuple[float, float]] | None = None,
-        transfer_random_waypoint_min_distance_m: float = 10.0,
         initially_blocked_exits: set[str] | None = None,
-        escalator_admission_rate_per_sec: float = 1.0,
-        escalator_admission_burst: float = 2.0,
-        escalator_zone_occupancy_ceiling: int = 3,
-        escalator_reentry_backoff_steps: int = 60,
+        escalator_config: dict[str, Any] | None = None,
+        escalator_seed: int = 0,
     ):
         """
         Initialize multi-level simulation.
@@ -54,45 +44,19 @@ class MultiLevelJuPedSimulation:
             dt: Timestep in seconds
             exit_radius: Radius of circular exits in meters
             levels: List of level IDs to load (default: ["0", "-1"])
-            escalator_belt_speed: Speed floor for agents inside escalator zones
-                and corridors. Default 0.5 m/s (standard commercial escalator).
-            transfer_random_waypoint_min_distance_m: Minimum distance from the
-                escalator landing that the random temporary destination must be.
-                The agent walks there under JuPedSim routing while the LLM fires
-                its scheduled decision; the LLM decision then overrides the waypoint.
             initially_blocked_exits: Exits that are blocked from simulation start.
-                Their corridor geometry and exit stages are omitted so agents
-                physically cannot enter them.
-            escalator_admission_rate_per_sec: Max sustained rate at which agents
-                may be routed onto a single escalator exit, modelling single-lane
-                boarding throughput and preventing more agents from committing to
-                an escalator than its landing zone can absorb.
-            escalator_admission_burst: Token-bucket burst capacity for escalator
-                admission (see escalator_admission_rate_per_sec).
-            escalator_zone_occupancy_ceiling: Hard cap on agents already present
-                in an escalator's landing zone before further admissions are
-                denied outright, regardless of remaining rate-limit tokens.
-            escalator_reentry_backoff_steps: Steps an agent must wait after a
-                failed transfer before it can be automatically re-routed back
-                onto the same escalator, giving its forced re-decision time to
-                take effect instead of being shoved straight back into the jam.
+                Escalators among them are built closed and not offered as exits.
+            escalator_config: ``simulation.escalators`` config (defaults and
+                per-escalator overrides) for the conveyor model.
+            escalator_seed: Seed for lane choice and stander step gaps.
         """
         self.dt = dt
         self.exit_radius = exit_radius
         self.network_path = Path(network_path)
         self.current_step = 0
         self.is_complete = False
-        self.escalator_belt_speed = escalator_belt_speed
-        # Keyed by level_id string; values are (x, y) waypoints assigned to
-        # agents immediately after a level transfer, keeping them moving until
-        # the next LLM decision cycle.
-        self.level_arrival_waypoints: dict[str, tuple[float, float]] = {
-            str(k): (float(v[0]), float(v[1]))
-            for k, v in (level_arrival_waypoints or {}).items()
-        }
-        self.transfer_random_waypoint_min_distance_m = max(
-            2.0, float(transfer_random_waypoint_min_distance_m)
-        )
+        # Absolute time of step 0 (runs may start mid-day); set by the factory.
+        self.clock_offset_s = 0.0
 
         if levels is None:
             levels = ["0", "-1"]
@@ -112,182 +76,36 @@ class MultiLevelJuPedSimulation:
                 initially_blocked_exits=_initially_blocked,
             )
 
-        # Track which level each agent is on
-        self.agent_levels: dict[str, str] = {}  # agent_id -> level_id
+        # Level of every agent on a floor. Agents riding an escalator are on
+        # no floor and are absent here; see is_agent_in_transit().
+        self.agent_levels: dict[str, str] = {}
+        # Each agent's own walking speed, kept across escalator rides.
+        self.agent_base_speed: dict[str, float] = {}
         self.recently_transferred_agents: set[str] = set()
-        # Positions used for transfers in the current step (cleared each step).
-        # Prevents same-step transfers from landing on top of each other.
-        self._pending_spawn_positions: list[tuple[float, float]] = []
-        # Cooldown: minimum steps between consecutive transfers for the same agent.
-        # At dt=0.05 s, 100 steps = 5 seconds — enough time to walk clear of the
-        # arrival zone before a return trip could be triggered accidentally.
-        self._transfer_cooldown_steps: int = 100
-        self._last_transfer_step: dict[str, int] = {}  # agent_id -> step number
-        # Steps an agent must wait before being auto-reissued the same escalator
-        # exit after a failed transfer (see EscalatorController.record_transfer_failure).
-        self._reentry_backoff_steps: int = escalator_reentry_backoff_steps
 
-        # Post-transfer escape waypoints: the local escalator egress target
-        # assigned after a transfer so agents clear the landing without being
-        # sent across the destination level. The decision processor defers
-        # prompts until the agent reaches this target.
+        # Post-transfer escape waypoints: the escalator's egress target assigned
+        # when a rider steps off, so they clear the landing before deciding.
+        # The decision processor defers prompts until the agent reaches it.
         self.transfer_escape_waypoints: dict[str, tuple[float, float]] = {}
         # Boarders continue from the local egress to their assigned platform
         # before the decision engine is allowed to choose "wait for train".
         self.transfer_platform_waypoints: dict[str, tuple[float, float]] = {}
 
         # Exits currently blocked by scenario events.
-        # Used by corridor-barrier enforcement so agents cannot enter blocked
-        # escalator shafts.
-        self.blocked_exits: set[str] = set()
-        # Agents forced to re-decide this step (e.g. blocked corridor contact).
-        # hybrid_simulation consumes this set and triggers immediate LLM decisions.
+        self.blocked_exits: set[str] = set(_initially_blocked)
+        # Agents forced to re-decide this step (e.g. released from a closed
+        # escalator's queue). hybrid_simulation consumes this set.
         self.agents_needing_redecision: set[str] = set()
 
-        # Setup level transfer manager
-        self.transfer_manager = LevelTransferManager(network_path, levels)
-
-        # Phase A: Build explicit escalator registry + startup validation.
-        # Runtime transfer behavior remains unchanged in this phase.
-        self.escalator_controller = EscalatorController(
-            network_path=self.network_path,
-            levels=self.levels,
-            simulations=self.simulations,
-            dt=dt,
-            admission_rate_per_sec=escalator_admission_rate_per_sec,
-            admission_burst=escalator_admission_burst,
-            zone_occupancy_ceiling=escalator_zone_occupancy_ceiling,
+        specs = build_specs(self.network_path, self.levels, escalator_config)
+        self.escalator_system = EscalatorSystem(
+            self, specs, seed=escalator_seed, closed_exits=_initially_blocked
         )
-        registry_summary = self.escalator_controller.summary()
-        logger.info(
-            "Escalator registry initialized: "
-            f"endpoints={registry_summary['endpoint_count']}, "
-            f"edges={registry_summary['edge_count']}, "
-            f"ids={registry_summary['escalator_ids']}"
-        )
-        for issue in self.escalator_controller.validate_registry():
-            logger.warning(f"[ESCALATOR REGISTRY] {issue}")
 
         logger.info(
             f"Multi-level simulation initialized with {len(self.simulations)} levels: "
             f"{', '.join(levels)}"
         )
-        logger.info(f"Transfer info: {self.transfer_manager.get_transfer_info()}")
-        logger.info(f"Escalator belt speed: {self.escalator_belt_speed} m/s")
-        logger.info(
-            "Transfer random waypoint: "
-            f"min_distance={self.transfer_random_waypoint_min_distance_m:.1f}m "
-            "(agent walks to a random level point; LLM fires during transit)"
-        )
-
-    # ------------------------------------------------------------------
-    # Escalator zone helpers
-    # ------------------------------------------------------------------
-
-    def _enforce_escalator_constraints(self) -> None:
-        """
-        Per-step escalator physics enforcement — called every simulation step.
-
-        Enforces the speed floor for agents physically inside escalator zones and
-        corridors. Direction control for departure-role zones is handled by the
-        escalator controller; arrival-role zones are not overridden here so agents
-        keep whatever destination was assigned at transfer time.
-        """
-        for level_id, sim in self.simulations.items():
-            agent_ids = list(sim.agent_tracker.agent_ids.keys())
-            for agent_id in agent_ids:
-                pos = sim.get_agent_position(agent_id)
-                if pos is None:
-                    continue
-
-                in_escalator_geometry = self.escalator_controller.enforce_motion_for_agent(
-                    agent_id=agent_id,
-                    level_id=level_id,
-                    position=pos,
-                    level_sim=sim,
-                    current_step=self.current_step,
-                )
-
-                if not in_escalator_geometry:
-                    continue
-
-                current_speed = sim.get_agent_speed(agent_id)
-                if current_speed is not None and current_speed < self.escalator_belt_speed:
-                    sim.set_agent_speed(agent_id, self.escalator_belt_speed)
-                    logger.debug(
-                        f"[ESCALATOR] {agent_id} raised speed from "
-                        f"{current_speed:.2f} to {self.escalator_belt_speed:.2f} m/s"
-                    )
-
-    def _pick_random_level_waypoint(
-        self,
-        level_id: str,
-        away_from: tuple[float, float],
-    ) -> tuple[float, float] | None:
-        """Return a random walkable point on *level_id* that is outside escalator zones.
-
-        The point is at least ``transfer_random_waypoint_min_distance_m`` from
-        *away_from* (the escalator landing position) and is not inside any
-        escalator transfer zone or corridor. JuPedSim will path-find through the
-        escalator corridor naturally to reach the point, so the agent clears the
-        landing area without the simulation needing to manage their direction.
-
-        The LLM decision (scheduled immediately on transfer) fires while the agent
-        is en route and overwrites this waypoint with the agent's real intention.
-        If the agent reaches the point before the LLM fires, they stop briefly
-        but the next scheduled decision cycle will pick them up — they are now
-        well clear of the escalator mouth so they do not block it.
-        """
-        sim = self.simulations.get(level_id)
-        if sim is None:
-            return None
-
-        combined = getattr(sim.geometry_manager, "_combined_geometry", None)
-        if combined is None or combined.is_empty:
-            return None
-
-        inner = combined.buffer(-0.3)
-        if inner.is_empty:
-            inner = combined
-
-        # Collect escalator zones and corridors to avoid.
-        exclusion_polys: list = []
-        for zone_name in self.escalator_controller.get_level_zone_names(level_id):
-            poly = self.escalator_controller.get_zone_polygon(zone_name)
-            if poly is not None:
-                exclusion_polys.append(poly)
-        level_sim = self.simulations.get(level_id)
-        if level_sim is not None:
-            corridors = getattr(level_sim.geometry_manager, "escalator_corridors", {})
-            exclusion_polys.extend(corridors.values())
-
-        minx, miny, maxx, maxy = inner.bounds
-        min_dist = self.transfer_random_waypoint_min_distance_m
-
-        for _ in range(200):
-            x = random.uniform(minx, maxx)
-            y = random.uniform(miny, maxy)
-            if not inner.contains(Point((x, y))):
-                continue
-            if math.hypot(x - away_from[0], y - away_from[1]) < min_dist:
-                continue
-            if any(ep.contains(Point((x, y))) for ep in exclusion_polys):
-                continue
-            return (x, y)
-
-        # Fallback: use the geometry representative point (always valid).
-        # This should rarely trigger with 200 samples; it is logged as a warning
-        # so that persistent failures (e.g. geometry too small) are visible.
-        rp = inner.representative_point()
-        logger.warning(
-            f"_pick_random_level_waypoint: 200 samples exhausted for level '{level_id}'; "
-            f"falling back to representative_point {(float(rp.x), float(rp.y))}. "
-            "Consider reducing transfer_random_waypoint_min_distance_m if this recurs."
-        )
-        return (float(rp.x), float(rp.y))
-
-    def _enforce_transfer_discharge(self) -> None:  # no-op: superseded by random-waypoint
-        """No-op retained for call-site compatibility. Logic removed."""
 
     # ------------------------------------------------------------------
 
@@ -350,6 +168,7 @@ class MultiLevelJuPedSimulation:
             assign_default_destination=assign_default_destination,
         )
         self.agent_levels[agent_id] = level_id
+        self.agent_base_speed.setdefault(agent_id, walking_speed)
 
         # Adding an agent means the simulation is no longer complete.  The
         # per-level step() latches is_complete when a level empties (and stays
@@ -363,7 +182,7 @@ class MultiLevelJuPedSimulation:
 
     def step(self) -> bool:
         """
-        Advance all level simulations and process agent transfers between levels.
+        Advance all levels and escalators by one timestep.
 
         Returns:
             True if simulation should continue, False if complete
@@ -371,38 +190,29 @@ class MultiLevelJuPedSimulation:
         if self.is_complete:
             return False
 
-        # Step 1: Enforce blocked-escalator corridor barriers before processing
-        # transfers so agents cannot enter blocked escalator shafts.
-        self._enforce_blocked_escalator_corridors()
+        now = self.current_time_s()
 
-        # Step 2: Check for agents that exited through escalators and transfer them
+        # 1. Agents JuPedSim removed last step: street exits leave the station,
+        #    escalator boarding strips put the agent on a conveyor.
         self._process_escalator_exits()
 
-        # Step 2b: Retry agents queued for escalator admission (denied entry to a
-        # saturated escalator earlier) now that a step has passed and capacity
-        # may have freed up.
-        self._drain_escalator_admission_queues()
+        # 2. Conveyors move; riders reaching the far comb step onto the other
+        #    level; queues advance and admit the next boarders.
+        self.escalator_system.step(self.dt, now)
 
-        # Step 3: Step each level's simulation
+        # 3. Step each level's floor simulation.
         any_active = False
         for sim in self.simulations.values():
             if sim.step():
                 any_active = True
 
-        # Re-apply blocked corridor barriers after movement. This catches any
-        # agent that touched a blocked corridor boundary during this integration
-        # step and schedules immediate re-decision.
-        self._enforce_blocked_escalator_corridors()
-
-        # Step 4: Enforce escalator physics (speed floor for departure zones/corridors).
-        # Done after JuPedSim has advanced so position data is fresh.
-        self._enforce_escalator_constraints()
-
         self.current_step += 1
 
-        # Check if simulation is complete (no agents left anywhere)
-        total_agents = sum(sim.simulation.agent_count() for sim in self.simulations.values())
-        if total_agents == 0:
+        # Count agents still registered on a floor, not just those JuPedSim is
+        # stepping: an agent removed at a boarding strip this step is boarded
+        # at the start of the next one, so the run is not over yet.
+        total_agents = sum(len(sim.agent_tracker.agent_ids) for sim in self.simulations.values())
+        if total_agents == 0 and not self.escalator_system.riding:
             logger.info("All agents have exited the simulation")
             self.is_complete = not any_active
             return False
@@ -410,546 +220,38 @@ class MultiLevelJuPedSimulation:
         return True
 
     def _process_escalator_exits(self):
-        """
-        Check each level for agents that have exited through escalators.
-
-        Escalators are exits that connect two levels. When an agent exits through
-        an escalator on one level, they are spawned into the target level.
-
-        """
-        # Reset same-step spawn tracking so each step starts fresh.
-        self._pending_spawn_positions.clear()
-
-        # Check each level for agent exits
+        """Hand agents removed at an escalator boarding strip to the escalator system."""
+        now = self.current_time_s()
         for level_id, sim in self.simulations.items():
             exited_agents = sim.check_exits()
-
             if exited_agents:
                 logger.info(
                     f"Level {level_id}: {len(exited_agents)} agents exited - {exited_agents}"
                 )
-            else:
-                logger.debug(f"Level {level_id}: No agents exited")
-
-            # Process each exited agent
             for agent_id, exit_name in exited_agents.items():
-                # Check if exit is an escalator (starts with "escalator_")
-                if not exit_name.startswith("escalator_"):
-                    logger.info(f"Agent {agent_id} exited station through street exit {exit_name}")
-                    # Remove from level tracking - agent has truly exited station
-                    if agent_id in self.agent_levels:
-                        del self.agent_levels[agent_id]
+                if self.escalator_system.handles(exit_name):
+                    self.escalator_system.board(agent_id, exit_name, now)
                     continue
+                logger.info(f"Agent {agent_id} exited station through {exit_name}")
+                self.agent_levels.pop(agent_id, None)
 
-                # Enforce cooldown to prevent immediate bounce-back transfers.
-                last_step = self._last_transfer_step.get(agent_id, -self._transfer_cooldown_steps)
-                steps_since = self.current_step - last_step
-                if steps_since < self._transfer_cooldown_steps:
-                    remaining_s = (self._transfer_cooldown_steps - steps_since) * self.dt
-                    logger.warning(
-                        f"Agent {agent_id} tried to transfer again via {exit_name} only "
-                        f"{steps_since} steps after last transfer (cooldown: "
-                        f"{self._transfer_cooldown_steps} steps). "
-                        f"Ignoring for {remaining_s:.1f}s more."
-                    )
-                    continue
+    def current_time_s(self) -> float:
+        """Absolute simulation clock (seconds since midnight for calibration runs)."""
+        return self.clock_offset_s + self.current_step * self.dt
 
-                # This is an escalator exit - transfer to target level
-                logger.info(
-                    f"Agent {agent_id} reached escalator exit {exit_name} on level {level_id} - initiating transfer"
-                )
-                self._transfer_agent_through_escalator(agent_id, level_id, exit_name)
+    def is_agent_in_transit(self, agent_id: str) -> bool:
+        """True while an agent is on an escalator (on no floor, but not gone)."""
+        return self.escalator_system.is_in_transit(agent_id)
 
-    def _drain_escalator_admission_queues(self) -> None:
-        """Retry agents queued for escalator admission, once per step.
-
-        An agent denied admission to an escalator (see
-        EscalatorController.try_admit) is queued rather than dropped, so it
-        boards as soon as capacity frees up instead of needing to physically
-        re-approach the corridor to trigger another attempt.
-        """
-        for edge_key, queue in self.escalator_controller.admission_queues.items():
-            from_level, exit_name = edge_key
-            level_sim = self.simulations.get(from_level)
-            while queue:
-                agent_id = queue[0]
-
-                # Drop stale entries: agent no longer tracked, no longer on the
-                # source level, or already routed elsewhere in the meantime.
-                if (
-                    level_sim is None
-                    or agent_id not in self.agent_levels
-                    or self.agent_levels[agent_id] != from_level
-                ):
-                    queue.pop(0)
-                    continue
-                current_exit = getattr(level_sim, "agent_assigned_exits", {}).get(agent_id)
-                if current_exit == exit_name:
-                    queue.pop(0)
-                    continue
-
-                if not self.escalator_controller.try_admit(
-                    from_level, exit_name, self.current_step
-                ):
-                    break  # head of queue still not admitted; retry next step
-
-                queue.pop(0)
-                level_sim.set_agent_destination_exit(agent_id, exit_name)
-
-    def _enforce_blocked_escalator_corridors(self) -> set[str]:
-        """Keep agents out of blocked escalator corridors.
-
-        For each blocked escalator on each loaded level:
-        - If an agent has entered the blocked corridor polygon, or
-        - If an agent is committed to that blocked escalator and is touching the
-          corridor boundary,
-
-        their current destination is cancelled, they are redirected to the
-        nearest walkable point outside that corridor, and they are flagged for an
-        immediate LLM re-decision.
-        """
-        if not self.blocked_exits:
-            return set()
-
-        from shapely.geometry import Point
-
-        rejected: set[str] = set()
-        boundary_touch_radius_m = 0.6
-
-        for level_id, sim in self.simulations.items():
-            bindings = getattr(sim.geometry_manager, "escalator_exit_bindings", {})
-            corridors = getattr(sim.geometry_manager, "escalator_corridors", {})
-            if not bindings or not corridors:
-                continue
-
-            level_positions = sim.get_all_agent_positions()
-            for agent_id, pos in level_positions.items():
-                p = Point(pos)
-                assigned_exit = sim.agent_assigned_exits.get(agent_id)
-
-                for blocked_exit in self.blocked_exits:
-                    binding = bindings.get(blocked_exit)
-                    if binding is None:
-                        continue
-                    corridor_name = binding.get("corridor", "")
-                    corridor_poly = corridors.get(corridor_name)
-                    if corridor_poly is None:
-                        continue
-
-                    inside_corridor = corridor_poly.covers(p) or corridor_poly.contains(p)
-                    approaching_blocked_corridor = (
-                        assigned_exit == blocked_exit
-                        and p.distance(corridor_poly) <= boundary_touch_radius_m
-                    )
-                    if not inside_corridor and not approaching_blocked_corridor:
-                        continue
-
-                    retreat_target = self._nearest_walkable_point_outside_corridor(
-                        sim=sim,
-                        corridor_poly=corridor_poly,
-                        position=pos,
-                    )
-                    if retreat_target is None:
-                        retreat_target = pos
-
-                    # Cancel stale blocked route and force an immediate re-decision.
-                    sim.agent_assigned_exits.pop(agent_id, None)
-                    self.agents_needing_redecision.add(agent_id)
-
-                    try:
-                        sim.set_agent_target(agent_id, retreat_target)
-                    except Exception as e:
-                        logger.debug(
-                            f"Could not set retreat target for {agent_id} away from "
-                            f"blocked corridor {corridor_name}: {e}"
-                        )
-
-                    rejected.add(agent_id)
-                    logger.info(
-                        f"Blocked escalator barrier: {agent_id} redirected away from "
-                        f"{blocked_exit} corridor on level {level_id}; immediate re-decision queued"
-                    )
-                    break
-
-        return rejected
-
-    def _nearest_walkable_point_outside_corridor(
-        self,
-        sim: ConcordiaJuPedSimulation,
-        corridor_poly,
-        position: tuple[float, float],
-    ) -> tuple[float, float] | None:
-        """Find a nearby walkable point that is outside *corridor_poly*."""
-        from shapely.geometry import Point
-
-        combined = getattr(sim.geometry_manager, "_combined_geometry", None)
-        if combined is None or combined.is_empty:
-            return None
-
-        # Remove a tiny buffered corridor so selected points are clearly outside.
-        safe_region = combined.difference(corridor_poly.buffer(0.05))
-        if safe_region.is_empty:
-            return None
-
-        try:
-            nearest_on_safe = nearest_points(Point(position), safe_region)[1]
-        except Exception:
-            return None
-
-        candidate = (float(nearest_on_safe.x), float(nearest_on_safe.y))
-        cp = Point(candidate)
-        if corridor_poly.covers(cp) or corridor_poly.contains(cp):
-            return None
-        return candidate
-
-    def _transfer_agent_through_escalator(self, agent_id: str, current_level: str, exit_name: str):
-        """
-        Transfer an agent from one level to another through an escalator.
-
-        Args:
-            agent_id: Concordia agent ID
-            current_level: Current level ID (e.g., "0" or "-1")
-            exit_name: Name of the escalator exit (e.g., "escalator_a_down")
-        """
-        edge = self.escalator_controller.get_edge_for_exit(current_level, exit_name)
-        if edge is None:
-            available = [
-                (e.from_level, e.from_exit_name, e.to_level)
-                for e in self.escalator_controller.registry.edges
-            ]
-            logger.error(
-                f"No transfer edge found for level {current_level} exit '{exit_name}'. "
-                f"Available signatures: {available}"
-            )
-            self._restore_agent_to_source_level(
-                agent_id=agent_id,
-                source_level=current_level,
-                reason=(
-                    f"No transfer edge for {exit_name} on level {current_level}; "
-                    "restoring agent to source level"
-                ),
-                force_redecision=True,
-                failed_exit_name=exit_name,
-            )
+    def block_escalator(self, exit_name: str) -> None:
+        """Close an escalator mid-run: no boarding, queue released, riders finish."""
+        if not self.escalator_system.handles(exit_name):
             return
-
-        target_level = edge.to_level
-        if target_level not in self.simulations:
-            logger.error(
-                f"Transfer edge target level {target_level} is not loaded "
-                f"for edge {edge.from_zone_name} -> {edge.to_zone_name}"
-            )
-            self._restore_agent_to_source_level(
-                agent_id=agent_id,
-                source_level=current_level,
-                reason=(
-                    f"Target level {target_level} not loaded for {exit_name}; "
-                    "restoring to source level"
-                ),
-                force_redecision=True,
-                failed_exit_name=exit_name,
-            )
-            return
-
-        target_zone_name = edge.to_zone_name
-
-        target_zone_poly = self.escalator_controller.get_zone_polygon(target_zone_name)
-        if target_zone_poly is None:
-            logger.error(
-                f"Transfer target zone '{target_zone_name}' not found in zone registry"
-            )
-            self._restore_agent_to_source_level(
-                agent_id=agent_id,
-                source_level=current_level,
-                reason=(
-                    f"Target zone {target_zone_name} missing for {exit_name}; "
-                    "restoring to source level"
-                ),
-                force_redecision=True,
-                failed_exit_name=exit_name,
-            )
-            return
-
-        base_spawn = self.escalator_controller.get_spawn_point_for_edge(edge)
-
-        # Erode the polygon by JuPedSim's minimum boundary clearance (0.2 m) plus a
-        # small margin so random candidates are never too close to walls.
-        BOUNDARY_MARGIN = 0.3
-        safe_zone = target_zone_poly.buffer(-BOUNDARY_MARGIN)
-        if safe_zone.is_empty or not safe_zone.contains(Point(base_spawn)):
-            logger.error(
-                f"Invalid transfer metadata for edge {edge.from_endpoint_id} -> {edge.to_endpoint_id}: "
-                f"spawn point {base_spawn} is outside safe arrival zone '{target_zone_name}'."
-            )
-            self._restore_agent_to_source_level(
-                agent_id=agent_id,
-                source_level=current_level,
-                reason=(
-                    f"Invalid transfer spawn metadata for {exit_name}; restoring to source level"
-                ),
-                force_redecision=True,
-                failed_exit_name=exit_name,
-            )
-            return
-
-        # Choose a spawn position that doesn't collide with:
-        #   (a) agents already present near the landing zone, and
-        #   (b) other agents being transferred to this level in the same step.
-        # Scoped to the zone (not the whole level) so unrelated congestion
-        # elsewhere on the target level can't starve a landing zone that is
-        # actually empty, and so the "agents nearby" count logged below
-        # reflects the zone rather than the entire level's population.
-        # JuPedSim rejects centres at or below roughly 0.4 m separation. Use a
-        # margin above that threshold to avoid floating-point borderline
-        # candidates passing our check and failing during add_agent().
-        MIN_AGENT_SEP = 0.45
-        existing_positions = (
-            self.escalator_controller.get_zone_local_agent_positions(
-                target_zone_name, target_level
-            )
-            + self._pending_spawn_positions
-        )
-
-        spawn_pos = None
-        if not any(
-            math.hypot(base_spawn[0] - p[0], base_spawn[1] - p[1]) < MIN_AGENT_SEP
-            for p in existing_positions
-        ):
-            spawn_pos = base_spawn
-
-        for _attempt in range(60):
-            if spawn_pos is not None:
-                break
-            angle = random.uniform(0, 2 * math.pi)
-            radius = random.uniform(0.0, 0.9)
-            candidate = (
-                base_spawn[0] + math.cos(angle) * radius,
-                base_spawn[1] + math.sin(angle) * radius,
-            )
-            if not safe_zone.contains(Point(candidate)):
-                continue
-            if any(
-                math.hypot(candidate[0] - p[0], candidate[1] - p[1]) < MIN_AGENT_SEP
-                for p in existing_positions
-            ):
-                continue
-            spawn_pos = candidate
-            break
-
-        if spawn_pos is None:
-            # Escalator landing zone is too crowded. Never leave the agent orphaned:
-            # put them back on the source level and force a re-decision.
-            logger.warning(
-                f"Cannot find free spawn point for {agent_id} in {target_zone_name} "
-                f"({len(existing_positions)} agents nearby). Restoring to source level."
-            )
-            self._restore_agent_to_source_level(
-                agent_id=agent_id,
-                source_level=current_level,
-                reason=(
-                    f"Transfer landing zone crowded for {exit_name}; restored to source level"
-                ),
-                force_redecision=True,
-                failed_exit_name=exit_name,
-            )
-            return
-
-        self._pending_spawn_positions.append(spawn_pos)
-
-        # Spawn agent in target level
-        try:
-            self.simulations[target_level].add_agent(
-                agent_id,
-                spawn_pos,
-                assign_default_destination=True,
-            )
-            self.agent_levels[agent_id] = target_level
-            self.recently_transferred_agents.add(agent_id)
-            self._last_transfer_step[agent_id] = self.current_step
-
-            logger.info(
-                f"Transferred agent {agent_id} from level {current_level} to {target_level} "
-                f"through {exit_name} at {spawn_pos}"
-            )
-
-            # Follow the escalator's explicit local egress direction. A random
-            # level-wide waypoint can send a passenger toward another platform
-            # bank before their target-platform routing resumes.
-            egress_wp = (
-                float(edge.to_egress_target[0]),
-                float(edge.to_egress_target[1]),
-            )
-            try:
-                self.simulations[target_level].set_agent_target(agent_id, egress_wp)
-                self.transfer_escape_waypoints[agent_id] = egress_wp
-                logger.debug(
-                    f"[TRANSFER] {agent_id} → local egress waypoint {egress_wp} "
-                    f"on level {target_level} (decision deferred until reached)"
-                )
-            except Exception as e:
-                logger.debug(f"Could not set transfer waypoint for {agent_id}: {e}")
-
-        except Exception as e:
-            logger.error(f"Failed to transfer agent {agent_id} to level {target_level}: {e}")
-            self._restore_agent_to_source_level(
-                agent_id=agent_id,
-                source_level=current_level,
-                reason=(
-                    f"Exception while transferring via {exit_name}: {e}. "
-                    "Restoring to source level"
-                ),
-                force_redecision=True,
-                failed_exit_name=exit_name,
-            )
-
-    def _restore_agent_to_source_level(
-        self,
-        agent_id: str,
-        source_level: str,
-        reason: str,
-        force_redecision: bool = True,
-        failed_exit_name: str | None = None,
-    ) -> None:
-        """Re-spawn an agent on the source level after a failed transfer path.
-
-        This guarantees an agent cannot silently disappear if transfer mapping,
-        target-zone metadata, or landing-space placement fails.
-
-        When failed_exit_name is given, the deterministic corridor-reinforcement
-        logic (EscalatorController._apply_endpoint_motion) is blocked from
-        instantly re-issuing that same exit to this agent for
-        self._reentry_backoff_steps, giving the forced re-decision below a
-        chance to actually take effect instead of being overridden the moment
-        the agent is standing back in the corridor it was just bounced from.
-        """
-        if failed_exit_name is not None:
-            self.escalator_controller.record_transfer_failure(
-                agent_id,
-                failed_exit_name,
-                until_step=self.current_step + self._reentry_backoff_steps,
-            )
-        source_sim = self.simulations.get(source_level)
-        if source_sim is None:
-            logger.error(
-                f"Cannot restore {agent_id}: source level {source_level} not loaded"
-            )
-            return
-
-        restore_pos = self._resolve_valid_restore_position(
-            source_sim=source_sim,
-            preferred_pos=source_sim.last_known_positions.get(agent_id),
-        )
-        if restore_pos is None:
-            logger.error(
-                f"Cannot restore {agent_id} on level {source_level}: no fallback position available"
-            )
-            return
-
-        try:
-            source_sim.add_agent(
-                agent_id,
-                restore_pos,
-                walking_speed=1.34,
-                assign_default_destination=True,
-            )
-            self.agent_levels[agent_id] = source_level
-            if force_redecision:
-                self.agents_needing_redecision.add(agent_id)
-            logger.warning(
-                f"Restored {agent_id} to level {source_level} at {restore_pos}. Reason: {reason}"
-            )
-        except Exception as e:
-            retry_pos = self._resolve_valid_restore_position(source_sim=source_sim, preferred_pos=None)
-            if retry_pos is not None and retry_pos != restore_pos:
-                try:
-                    source_sim.add_agent(
-                        agent_id,
-                        retry_pos,
-                        walking_speed=1.34,
-                        assign_default_destination=True,
-                    )
-                    self.agent_levels[agent_id] = source_level
-                    if force_redecision:
-                        self.agents_needing_redecision.add(agent_id)
-                    logger.warning(
-                        f"Restored {agent_id} to level {source_level} at {retry_pos} after retry. "
-                        f"Reason: {reason}"
-                    )
-                    return
-                except Exception as retry_e:
-                    logger.error(
-                        f"Failed retry restore for {agent_id} on level {source_level}: {retry_e}"
-                    )
-
-            logger.error(
-                f"Failed to restore {agent_id} on level {source_level} after transfer issue: {e}"
-            )
-
-    def _resolve_valid_restore_position(
-        self,
-        source_sim: ConcordiaJuPedSimulation,
-        preferred_pos: tuple[float, float] | None,
-    ) -> tuple[float, float] | None:
-        """Return a position guaranteed to be inside the current walkable geometry."""
-        combined = getattr(source_sim.geometry_manager, "_combined_geometry", None)
-
-        if combined is not None and not combined.is_empty:
-            # Keep a small margin from boundaries to avoid "on-edge" insertion failures.
-            inner = combined.buffer(-0.08)
-            if inner.is_empty:
-                inner = combined
-
-            def _inside(pos: tuple[float, float]) -> bool:
-                return bool(inner.contains(Point(pos)))
-
-            if preferred_pos is not None and _inside(preferred_pos):
-                return preferred_pos
-
-            if preferred_pos is not None:
-                try:
-                    nearest_on_walkable, _ = nearest_points(inner, Point(preferred_pos))
-                    base = (float(nearest_on_walkable.x), float(nearest_on_walkable.y))
-                    samples = [
-                        base,
-                        (base[0] + 0.15, base[1]),
-                        (base[0] - 0.15, base[1]),
-                        (base[0], base[1] + 0.15),
-                        (base[0], base[1] - 0.15),
-                        (base[0] + 0.25, base[1] + 0.25),
-                        (base[0] + 0.25, base[1] - 0.25),
-                        (base[0] - 0.25, base[1] + 0.25),
-                        (base[0] - 0.25, base[1] - 0.25),
-                    ]
-                    for candidate in samples:
-                        if _inside(candidate):
-                            return candidate
-                except Exception:
-                    pass
-
-            rp = inner.representative_point()
-            return (float(rp.x), float(rp.y))
-
-        for poly in source_sim.geometry_manager.walkable_areas.values():
-            rp = poly.representative_point()
-            return (float(rp.x), float(rp.y))
-
-        return None
-
-    def add_geometry_obstacle_for_exit(self, exit_name: str) -> None:
-        """Punch a geometry obstacle at the entrance of *exit_name* on every level.
-
-        Each level is attempted independently so a failure on one level (e.g. the
-        platform level whose topology doesn't support runtime corridor removal)
-        doesn't prevent the blocker being applied on other levels.
-        """
-        for level_id, sim in self.simulations.items():
-            try:
-                sim.add_geometry_obstacle_for_exit(exit_name)
-            except Exception as e:
-                from evacusim.utils.logger import get_logger as _gl
-                _gl(__name__).debug(
-                    f"Geometry obstacle skipped for '{exit_name}' on level {level_id}: {e}"
-                )
+        self.blocked_exits.add(exit_name)
+        self.escalator_system.close(exit_name)
+        entry = self.escalator_system.escalators[exit_name]
+        gm = self.simulations[entry.spec.from_level].geometry_manager
+        gm.blocked_exit_positions[exit_name] = entry.landing_point
 
     def consume_recently_transferred_agents(self) -> set[str]:
         """Return and clear agents transferred since last consume call."""
@@ -999,20 +301,17 @@ class MultiLevelJuPedSimulation:
 
     def set_agent_destination_exit(self, agent_id: str, exit_name: str) -> None:
         """
-        Direct an agent to a specific named exit on their current level.
+        Direct an agent to a named exit on their current level.
 
-        The exit must exist on the agent's current level. For multi-level evacuations:
-        - On platform levels: Agents route to escalator exits (e.g., "escalator_a_up")
-        - On concourse levels: Agents route to street exits (e.g., "eldon_square")
-
-        Direction is enforced programmatically: UP escalators are not valid exits
-        from the concourse (level 0), and DOWN escalators are not valid exits from
-        the platform level (level -1).  Any such request is rejected with an error
-        log and the agent keeps its current journey.
+        Escalator exits are handled by the escalator system: the agent joins
+        that escalator's queue on this level. Escalators only board from their
+        entry level, so a request for an escalator that does not board here
+        (e.g. an up-escalator from the concourse) is refused with an error and
+        the agent keeps its current journey.
 
         Args:
             agent_id: ID of the agent
-            exit_name: Name of the exit to route - must exist on current level
+            exit_name: Name of the exit - must exist on (or board from) the current level
         """
         if agent_id not in self.agent_levels:
             return
@@ -1020,20 +319,16 @@ class MultiLevelJuPedSimulation:
         level_id = self.agent_levels[agent_id]
         level_sim = self.simulations[level_id]
 
-        # Geometry-registry direction guard: if an escalator exit exists but has
-        # no transfer edge from this level, it is an arrival-only endpoint here.
-        edge = None
-        if exit_name.startswith("escalator_"):
-            edge = self.escalator_controller.get_edge_for_exit(level_id, exit_name)
-            if edge is None:
-                if any(e.from_exit_name == exit_name for e in self.escalator_controller.registry.edges):
-                    logger.error(
-                        f"[DIRECTION VIOLATION] {agent_id} on level {level_id} requested "
-                        f"arrival-only escalator '{exit_name}' on this level. Request refused."
-                    )
-                    return
+        if self.escalator_system.handles(exit_name):
+            if exit_name not in self.escalator_system.exits_from_level(level_id):
+                logger.error(
+                    f"[DIRECTION VIOLATION] {agent_id} on level {level_id} requested "
+                    f"escalator '{exit_name}', which does not board here. Request refused."
+                )
+                return
+            self.escalator_system.assign(agent_id, exit_name, self.current_time_s())
+            return
 
-        # Check if exit exists on this level
         if exit_name not in level_sim.exit_manager.evacuation_exits:
             # Raise KeyError so callers must surface and handle invalid exit
             # choices explicitly rather than silently rerouting.
@@ -1043,22 +338,6 @@ class MultiLevelJuPedSimulation:
                 f"{list(level_sim.exit_manager.evacuation_exits.keys())}"
             )
 
-        # Escalator admission gate: a deliberate (decision-engine) choice to
-        # board a saturated escalator is queued rather than granted outright,
-        # so demand for a full landing zone doesn't outpace what it can
-        # absorb. The agent keeps its current journey until admitted (mirrors
-        # the "Request refused" precedent above).
-        if edge is not None and not self.escalator_controller.try_admit(
-            level_id, exit_name, self.current_step
-        ):
-            self.escalator_controller.enqueue_admission(level_id, exit_name, agent_id)
-            logger.debug(
-                f"[ADMISSION] {agent_id} denied entry to '{exit_name}' from level "
-                f"{level_id}; queued, keeping current journey."
-            )
-            return
-
-        # Route to the exit on this level
         level_sim.set_agent_destination_exit(agent_id, exit_name)
 
     def set_agent_speed(self, agent_id: str, speed: float) -> None:

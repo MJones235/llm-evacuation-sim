@@ -378,8 +378,7 @@ class EventManager:
 
         Adds the exit to ``blocked_exits`` so that:
         - Agents who have line-of-sight will see it as blocked in their observation.
-                - The multi-level simulation will enforce blocked-corridor barriers so
-                    agents cannot enter blocked escalator shafts.
+                - A blocked escalator stops boarding (see MultiLevelJuPedSimulation.block_escalator).
 
         Discovery is entirely spatial/observational — no broadcast is made.  An agent
         only learns about the blockage when they approach close enough to see it, or
@@ -400,16 +399,14 @@ class EventManager:
         self.blocked_exits.add(exit_name)
         self.last_newly_blocked_exits.add(exit_name)
 
-        # Place a geometry obstacle only if the exit is a known registered stage.
-        # Pre-blocked exits already have their corridor removed from the navmesh.
-        if is_known and exit_name.startswith("escalator_") and hasattr(self.jps_sim, "add_geometry_obstacle_for_exit"):
-            try:
-                self.jps_sim.add_geometry_obstacle_for_exit(exit_name)
-            except Exception as e:
-                logger.warning(f"Could not add geometry obstacle for '{exit_name}': {e}")
+        # A blocked escalator stops boarding: its queue is released to re-decide
+        # and anyone already riding finishes the ride. (Pre-blocked escalators
+        # were built closed at init.)
+        if is_known and exit_name.startswith("escalator_") and hasattr(self.jps_sim, "block_escalator"):
+            self.jps_sim.block_escalator(exit_name)
 
         logger.info(
-            f"🚧 Exit '{exit_name}' blocked — threshold barrier + blocked-transfer handling active"
+            f"🚧 Exit '{exit_name}' blocked"
         )
 
     @staticmethod

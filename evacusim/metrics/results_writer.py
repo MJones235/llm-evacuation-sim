@@ -176,6 +176,21 @@ class ResultsWriter:
         logger.info(f"Exit log ({len(exit_log)} records) saved to {path}")
 
     @staticmethod
+    def _save_escalator_log(path: Path, ride_log: list[dict[str, Any]]) -> None:
+        """Write escalator_log.csv: one row per completed ride."""
+        fields = [
+            "agent_id", "escalator", "direction", "lane", "chose_s", "queue_join_s", "board_s",
+            "alight_s", "ride_s", "stall_wait_s", "discharge_attempts",
+        ]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            for record in ride_log:
+                writer.writerow({k: record.get(k, "") for k in fields})
+        logger.info(f"Escalator log ({len(ride_log)} rides) saved to {path}")
+
+    @staticmethod
     def save_final_results(
         output_path: Path,
         agent_decisions: dict[str, Any],
@@ -195,6 +210,7 @@ class ResultsWriter:
         *,
         exit_log: list[dict[str, Any]] | None = None,
         spawn_log: list[dict[str, Any]] | None = None,
+        escalator_system: Any = None,
     ) -> None:
         """
         Save final simulation results with all reports.
@@ -283,6 +299,15 @@ class ResultsWriter:
             ResultsWriter._save_exit_log(
                 output_path.parent / "exit_log.csv", exit_log, spawn_log
             )
+
+        # One row per completed escalator ride, plus static escalator
+        # geometry so plots can draw the conveyors on their own axes.
+        if escalator_system is not None:
+            ResultsWriter._save_escalator_log(
+                output_path.parent / "escalator_log.csv", escalator_system.ride_log
+            )
+            with open(output_path.parent / "escalators.json", "w") as f:
+                json.dump(escalator_system.geometry(), f, indent=2)
 
         # Save all analytics
         AnalyticsGenerator.save_all_analytics(
