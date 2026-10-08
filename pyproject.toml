@@ -23,16 +23,27 @@ dependencies = [
     "sentence-transformers>=2.0.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.10", "pre-commit>=3"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["evacusim*"]
 
-[tool.black]
-line-length = 100
-target-version = ["py310", "py311", "py312"]
-
 [tool.ruff]
 line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, bugbear, pyupgrade, simplify.
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = [
+    "E501",  # line length is the formatter's job; long strings/comments are tolerated
+    "B023",  # closures here are called within the loop iteration (escalators/system.py)
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.mypy]
 python_version = "3.10"
