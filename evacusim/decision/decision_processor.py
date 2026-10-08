@@ -292,7 +292,7 @@ class DecisionProcessor:
 
             # 6a. Translate to a simulation command.
             with self.perf_timer.measure("translate_action", is_parallel=True):
-                translated = self.action_translator.translate(agent_id, action_json, position)
+                translated = self.action_translator.translate(agent_id, decision, position)
             if translated.get("action_type") == "wait":
                 self.situation.wait_since.setdefault(agent_id, current_sim_time)
             else:

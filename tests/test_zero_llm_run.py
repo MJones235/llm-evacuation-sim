@@ -93,7 +93,7 @@ def _station_layout():
 def _make_processor(agents_config, positions):
     jps = _FakeJps(positions)
     layout = _station_layout()
-    translator = ActionTranslator(layout, None, jps)
+    translator = ActionTranslator(layout, jps)
     executor = _RecordingExecutor()
     dp = DecisionProcessor(
         concordia_agents={c["id"]: NoOpAgent(c["id"], c.get("name")) for c in agents_config},

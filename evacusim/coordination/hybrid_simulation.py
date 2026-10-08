@@ -216,7 +216,7 @@ class HybridSimulationRunner:
         self.llm_provider = language_model if hasattr(language_model, "get_usage_stats") else None
 
         # Translation layer components
-        self.action_translator = ActionTranslator(station_layout, language_model, self.jps_sim)
+        self.action_translator = ActionTranslator(station_layout, self.jps_sim)
         self.observation_generator = ObservationGenerator(station_layout, self.jps_sim)
 
         # Build Concordia agents (each with their own memory bank)
