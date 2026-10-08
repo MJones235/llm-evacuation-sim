@@ -599,7 +599,7 @@ class HybridSimulationRunner:
             logger.info(f"System '{name}' initialised ({len(system.agent_ids)} director agent(s))")
 
     def _step_systems(self, current_sim_time: float) -> None:
-        """Call step() on all active rule-based systems."""
+        """Let staff (e.g. RCIs, fire brigade) move and give directives."""
         for system in self._staff_systems:
             system.step(
                 current_sim_time=current_sim_time,
@@ -643,8 +643,8 @@ class HybridSimulationRunner:
 
         Each step (see :meth:`_run_step`): spawn arrivals, advance the
         pedestrian physics, remove agents who left or boarded, queue agents
-        who must re-decide, fire scheduled events, run a decision cycle when
-        one is due, and record outputs.
+        who must re-decide, let staff act, fire scheduled events, run a
+        decision cycle when one is due, and record outputs.
 
         Returns:
             Dictionary with simulation results and statistics
@@ -747,15 +747,18 @@ class HybridSimulationRunner:
         force_immediate_cycle = self._queue_transferred_agents()
         force_immediate_cycle = self._queue_bounced_agents() or force_immediate_cycle
 
-        # 5. Scheduled events (alarm, PA, trains, closures).
+        # 5. Staff move and give directives (every step, so directive timing is exact).
+        self._step_systems(self.current_sim_time)
+
+        # 6. Scheduled events (alarm, PA, trains, closures).
         new_event_fired, critical_event_fired, fired_event_types = self._fire_events()
 
-        # 6. A decision cycle, when one is due.
+        # 7. A decision cycle, when one is due.
         self._run_decision_cycle(
             new_event_fired, critical_event_fired, fired_event_types, force_immediate_cycle
         )
 
-        # 7. Outputs.
+        # 8. Outputs.
         self._record_step(step)
         return "ok"
 
