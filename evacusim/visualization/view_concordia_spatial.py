@@ -256,7 +256,7 @@ class SpatialConcordiaViewer:
         # solid green rectangles without a text label — the platform number is
         # instead shown on the much larger platform walkable area below.
         if "train_entrance_areas" in geometry:
-            for name, coords in geometry["train_entrance_areas"].items():
+            for coords in geometry["train_entrance_areas"].values():
                 if coords:
                     polygon = MPLPolygon(
                         coords,

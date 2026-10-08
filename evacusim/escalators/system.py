@@ -31,10 +31,12 @@ released one), while this slot scheme cleared 250 agents with no stall.
 
 from __future__ import annotations
 
+import contextlib
 import math
 import random
 import zlib
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
 import jupedsim as jps
@@ -834,10 +836,8 @@ class EscalatorSystem:
         jps_id = level_sim.agent_tracker.get_jps_id(agent_id)
         if jps_id is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             level_sim.simulation.agent(jps_id).model.time_gap = value
-        except Exception:
-            pass
 
 
 def _route_length(router, start: Point2, target: Point2) -> float | None:
@@ -845,4 +845,4 @@ def _route_length(router, start: Point2, target: Point2) -> float | None:
         wps = router.compute_waypoints(start, target)
     except Exception:
         return None
-    return sum(math.dist(a, b) for a, b in zip(wps, wps[1:]))
+    return sum(math.dist(a, b) for a, b in pairwise(wps))

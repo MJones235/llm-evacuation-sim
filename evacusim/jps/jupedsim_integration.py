@@ -14,6 +14,7 @@ Features:
 
 import re
 from collections.abc import Callable
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -337,8 +338,7 @@ class ConcordiaJuPedSimulation:
             if len(waypoints) < 2:
                 return 0.0
             return sum(
-                ((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
-                for a, b in zip(waypoints, waypoints[1:])
+                ((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5 for a, b in pairwise(waypoints)
             )
         except Exception as exc:
             logger.debug(f"Could not calculate route distance {start} -> {target}: {exc}")
@@ -619,7 +619,7 @@ class ConcordiaJuPedSimulation:
         # Add evacuation exits info
         geometry_data["evacuation_exits"] = {
             name: geometry_data["entrance_areas"].get(name)
-            for name in self.exit_manager.evacuation_exits.keys()
+            for name in self.exit_manager.evacuation_exits
             if name in geometry_data["entrance_areas"]
         }
 

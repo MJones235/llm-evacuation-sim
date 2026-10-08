@@ -12,6 +12,7 @@ Key features:
 - Observation generation from simulation state
 """
 
+import contextlib
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -1141,10 +1142,8 @@ class HybridSimulationRunner:
         finally:
             # Drain any in-flight background write so results aren't truncated.
             if self._pending_write is not None:
-                try:
+                with contextlib.suppress(Exception):
                     self._pending_write.result(timeout=30)
-                except Exception:
-                    pass
             self._io_executor.shutdown(wait=False)
 
         # Compute final statistics

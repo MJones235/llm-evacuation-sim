@@ -123,9 +123,8 @@ class SpatialAnalyzer:
                         not _is_main_footbridge(zone_name)
                         and not _is_platform_zone(zone_name)
                         and not _is_connector_zone(zone_name)
-                    ):
-                        if _covers_or_contains(polygon, point):
-                            return zone_name
+                    ) and _covers_or_contains(polygon, point):
+                        return zone_name
             except Exception:
                 pass
 
@@ -168,7 +167,7 @@ class SpatialAnalyzer:
             if level_sim:
                 # Get exits from the agent's current level
                 level_exits = {}
-                for exit_name in level_sim.exit_manager.evacuation_exits.keys():
+                for exit_name in level_sim.exit_manager.evacuation_exits:
                     # Find position for this exit
                     if exit_name.startswith("escalator_"):
                         # Get from walkable areas matching this escalator

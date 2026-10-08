@@ -40,6 +40,8 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 ignore = [
     "E501",  # line length is the formatter's job; long strings/comments are tolerated
     "B023",  # closures here are called within the loop iteration (escalators/system.py)
+    "SIM102",  # nested ifs are kept where each condition carries its own comment
+    "SIM108",  # ternaries are not always clearer than if/else
 ]
 
 [tool.pytest.ini_options]

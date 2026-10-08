@@ -195,12 +195,10 @@ class MessageSystem:
         if self._shout_count_by_bucket.get(bucket, 0) >= self.max_shouts_per_timestep:
             return False
 
-        if self._is_generic_alert(message_text) and self._has_nearby_recent_alert(
-            sender_position, current_sim_time
-        ):
-            return False
-
-        return True
+        return not (
+            self._is_generic_alert(message_text)
+            and self._has_nearby_recent_alert(sender_position, current_sim_time)
+        )
 
     def _record_message_constraints_state(
         self,

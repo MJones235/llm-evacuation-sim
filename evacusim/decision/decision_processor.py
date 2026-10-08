@@ -1562,7 +1562,6 @@ class DecisionProcessor:
         offered_actions_set = ctx.offered_actions_set
         offered_wait_reasons_set = ctx.offered_wait_reasons_set
         offered_exit_ids_set = ctx.offered_exit_ids_set
-        position = ctx.position
         current_sim_time = ctx.current_sim_time
         agent = self.concordia_agents[agent_id]
         action = None

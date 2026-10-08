@@ -617,7 +617,7 @@ class ActionTranslator:
         concourses).  The executor further snaps the point to the walkable area in
         case the zone polygon extends beyond the actual navigable geometry.
         """
-        for zone_name in self.zones_polygons.keys():
+        for zone_name in self.zones_polygons:
             if zone_name.lower() in text:
                 polygon = self.zones_polygons[zone_name]
                 # representative_point() always lies inside the polygon; centroid does not.

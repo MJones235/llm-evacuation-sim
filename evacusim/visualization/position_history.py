@@ -50,7 +50,7 @@ class PositionHistoryTracker:
         if streaming_path is not None:
             streaming_path.parent.mkdir(parents=True, exist_ok=True)
             # Open for appending so partial runs can be resumed if needed.
-            self._stream_file = open(streaming_path, "a", buffering=1)  # line-buffered
+            self._stream_file = open(streaming_path, "a", buffering=1)  # noqa: SIM115 - held open for the run; closed in close()
             logger.info(f"Streaming position history to {streaming_path}")
 
     def should_save(self, current_time: float) -> bool:

@@ -47,7 +47,7 @@ def _occupancy_summary(population_monitor) -> dict[str, dict[str, float]]:
     if population_monitor is None:
         return {}
     try:
-        data = population_monitor.to_dict()
+        population_monitor.to_dict()
     except Exception:  # pragma: no cover - defensive
         return {}
     summary: dict[str, dict[str, float]] = {}

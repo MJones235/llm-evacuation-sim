@@ -240,11 +240,7 @@ class AgentTracker:
         jps_id = self.agent_ids[agent_id]
 
         # Check if agent exists in simulation
-        for agent in self.simulation.agents():
-            if agent.id == jps_id:
-                return True
-
-        return False
+        return any(agent.id == jps_id for agent in self.simulation.agents())
 
     def get_jps_id(self, agent_id: str) -> int | None:
         """

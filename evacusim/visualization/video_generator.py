@@ -344,7 +344,7 @@ class VideoGenerator:
                         zorder=3,
                         label="_agent",
                     )
-                for agent_id, _, s in riders:
+                for _agent_id, _, s in riders:
                     level, x, y = rider_floor_position(g, s, lane)
                     floor_ax = axes_dict.get(level)
                     if floor_ax is not None:

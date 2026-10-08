@@ -69,11 +69,6 @@ class EvacuationAgent(prefab_lib.Prefab):
         """
         # Extract parameters
         name = self.params.get("name", "Agent")
-        personality_anchor = self.params.get("personality_anchor", "")
-        age = self.params.get("age", 30)
-        gender = self.params.get("gender", "neutral")
-        risk_tolerance = self.params.get("risk_tolerance", "moderate")
-        goal_state = self.params.get("goal_state", "Continue your planned journey.")
 
         # Core components
         memory_key = agent_components.memory.DEFAULT_MEMORY_COMPONENT_KEY
