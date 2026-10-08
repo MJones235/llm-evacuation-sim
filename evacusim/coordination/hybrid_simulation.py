@@ -642,9 +642,18 @@ class HybridSimulationRunner:
             observations, initial_time
         )
 
+    # ------------------------------------------------------------------
+    # The simulation loop
+    # ------------------------------------------------------------------
+
     def run(self) -> dict[str, Any]:
         """
-        Run the hybrid simulation.
+        Run the simulation to the end (or until everyone has left).
+
+        Each step (see :meth:`_run_step`): spawn arrivals, advance the
+        pedestrian physics, remove agents who left or boarded, queue agents
+        who must re-decide, fire scheduled events, run a decision cycle when
+        one is due, and record outputs.
 
         Returns:
             Dictionary with simulation results and statistics
@@ -654,9 +663,8 @@ class HybridSimulationRunner:
                 series, calibration report, position frames) are written first.
         """
         logger.info("Starting hybrid Concordia + JuPedSim simulation")
-        failure: BaseException | None = None
         start_time = time.time()
-
+        self._failure: BaseException | None = None
         results = {
             "steps": 0,
             "sim_time": 0.0,
@@ -666,7 +674,6 @@ class HybridSimulationRunner:
         }
 
         try:
-            # Main simulation loop with progress bar
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[bold blue]Simulating:"),
@@ -680,456 +687,24 @@ class HybridSimulationRunner:
                 TimeRemainingColumn(),
             ) as progress:
                 task = progress.add_task("simulation", total=self.max_steps)
-
                 for step in range(self.max_steps):
                     step_start = time.perf_counter()
-                    self.current_step = step
-                    force_immediate_decision_cycle = False
-                    self.current_sim_time = self.start_time_s + step * self.jps_sim.dt
-
-                    # Feature A: spawn passengers whose Poisson/timetable arrival
-                    # time has been reached BEFORE stepping physics, so a run that
-                    # begins with an empty population (calibration) still populates
-                    # instead of terminating at step 0.  No-op without a controller.
-                    self._spawn_arrivals(self.current_sim_time)
-
-                    # Fast-forward idle spans.  When the station is empty and the
-                    # next scheduled arrival is still in the future (overnight, or
-                    # any gap between arrivals), skip the whole per-step body —
-                    # physics, exit/boarding scans, event checks, decisions — and
-                    # let the cheap loop spin to the next arrival.  Population is
-                    # zero across the gap, so nothing is lost; we still record the
-                    # periodic snapshot so the timeseries keeps its zero samples.
-                    if self._in_idle_gap():
-                        self.population_monitor.record_snapshot(
-                            self.current_sim_time, self.exited_agents
-                        )
-                        results["steps"] = step + 1
-                        results["sim_time"] = self.current_sim_time
-                        progress.update(task, advance=1)
+                    outcome = self._run_step(step)
+                    if outcome == "stop":
+                        break
+                    if outcome == "skip":
                         continue
-
-                    # The physics layer latches "complete" the first time it steps
-                    # with an empty population — which for a calibration run is t=0,
-                    # before the first arrival.  While the spawn controller still has
-                    # queued arrivals (or live agents remain) clear that latch so
-                    # stepping resumes and spawned passengers actually move.
-                    if (
-                        self.spawn_controller is not None
-                        and getattr(self.jps_sim, "is_complete", False)
-                        and (
-                            self.spawn_controller.remaining > 0
-                            or len(self.concordia_agents) > len(self.exited_agents)
-                        )
-                    ):
-                        self.jps_sim.is_complete = False
-
-                    # Advance JuPedSim simulation
-                    with self.perf_timer.measure("jupedsim_step"):
-                        if not self._step_jupedsim():
-                            if self._last_step_error:
-                                failure = SimulationError(
-                                    f"physics step failed at t={self.current_sim_time:.2f}s: "
-                                    f"{self._last_step_error}"
-                                )
-                                logger.error(str(failure))
-                                break
-                            # Physics reports no agents remain this step.  When a
-                            # calibration spawn controller still has arrivals queued,
-                            # keep looping so later arrivals spawn; otherwise finish.
-                            if (
-                                self.spawn_controller is not None
-                                and self.spawn_controller.remaining > 0
-                            ):
-                                continue
-                            logger.info("JuPedSim simulation complete")
-                            break
-
-                    # Check for agents who have exited and remove them
-                    self.exit_tracker.check_exited_agents(self.current_sim_time, self.current_step)
-
-                    # Board agents who have explicitly committed to boarding this
-                    # train (destination == exit_name).  Agents merely waiting on the
-                    # platform or routing to an escalator are left untouched.
-                    # We add boarded agents to exited_agents here so that if
-                    # exit_tracker also sees them disappear next step it won't
-                    # double-count them.
-                    if (
-                        hasattr(self.jps_sim, "board_agents_on_platform")
-                        and self.event_manager.active_train_exits
-                    ):
-                        # Waiting boarders: agents whose goal is to board a train
-                        # and who are not actively routing away (no destination, or
-                        # a destination that is itself a train exit).  Passing these
-                        # to board_agents_on_platform lets a passenger who has
-                        # descended and is holding on the platform board the next
-                        # train that dwells there, without an explicit move→train
-                        # decision.  Alighters (goal: leave the station) are absent
-                        # from this set, so they are never re-boarded onto the train
-                        # they just stepped off.
-                        _boarder_ids = {
-                            aid
-                            for aid, goal in self.decision_processor.agent_goals.items()
-                            if aid not in self.exited_agents
-                            and goal_is_train_oriented(goal)
-                            and (
-                                not self.agent_destinations.get(aid, "")
-                                or is_train_exit(self.agent_destinations.get(aid, ""))
-                            )
-                        }
-                        for _exit_name in sorted(self.event_manager.active_train_exits):
-                            for _cid in self.jps_sim.board_agents_on_platform(
-                                _exit_name,
-                                agent_destinations=self.agent_destinations,
-                                eligible_ids=_boarder_ids,
-                            ):
-                                if _cid not in self.exited_agents:
-                                    self.exited_agents.add(_cid)
-                                    self.agent_destinations[_cid] = _exit_name
-                                    self.decision_processor.agent_goals.pop(_cid, None)
-                                    self.exit_log.append(
-                                        {
-                                            "agent_id": _cid,
-                                            "exit_name": _exit_name,
-                                            "intended_exit": _exit_name,
-                                            "exit_distance_m": "",
-                                            "time_s": round(self.current_sim_time, 2),
-                                            "level": getattr(self.jps_sim, "platform_level", "-1"),
-                                            "x": "",
-                                            "y": "",
-                                            "validated": True,
-                                        }
-                                    )
-
-                    # Record population snapshot every simulation minute
-                    self.population_monitor.record_snapshot(
-                        self.current_sim_time, self.exited_agents
-                    )
-
-                    # Drain the recently-transferred set.  Transferred agents are
-                    # given a temporary destination so they keep moving.
-                    # Clear all stale route commitments so each agent makes a
-                    # fresh, level-informed decision when they next get a turn.
-                    if hasattr(self.jps_sim, "consume_recently_transferred_agents"):
-                        transferred_agents = self.jps_sim.consume_recently_transferred_agents()
-                        if transferred_agents:
-                            immediate_transfer_redecision = bool(
-                                self.performance_config.get(
-                                    "immediate_redecision_on_transfer", True
-                                )
-                            )
-                            logger.info(
-                                f"Transferred agents queued for immediate decision cycle: "
-                                f"{transferred_agents}"
-                            )
-                            for _tid in transferred_agents:
-                                # Defensive recovery for any observer that saw
-                                # the source/destination handoff gap as an exit.
-                                self.exited_agents.discard(_tid)
-                                self.agent_destinations.pop(_tid, None)
-                                self.decision_processor.clear_goal_for_redecision(_tid)
-                                self.decision_processor.reset_agent_decision(_tid)
-                                self._pending_immediate_decisions.add(_tid)
-                            if immediate_transfer_redecision:
-                                force_immediate_decision_cycle = True
-                            else:
-                                logger.info(
-                                    "Deferring transferred-agent re-decisions to next "
-                                    "scheduled cycle for better batching "
-                                    "(performance.immediate_redecision_on_transfer=false)"
-                                )
-
-                    # Consume agents rejected by blocked-corridor barrier logic.
-                    # Clear stale route commitments and schedule an immediate
-                    # re-decision so they pick a new action next cycle.
-                    if (
-                        hasattr(self.jps_sim, "agents_needing_redecision")
-                        and self.jps_sim.agents_needing_redecision
-                    ):
-                        bounced = set(self.jps_sim.agents_needing_redecision)
-                        self.jps_sim.agents_needing_redecision.clear()
-                        logger.info(
-                            f"Blocked-corridor contacts queued for immediate re-decision: {bounced}"
-                        )
-                        if hasattr(
-                            self.observation_coordinator, "remember_blocked_exits_for_agents"
-                        ):
-                            self.observation_coordinator.remember_blocked_exits_for_agents(
-                                bounced,
-                                set(self.event_manager.blocked_exits),
-                            )
-                        for _bid in bounced:
-                            self.agent_destinations.pop(_bid, None)
-                            self.decision_processor.clear_goal_for_redecision(_bid)
-                            self.decision_processor.reset_agent_decision(_bid)
-                            self._pending_immediate_decisions.add(_bid)
-                        force_immediate_decision_cycle = True
-
-                    # decisions, meaning the alarm was missed for the entire
-                    # decision cycle that coincided with the alarm time).
-                    with self.perf_timer.measure("event_checking"):
-                        new_event_fired = self.event_manager.check_and_trigger_events(
-                            self.current_sim_time,
-                            self.concordia_agents,
-                            message_system=self.message_system,
-                            exited_agents=self.exited_agents,
-                            zone_id_for_agent_fn=self._get_zone_id_for_agent,
-                        )
-                    fired_event_types = set(
-                        getattr(self.event_manager, "last_fired_event_types", set())
-                    )
-                    critical_event_fired = bool(
-                        fired_event_types.intersection({"block_exit", "train_departure"})
-                    )
-
-                    # When a train departs its exits are removed from active_train_exits.
-                    # Clear any agent destination commitments that now point at a
-                    # closed train exit so those agents make a fresh decision.
-                    active_train_exits = self.event_manager.active_train_exits
-                    stranded = [
-                        aid
-                        for aid, dest in self.agent_destinations.items()
-                        if is_train_exit(dest)
-                        and dest not in active_train_exits
-                        and aid not in self.exited_agents
-                    ]
-                    if stranded:
-                        for aid in stranded:
-                            self.agent_destinations.pop(aid, None)
-                            self.decision_processor.clear_goal_for_redecision(aid)
-                            self.decision_processor.reset_agent_decision(aid)
-                        new_event_fired = True
-                        logger.info(
-                            f"Train departed — cleared stale destinations for "
-                            f"{len(stranded)} stranded agent(s); forced decision cycle."
-                        )
-
-                    # Notify director systems when any event fires so that
-                    # activate_on_event systems begin acting.
-                    if new_event_fired:
-                        for system in self._staff_systems:
-                            system.notify_event_fired()
-
-                    # Check if it's time for Concordia decisions (normal schedule) or
-                    # if a critical event just fired (immediate all-agent override).
-                    should_decide = self._should_make_decisions()
-                    has_pending_immediate = bool(self._pending_immediate_decisions)
-                    should_run_decisions = (
-                        should_decide
-                        or force_immediate_decision_cycle
-                        or critical_event_fired
-                        or has_pending_immediate
-                    )
-                    if new_event_fired and not critical_event_fired and not should_run_decisions:
-                        logger.info(
-                            "Informational event(s) fired (%s) — deferring broad "
-                            "re-decisions to scheduled staggered cycle",
-                            ", ".join(sorted(fired_event_types)) or "unknown",
-                        )
-                    if should_run_decisions:
-                        with self.perf_timer.measure("agent_decisions_total"):
-                            if critical_event_fired:
-                                # Critical events bypass grouping so everyone can
-                                # re-route promptly (e.g., blocked exits/closures).
-                                current_group = None  # None → process all agents
-                                logger.info(
-                                    "Critical event(s) fired (%s) — triggering "
-                                    "immediate all-agent decision cycle",
-                                    ", ".join(sorted(fired_event_types)),
-                                )
-                            elif force_immediate_decision_cycle:
-                                # Targeted immediate cycle: process only pending
-                                # out-of-group agents (e.g. transferred/bounced)
-                                # without disturbing the normal staggered cadence.
-                                current_group = []
-                                logger.info(
-                                    "Immediate targeted decision cycle for pending "
-                                    "transferred/re-routed agents"
-                                )
-                            elif has_pending_immediate:
-                                # Pending immediate agents should not wait for
-                                # the next staggered tick; run a targeted cycle.
-                                current_group = []
-                                logger.info(
-                                    "Immediate targeted decision cycle for pending "
-                                    "transferred/re-routed agents"
-                                )
-                            else:
-                                # Normal scheduled cycle: rotate through groups.
-                                current_group = (
-                                    self._agent_groups[self._current_group_index]
-                                    if self._decision_groups > 1
-                                    else None
-                                )
-
-                            # Merge any agents awaiting an out-of-group decision
-                            # (e.g. recently transferred) into the current batch.
-                            if self._pending_immediate_decisions:
-                                pending = {
-                                    a
-                                    for a in self._pending_immediate_decisions
-                                    if a not in self.exited_agents
-                                }
-                                self._pending_immediate_decisions.clear()
-                                if pending:
-                                    if current_group is None:
-                                        # All-agents cycle — pending are already included
-                                        pass
-                                    else:
-                                        extras = pending - set(current_group)
-                                        if extras:
-                                            current_group = list(current_group) + sorted(extras)
-                                            logger.info(
-                                                f"Added {len(extras)} recently-transferred "
-                                                f"agent(s) to current decision batch: {extras}"
-                                            )
-
-                            # Advance the group index only on normally-scheduled
-                            # cycles so the regular staggered cadence is preserved.
-                            if should_decide:
-                                self._current_group_index = (
-                                    self._current_group_index + 1
-                                ) % self._decision_groups
-
-                            # Remove agents who have since exited from the group list.
-                            if current_group is not None:
-                                current_group = [
-                                    a for a in current_group if a not in self.exited_agents
-                                ]
-
-                            # Format observations only for agents that will decide.
-                            # Nearby-agent lookup remains global, so these agents
-                            # still perceive non-deciding people around them.
-                            with self.perf_timer.measure("generate_observations"):
-                                observations = (
-                                    self.observation_coordinator.generate_all_observations(
-                                        self.current_sim_time,
-                                        agent_ids=current_group,
-                                    )
-                                )
-                            # Process the current group's decisions in parallel
-                            with self.perf_timer.measure("decision_processing"):
-                                cycle_time = self.decision_processor.process_all_agents(
-                                    observations,
-                                    self.current_sim_time,
-                                    agent_ids=current_group,
-                                )
-
-                                # Deferred transfer agents already have an active
-                                # JuPedSim route. Reconsider them on the normal
-                                # cadence or an event override instead of polling
-                                # their progress through the full decision pipeline
-                                # every physics step.
-                                self.decision_processor.consume_deferred_escalator_agents()
-
-                                # Preserve global cadence on targeted immediate
-                                # cycles; only update last_decision_time for
-                                # normal schedule ticks or global event overrides.
-                                if new_event_fired or should_decide:
-                                    self.last_decision_time = cycle_time
-
-                    # Track position history for video generation (every 0.5s)
-                    if self.position_tracker and step % 10 == 0:
-                        self.position_tracker.save_frame(
-                            self.current_sim_time,
-                            self.jps_sim.get_all_agent_positions(),
-                            self.agent_decisions,
-                            self.event_manager.blocked_exits,
-                            active_train_exits=self.event_manager.active_train_exits,
-                            agent_levels=(
-                                dict(self.jps_sim.agent_levels)
-                                if hasattr(self.jps_sim, "agent_levels")
-                                else None
-                            ),
-                            escalators=(
-                                self.jps_sim.escalator_system.frame_snapshot()
-                                if hasattr(self.jps_sim, "escalator_system")
-                                else None
-                            ),
-                        )
-
-                    # Lightweight positions sidecar — every 10 steps (0.5 s).
-                    # Updates agent_positions and current_time for the live viewer
-                    # without the cost of serialising the full decisions/messages dict.
-                    if self.output_file and step % 10 == 0:
-                        with self.perf_timer.measure("file_io"):
-                            _pos_levels = (
-                                dict(self.jps_sim.agent_levels)
-                                if hasattr(self.jps_sim, "agent_levels")
-                                else None
-                            )
-                            ResultsWriter.save_positions_only(
-                                self.output_file,
-                                self.jps_sim.get_all_agent_positions(),
-                                self.current_sim_time,
-                                agent_levels=_pos_levels,
-                                blocked_exits=self.event_manager.blocked_exits,
-                                agent_roles=self.agent_roles if self.agent_roles else None,
-                                active_train_exits=self.event_manager.active_train_exits,
-                            )
-
-                    # Incremental results write — every _write_interval_steps steps (10s
-                    # at dt=0.05s).  The write runs in a background thread so the main loop
-                    # is not blocked by disk I/O.  We wait for the previous write to finish
-                    # before submitting a new one to avoid concurrent writes to the same file.
-                    if self.output_file and step % self._write_interval_steps == 0:
-                        # Block only if the previous background write is still running
-                        # (this should be negligible given the 10s gap between writes).
-                        if self._pending_write is not None and not self._pending_write.done():
-                            self._pending_write.result()
-
-                        agent_levels = (
-                            dict(self.jps_sim.agent_levels)
-                            if hasattr(self.jps_sim, "agent_levels")
-                            else None
-                        )
-                        # Snapshot mutable state that could change while the write runs.
-                        snapshot_decisions = {
-                            k: {"decisions": list(v["decisions"])}
-                            for k, v in self.agent_decisions.items()
-                        }
-                        snapshot_positions = dict(self.jps_sim.get_all_agent_positions())
-                        snapshot_events = list(self.event_manager.event_history)
-                        snapshot_blocked = set(self.event_manager.blocked_exits)
-                        snapshot_messages = list(self.message_system.message_history)
-                        snapshot_time = self.current_sim_time
-
-                        with self.perf_timer.measure("file_io"):
-                            self._pending_write = self._io_executor.submit(
-                                ResultsWriter.save_incremental,
-                                self.output_file,
-                                snapshot_decisions,
-                                snapshot_positions,
-                                snapshot_time,
-                                snapshot_events,
-                                snapshot_blocked,
-                                snapshot_messages,
-                                self.decision_interval,
-                                self.max_steps,
-                                len(self.concordia_agents),
-                                agent_levels,
-                            )
-
                     results["steps"] = step + 1
                     results["sim_time"] = self.current_sim_time
-
-                    # Update progress bar
                     progress.update(task, advance=1)
-
-                    # Pace simulation to real time for smooth visualization.
-                    # Only active when a live viewer is running; disabled by
-                    # default so headless runs finish as fast as possible.
-                    if self.pace_to_realtime and self.jps_sim.dt > 0:
-                        elapsed = time.perf_counter() - step_start
-                        sleep_time = self.jps_sim.dt - elapsed
-                        if sleep_time > 0:
-                            time.sleep(sleep_time)
-
+                    if outcome == "idle":
+                        continue
+                    self._pace_to_realtime(step_start)
         except KeyboardInterrupt:
             logger.info("Simulation interrupted by user")
         except Exception as e:
             logger.error(f"Simulation error: {e}", exc_info=True)
-            failure = e
+            self._failure = e
         finally:
             # Drain any in-flight background write so results aren't truncated.
             if self._pending_write is not None:
@@ -1137,7 +712,383 @@ class HybridSimulationRunner:
                     self._pending_write.result(timeout=30)
             self._io_executor.shutdown(wait=False)
 
-        # Compute final statistics
+        self._finish(results, start_time)
+
+        failure = self._failure
+        if failure is not None:
+            if isinstance(failure, SimulationError):
+                raise failure
+            raise SimulationError(
+                f"simulation failed at t={self.current_sim_time:.2f}s: {failure}"
+            ) from failure
+        return results
+
+    def _run_step(self, step: int) -> str:
+        """One simulation step.
+
+        Returns:
+            ``"ok"``; ``"idle"`` when the station is empty and the step was
+            skipped; ``"skip"`` when physics has nobody to move but arrivals
+            are still due (the step is not counted); ``"stop"`` to end the run.
+        """
+        self.current_step = step
+        self.current_sim_time = self.start_time_s + step * self.jps_sim.dt
+
+        # 1. Arrivals (calibration runs), before physics so an initially empty
+        #    station still fills.
+        self._spawn_arrivals(self.current_sim_time)
+        if self._in_idle_gap():
+            # Nobody to move until the next arrival: keep only the zero samples.
+            self.population_monitor.record_snapshot(self.current_sim_time, self.exited_agents)
+            return "idle"
+
+        # 2. Pedestrian physics.
+        physics = self._advance_physics()
+        if physics != "ok":
+            return physics
+
+        # 3. Agents who left the station or boarded a train.
+        self.exit_tracker.check_exited_agents(self.current_sim_time, self.current_step)
+        self._board_trains()
+        self.population_monitor.record_snapshot(self.current_sim_time, self.exited_agents)
+
+        # 4. Agents whose situation changed and who must re-decide now.
+        force_immediate_cycle = self._queue_transferred_agents()
+        force_immediate_cycle = self._queue_bounced_agents() or force_immediate_cycle
+
+        # 5. Scheduled events (alarm, PA, trains, closures).
+        new_event_fired, critical_event_fired, fired_event_types = self._fire_events()
+
+        # 6. A decision cycle, when one is due.
+        self._run_decision_cycle(
+            new_event_fired, critical_event_fired, fired_event_types, force_immediate_cycle
+        )
+
+        # 7. Outputs.
+        self._record_step(step)
+        return "ok"
+
+    def _advance_physics(self) -> str:
+        """Step the pedestrian simulation: ``"ok"``, ``"skip"`` or ``"stop"``."""
+        # The physics layer latches "complete" the first time it steps with an
+        # empty population, which for a calibration run is t=0, before the first
+        # arrival. While arrivals are still queued (or agents remain) clear that
+        # latch so stepping resumes and spawned passengers actually move.
+        if (
+            self.spawn_controller is not None
+            and getattr(self.jps_sim, "is_complete", False)
+            and (
+                self.spawn_controller.remaining > 0
+                or len(self.concordia_agents) > len(self.exited_agents)
+            )
+        ):
+            self.jps_sim.is_complete = False
+
+        with self.perf_timer.measure("jupedsim_step"):
+            if self._step_jupedsim():
+                return "ok"
+        if self._last_step_error:
+            self._failure = SimulationError(
+                f"physics step failed at t={self.current_sim_time:.2f}s: {self._last_step_error}"
+            )
+            logger.error(str(self._failure))
+            return "stop"
+        # No agents remain this step; keep looping if arrivals are still due.
+        if self.spawn_controller is not None and self.spawn_controller.remaining > 0:
+            return "skip"
+        logger.info("JuPedSim simulation complete")
+        return "stop"
+
+    def _board_trains(self) -> None:
+        """Board waiting passengers onto trains dwelling at their platform.
+
+        Eligible are agents whose goal is a train and who are not routing away
+        (no destination, or a train exit). Alighters (goal: leave the station)
+        are never re-boarded onto the train they just left. Boarded agents are
+        added to ``exited_agents`` so the exit tracker does not count them again.
+        """
+        if not (
+            hasattr(self.jps_sim, "board_agents_on_platform")
+            and self.event_manager.active_train_exits
+        ):
+            return
+        boarder_ids = {
+            aid
+            for aid, goal in self.decision_processor.agent_goals.items()
+            if aid not in self.exited_agents
+            and goal_is_train_oriented(goal)
+            and (
+                not self.agent_destinations.get(aid, "")
+                or is_train_exit(self.agent_destinations.get(aid, ""))
+            )
+        }
+        for exit_name in sorted(self.event_manager.active_train_exits):
+            for cid in self.jps_sim.board_agents_on_platform(
+                exit_name,
+                agent_destinations=self.agent_destinations,
+                eligible_ids=boarder_ids,
+            ):
+                if cid in self.exited_agents:
+                    continue
+                self.exited_agents.add(cid)
+                self.agent_destinations[cid] = exit_name
+                self.decision_processor.agent_goals.pop(cid, None)
+                self.exit_log.append(
+                    {
+                        "agent_id": cid,
+                        "exit_name": exit_name,
+                        "intended_exit": exit_name,
+                        "exit_distance_m": "",
+                        "time_s": round(self.current_sim_time, 2),
+                        "level": getattr(self.jps_sim, "platform_level", "-1"),
+                        "x": "",
+                        "y": "",
+                        "validated": True,
+                    }
+                )
+
+    def _forget_route(self, agent_id: str) -> None:
+        """Clear an agent's route commitment so its next decision is fresh."""
+        self.agent_destinations.pop(agent_id, None)
+        self.decision_processor.clear_goal_for_redecision(agent_id)
+        self.decision_processor.reset_agent_decision(agent_id)
+
+    def _queue_transferred_agents(self) -> bool:
+        """Queue agents who just changed level for a fresh, level-aware decision.
+
+        Returns True if an immediate decision cycle should run
+        (``performance.immediate_redecision_on_transfer``).
+        """
+        if not hasattr(self.jps_sim, "consume_recently_transferred_agents"):
+            return False
+        transferred = self.jps_sim.consume_recently_transferred_agents()
+        if not transferred:
+            return False
+        logger.info(f"Transferred agents queued for immediate decision cycle: {transferred}")
+        for agent_id in transferred:
+            # Defensive recovery for any observer that saw the source/destination
+            # handoff gap as an exit.
+            self.exited_agents.discard(agent_id)
+            self._forget_route(agent_id)
+            self._pending_immediate_decisions.add(agent_id)
+        if bool(self.performance_config.get("immediate_redecision_on_transfer", True)):
+            return True
+        logger.info(
+            "Deferring transferred-agent re-decisions to next scheduled cycle for better "
+            "batching (performance.immediate_redecision_on_transfer=false)"
+        )
+        return False
+
+    def _queue_bounced_agents(self) -> bool:
+        """Queue agents turned back at a blocked corridor; True if any were."""
+        if not getattr(self.jps_sim, "agents_needing_redecision", None):
+            return False
+        bounced = set(self.jps_sim.agents_needing_redecision)
+        self.jps_sim.agents_needing_redecision.clear()
+        logger.info(f"Blocked-corridor contacts queued for immediate re-decision: {bounced}")
+        if hasattr(self.observation_coordinator, "remember_blocked_exits_for_agents"):
+            self.observation_coordinator.remember_blocked_exits_for_agents(
+                bounced, set(self.event_manager.blocked_exits)
+            )
+        for agent_id in bounced:
+            self._forget_route(agent_id)
+            self._pending_immediate_decisions.add(agent_id)
+        return True
+
+    def _fire_events(self) -> tuple[bool, bool, set[str]]:
+        """Fire due events and handle departed trains.
+
+        Returns ``(new_event_fired, critical_event_fired, fired_event_types)``.
+        Blocked exits and departing trains are *critical*: everyone re-decides
+        at once. Agents heading for a train that has left re-decide too.
+        """
+        with self.perf_timer.measure("event_checking"):
+            new_event_fired = self.event_manager.check_and_trigger_events(
+                self.current_sim_time,
+                self.concordia_agents,
+                message_system=self.message_system,
+                exited_agents=self.exited_agents,
+                zone_id_for_agent_fn=self._get_zone_id_for_agent,
+            )
+        fired_event_types = set(getattr(self.event_manager, "last_fired_event_types", set()))
+        critical_event_fired = bool(
+            fired_event_types.intersection({"block_exit", "train_departure"})
+        )
+
+        active_train_exits = self.event_manager.active_train_exits
+        stranded = [
+            aid
+            for aid, dest in self.agent_destinations.items()
+            if is_train_exit(dest)
+            and dest not in active_train_exits
+            and aid not in self.exited_agents
+        ]
+        if stranded:
+            for aid in stranded:
+                self._forget_route(aid)
+            new_event_fired = True
+            logger.info(
+                f"Train departed — cleared stale destinations for "
+                f"{len(stranded)} stranded agent(s); forced decision cycle."
+            )
+
+        # Staff systems activated "on_event" start acting once any event fires.
+        if new_event_fired:
+            for system in self._staff_systems:
+                system.notify_event_fired()
+        return new_event_fired, critical_event_fired, fired_event_types
+
+    def _run_decision_cycle(
+        self,
+        new_event_fired: bool,
+        critical_event_fired: bool,
+        fired_event_types: set[str],
+        force_immediate_cycle: bool,
+    ) -> None:
+        """Run a decision cycle if one is due, for the agents who should decide.
+
+        - A critical event: everyone decides now.
+        - Agents queued for an immediate decision (changed level, turned back):
+          only they decide, without disturbing the staggered cadence.
+        - Otherwise, on schedule: the next group of the staggered rotation
+          (everyone, with ``performance.decision_groups: 1``).
+        """
+        should_decide = self._should_make_decisions()
+        has_pending_immediate = bool(self._pending_immediate_decisions)
+        if not (
+            should_decide or force_immediate_cycle or critical_event_fired or has_pending_immediate
+        ):
+            if new_event_fired:
+                logger.info(
+                    "Informational event(s) fired (%s) — deferring broad "
+                    "re-decisions to scheduled staggered cycle",
+                    ", ".join(sorted(fired_event_types)) or "unknown",
+                )
+            return
+
+        with self.perf_timer.measure("agent_decisions_total"):
+            if critical_event_fired:
+                current_group = None  # None → all agents
+                logger.info(
+                    "Critical event(s) fired (%s) — triggering immediate all-agent decision cycle",
+                    ", ".join(sorted(fired_event_types)),
+                )
+            elif force_immediate_cycle or has_pending_immediate:
+                current_group = []
+                logger.info(
+                    "Immediate targeted decision cycle for pending transferred/re-routed agents"
+                )
+            else:
+                current_group = (
+                    self._agent_groups[self._current_group_index]
+                    if self._decision_groups > 1
+                    else None
+                )
+
+            # Add agents awaiting an out-of-group decision to this batch.
+            if self._pending_immediate_decisions:
+                pending = {
+                    a for a in self._pending_immediate_decisions if a not in self.exited_agents
+                }
+                self._pending_immediate_decisions.clear()
+                if pending and current_group is not None:
+                    extras = pending - set(current_group)
+                    if extras:
+                        current_group = list(current_group) + sorted(extras)
+                        logger.info(
+                            f"Added {len(extras)} recently-transferred "
+                            f"agent(s) to current decision batch: {extras}"
+                        )
+
+            # Only scheduled cycles advance the staggered rotation.
+            if should_decide:
+                self._current_group_index = (self._current_group_index + 1) % self._decision_groups
+
+            if current_group is not None:
+                current_group = [a for a in current_group if a not in self.exited_agents]
+
+            # Observations only for deciding agents (they still perceive everyone).
+            with self.perf_timer.measure("generate_observations"):
+                observations = self.observation_coordinator.generate_all_observations(
+                    self.current_sim_time, agent_ids=current_group
+                )
+            with self.perf_timer.measure("decision_processing"):
+                cycle_time = self.decision_processor.process_all_agents(
+                    observations, self.current_sim_time, agent_ids=current_group
+                )
+                # Deferred agents (clearing an escalator) keep their current
+                # route and are reconsidered on the normal cadence.
+                self.decision_processor.consume_deferred_escalator_agents()
+                # Targeted cycles keep the global cadence.
+                if new_event_fired or should_decide:
+                    self.last_decision_time = cycle_time
+
+    def _record_step(self, step: int) -> None:
+        """Position frames, the live-viewer sidecar, and periodic result writes."""
+        agent_levels = (
+            dict(self.jps_sim.agent_levels) if hasattr(self.jps_sim, "agent_levels") else None
+        )
+        if self.position_tracker and step % 10 == 0:
+            self.position_tracker.save_frame(
+                self.current_sim_time,
+                self.jps_sim.get_all_agent_positions(),
+                self.agent_decisions,
+                self.event_manager.blocked_exits,
+                active_train_exits=self.event_manager.active_train_exits,
+                agent_levels=agent_levels,
+                escalators=(
+                    self.jps_sim.escalator_system.frame_snapshot()
+                    if hasattr(self.jps_sim, "escalator_system")
+                    else None
+                ),
+            )
+
+        # Lightweight positions sidecar for the live viewer.
+        if self.output_file and step % 10 == 0:
+            with self.perf_timer.measure("file_io"):
+                ResultsWriter.save_positions_only(
+                    self.output_file,
+                    self.jps_sim.get_all_agent_positions(),
+                    self.current_sim_time,
+                    agent_levels=agent_levels,
+                    blocked_exits=self.event_manager.blocked_exits,
+                    agent_roles=self.agent_roles if self.agent_roles else None,
+                    active_train_exits=self.event_manager.active_train_exits,
+                )
+
+        # Incremental results, written in a background thread; wait for the
+        # previous write first so two never touch the file at once.
+        if self.output_file and step % self._write_interval_steps == 0:
+            if self._pending_write is not None and not self._pending_write.done():
+                self._pending_write.result()
+            snapshot_decisions = {
+                k: {"decisions": list(v["decisions"])} for k, v in self.agent_decisions.items()
+            }
+            with self.perf_timer.measure("file_io"):
+                self._pending_write = self._io_executor.submit(
+                    ResultsWriter.save_incremental,
+                    self.output_file,
+                    snapshot_decisions,
+                    dict(self.jps_sim.get_all_agent_positions()),
+                    self.current_sim_time,
+                    list(self.event_manager.event_history),
+                    set(self.event_manager.blocked_exits),
+                    list(self.message_system.message_history),
+                    self.decision_interval,
+                    self.max_steps,
+                    len(self.concordia_agents),
+                    agent_levels,
+                )
+
+    def _pace_to_realtime(self, step_start: float) -> None:
+        """With a live viewer, slow the run to real time for smooth display."""
+        if self.pace_to_realtime and self.jps_sim.dt > 0:
+            sleep_time = self.jps_sim.dt - (time.perf_counter() - step_start)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+    def _finish(self, results: dict[str, Any], start_time: float) -> None:
+        """Final statistics, reports and end-of-run outputs."""
         elapsed_time = time.time() - start_time
         results["elapsed_time"] = elapsed_time
         results["decisions_made"] = sum(
@@ -1146,21 +1097,15 @@ class HybridSimulationRunner:
         results["events_triggered"] = len(self.event_manager.event_history)
 
         logger.info(
-            f"Simulation {'FAILED' if failure else 'complete'}: {results['steps']} steps, "
+            f"Simulation {'FAILED' if self._failure else 'complete'}: {results['steps']} steps, "
             f"{results['sim_time']:.1f}s sim time, "
             f"{elapsed_time:.1f}s real time"
         )
-
-        # Print performance profile
         print(self.perf_timer.report())
-
-        # Print financial report
         print(FinancialReporter.generate_report(self.llm_provider, len(self.concordia_agents)))
 
-        # Display and save population time series.
-        # force=True ensures the final state is always recorded even when the
-        # last periodic interval (e.g. t=300 s) falls just past the actual end
-        # time (e.g. t=299.95 s) and the normal guard would skip it.
+        # force=True records the final state even when the last periodic
+        # interval falls just past the end time.
         self.population_monitor.record_snapshot(
             self.current_sim_time, self.exited_agents, force=True
         )
@@ -1169,13 +1114,9 @@ class HybridSimulationRunner:
             self.population_monitor.save(self.output_file.parent)
         results["population_timeseries"] = self.population_monitor.to_dict()
 
-        # Feature A: write the calibration report (realised vs expected
-        # arrivals + occupancy) when this was a calibration run.
         if self.spawn_controller is not None and self.output_file is not None:
             try:
-                from evacusim.calibration.calibration_report import (
-                    write_calibration_report,
-                )
+                from evacusim.calibration.calibration_report import write_calibration_report
 
                 write_calibration_report(
                     getattr(self.spawn_controller, "expected_intervals", []) or [],
@@ -1186,21 +1127,10 @@ class HybridSimulationRunner:
             except Exception as e:
                 logger.error(f"Failed to write calibration report: {e}", exc_info=True)
 
-        # Save position history if video generation is enabled
         if self.position_tracker and self.output_file:
-            # Use .jsonl extension for the streaming format; viewers that expect
-            # the legacy .json wrapper can still read via save_to_file().
             history_file = self.output_file.parent / f"{self.output_file.stem}_history.jsonl"
             self.position_tracker.save_to_file(history_file)
             results["position_history_file"] = str(history_file)
-
-        if failure is not None:
-            if isinstance(failure, SimulationError):
-                raise failure
-            raise SimulationError(
-                f"simulation failed at t={self.current_sim_time:.2f}s: {failure}"
-            ) from failure
-        return results
 
     def cleanup(self):
         """Save partial results when simulation is interrupted."""
