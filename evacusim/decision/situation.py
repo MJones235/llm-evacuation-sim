@@ -219,6 +219,10 @@ class SituationAssembler:
         agent_destinations: Each agent's current target exit (shared, live).
         jps_sim: The pedestrian simulation (positions, levels, route distances).
         wait_nudge_enabled: Remind long-waiting agents to reassess.
+        message_system: Source of each agent's perceived warning cues.
+        state_queries: Nearby-agent lookup.
+        neighbour_radius_m: Radius for ``nearby_agent_ids``; ``None`` skips the
+            lookup (only the rule engine uses it).
     """
 
     def __init__(
@@ -230,8 +234,14 @@ class SituationAssembler:
         agent_destinations: dict[str, str],
         jps_sim=None,
         wait_nudge_enabled: bool = False,
+        message_system=None,
+        state_queries=None,
+        neighbour_radius_m: float | None = None,
     ) -> None:
         self._agent_cfg = agent_cfg
+        self._message_system = message_system
+        self._state_queries = state_queries
+        self._neighbour_radius_m = neighbour_radius_m
         self._translator = action_translator
         self._executor = action_executor
         self._destinations = agent_destinations
@@ -421,7 +431,20 @@ class SituationAssembler:
             if hasattr(self._executor, "agent_action")
             else False,
             goal_policy=goal_policy,
+            warnings=self._warnings(agent_id),
+            nearby_agent_ids=self._nearby(agent_id),
         )
+
+    def _warnings(self, agent_id: str) -> tuple[dict[str, Any], ...]:
+        if self._message_system is None or not hasattr(self._message_system, "cues_for"):
+            return ()
+        return tuple(self._message_system.cues_for(agent_id))
+
+    def _nearby(self, agent_id: str) -> tuple[str, ...]:
+        if self._neighbour_radius_m is None or self._state_queries is None:
+            return ()
+        nearby = self._state_queries.get_nearby_agents(agent_id, self._neighbour_radius_m)
+        return tuple(a["id"] for a in nearby if a.get("id") != agent_id)
 
     def goal_policy(self, zone_id: str | None, goal: str) -> dict[str, Any] | None:
         """The first ``station.goal_semantic_policies`` entry matching this goal and zone."""

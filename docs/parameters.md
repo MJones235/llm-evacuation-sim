@@ -129,6 +129,16 @@ A cue every agent perceives, e.g. the fire alarm sounding.
 | `type` | `"message"` | `"message"` |  |
 | `message` | str | **required** |  |
 | `repeat_interval` | float \| null | null | Re-deliver every this many seconds. (> 0) |
+| `cue` | Cue \| null | null | Warning conveyed to everyone (rule engine). |
+
+## `events[].cue` — Cue
+
+What a message conveys, for the rule-based decision engine.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `strength` | `"weak"` \| `"medium"` \| `"strong"` | **required** |  |
+| `instruction` | `"none"` \| `"leave_station"` \| `"board_train"` | `"none"` |  |
 
 ## `events[]` — PAAnnouncementEvent
 
@@ -142,6 +152,17 @@ A public-address announcement, optionally different per zone.
 | `zone_messages` | map[str → str] \| null | null | Zone-specific text, keyed by zone id (``default`` is a fallback). |
 | `sender_label` | str | `"PA system"` | Who agents hear the announcement from. |
 | `repeat_interval` | float \| null | null | Repeat every this many seconds. (> 0) |
+| `cue` | Cue \| null | null | Warning conveyed by ``message`` (rule engine). |
+| `zone_cues` | map[str → Cue] | `{}` | Warning conveyed by each zone's message. |
+
+## `events[].zone_cues.<name>` — Cue
+
+What a message conveys, for the rule-based decision engine.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `strength` | `"weak"` \| `"medium"` \| `"strong"` | **required** |  |
+| `instruction` | `"none"` \| `"leave_station"` \| `"board_train"` | `"none"` |  |
 
 ## `events[]` — TrainArrivalEvent
 
@@ -211,6 +232,8 @@ One behaviour phase of a staff agent; phases run in order.
 | `directive_interval` | float | `10.0` | Seconds between directives. (> 0) |
 | `message` | str | `""` | Directive spoken to nearby agents. |
 | `messages_by_zone` | map[str → str] | `{}` | Zone-specific directives. |
+| `cue` | Cue \| null | null | Warning conveyed by ``message`` (rule engine). |
+| `cues_by_zone` | map[str → Cue] | `{}` | Warning conveyed by each zone's directive. |
 
 ## `systems.<name>.phases[].patrol_zones[]` — ZoneRef
 
@@ -221,6 +244,24 @@ A place, given as a zone (its centroid is used) or an explicit position.
 | `zone` | str \| null | null |  |
 | `level_id` | str \| null | null |  |
 | `position` | list[float] \| null | null |  |
+
+## `systems.<name>.phases[].cue` — Cue
+
+What a message conveys, for the rule-based decision engine.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `strength` | `"weak"` \| `"medium"` \| `"strong"` | **required** |  |
+| `instruction` | `"none"` \| `"leave_station"` \| `"board_train"` | `"none"` |  |
+
+## `systems.<name>.phases[].cues_by_zone.<name>` — Cue
+
+What a message conveys, for the rule-based decision engine.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `strength` | `"weak"` \| `"medium"` \| `"strong"` | **required** |  |
+| `instruction` | `"none"` \| `"leave_station"` \| `"board_train"` | `"none"` |  |
 
 ## `station` — StationConfig
 
@@ -309,6 +350,10 @@ Agents decide with deterministic rules; no language model is used.
 | `engine` | `"rule_based"` | **required** |  |
 | `rule_weights` | RuleWeights | *(see below)* |  |
 | `crowd_radius_m` | float | `5.0` | Radius for counting the crowd at an exit (m). (> 0) |
+| `response_median_s` | ResponseDelays | *(see below)* |  |
+| `response_sigma` | float | `0.6` | Lognormal shape of response delays (0: always the median). (≥ 0) |
+| `social` | SocialCue | *(see below)* |  |
+| `evacuation_pace` | `"normal_pace"` \| `"hurrying"` \| `"running"` | `"normal_pace"` | Pace once evacuating. |
 
 ## `decision.rule_weights` — RuleWeights
 
@@ -320,6 +365,28 @@ Weights of the exit-scoring terms; they need not sum to one.
 | `busyness` | float | `0.3` | (≥ 0) |
 | `familiarity` | float | `0.2` | (≥ 0) |
 | `visibility` | float | `0.0` | (≥ 0) |
+
+## `decision.response_median_s` — ResponseDelays
+
+Median delay (s) from perceiving a cue to starting to evacuate, by cue strength.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `weak` | float | `450.0` | (> 0) |
+| `medium` | float | `75.0` | (> 0) |
+| `strong` | float | `40.0` | (> 0) |
+
+## `decision.social` — SocialCue
+
+Seeing others leave: a cue when enough neighbours are evacuating.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | bool | `true` |  |
+| `radius_m` | float | `5.0` | Who counts as a neighbour (m). (> 0) |
+| `threshold` | float | `0.5` | Fraction of neighbours evacuating that is a cue. (> 0, ≤ 1) |
+| `min_neighbours` | int | `2` | Fewer neighbours never make a cue. (≥ 1) |
+| `strength` | `"weak"` \| `"medium"` \| `"strong"` | `"medium"` |  |
 
 ## `llm` — LLMConfig
 

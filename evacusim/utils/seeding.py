@@ -10,6 +10,7 @@ Component       What it randomises
 ``population``  Sampled agents (profile, personality, role) and spawn positions
 ``calibration`` Passenger arrival times and spawn jitter in calibration runs
 ``escalators``  Lane choice and stander step gaps
+``decisions``   Rule-engine response delays (one stream per agent)
 ``global``      Anything still using the ``random`` module directly
 ==============  ==============================================================
 

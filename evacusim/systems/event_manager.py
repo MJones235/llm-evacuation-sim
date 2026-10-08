@@ -206,6 +206,8 @@ class EventManager:
                 self.last_fired_event_types.add("pa_announcement")
             elif agents and event.get("message"):
                 self.broadcast_event(event["message"], current_sim_time, agents)
+                if event.get("cue") and message_system is not None:
+                    message_system.broadcast_cue(event["cue"], "alarm", current_sim_time)
                 self.last_fired_event_types.add("message")
 
             if repeat_interval:
@@ -264,6 +266,8 @@ class EventManager:
             exited_agents=exited_agents or set(),
             messages_by_zone=zone_messages,
             zone_id_for_agent_fn=zone_id_for_agent_fn,
+            cue=event.get("cue"),
+            cues_by_zone=event.get("zone_cues"),
         )
         # Record in event_history so the ongoing-situation line reflects the PA.
         if default_msg or zone_messages:

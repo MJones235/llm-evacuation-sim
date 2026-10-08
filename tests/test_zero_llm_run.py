@@ -61,6 +61,9 @@ class _FakeStateQueries:
     def get_agent_position(self, agent_id):
         return self._jps.get_agent_position(agent_id)
 
+    def get_nearby_agents(self, agent_id, radius):
+        return []
+
 
 class _RecordingExecutor:
     """Absorbs execute_action; never touches an LLM. Records executed actions."""
