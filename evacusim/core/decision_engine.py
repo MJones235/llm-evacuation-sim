@@ -148,5 +148,4 @@ class DecisionEngine(Protocol):
     against the context's offered sets.
     """
 
-    async def decide(self, ctx: DecisionContext) -> DecisionResult:
-        ...
+    async def decide(self, ctx: DecisionContext) -> DecisionResult: ...

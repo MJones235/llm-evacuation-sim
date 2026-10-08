@@ -77,9 +77,13 @@ def build_decision_telemetry(
         else 0.0,
         "non_wait_decisions": non_wait_decisions,
         "llm_called_count": llm_called_count,
-        "llm_call_rate": (llm_called_count / decision_records_total) if decision_records_total else 0.0,
+        "llm_call_rate": (llm_called_count / decision_records_total)
+        if decision_records_total
+        else 0.0,
         "fallback_count": fallback_count,
-        "fallback_rate": (fallback_count / decision_records_total) if decision_records_total else 0.0,
+        "fallback_rate": (fallback_count / decision_records_total)
+        if decision_records_total
+        else 0.0,
         "action_counts": action_counts,
         "pace_counts": pace_counts,
         "reassess_mode_counts": reassess_mode_counts,

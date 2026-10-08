@@ -9,10 +9,10 @@ the decision processor, and logged — and that due-popping is monotonic.
 
 import unittest
 
-from evacusim.coordination.hybrid_simulation import HybridSimulationRunner
-from evacusim.coordination.noop_agent import NoOpAgent
 from evacusim.calibration.poisson_scheduler import SpawnEvent
 from evacusim.calibration.spawn_controller import RuntimeSpawnController
+from evacusim.coordination.hybrid_simulation import HybridSimulationRunner
+from evacusim.coordination.noop_agent import NoOpAgent
 
 
 class _FakeMultiSim:
@@ -25,8 +25,9 @@ class _FakeMultiSim:
         self._fail_ids = set(fail_ids)
         self.default_destination_flags = []
 
-    def add_agent(self, agent_id, position, walking_speed=1.34, level_id="0",
-                  assign_default_destination=True):
+    def add_agent(
+        self, agent_id, position, walking_speed=1.34, level_id="0", assign_default_destination=True
+    ):
         if agent_id in self._fail_ids:
             raise RuntimeError("occupied spawn point")
         self.added.append((agent_id, position, level_id))
@@ -40,8 +41,7 @@ class _FakeSingleSim:
         self.added = []
         self.default_destination_flags = []
 
-    def add_agent(self, agent_id, position, walking_speed=1.34,
-                  assign_default_destination=True):
+    def add_agent(self, agent_id, position, walking_speed=1.34, assign_default_destination=True):
         self.added.append((agent_id, position))
         self.default_destination_flags.append(assign_default_destination)
 
@@ -112,7 +112,8 @@ class RuntimeSpawnTests(unittest.TestCase):
         sim = _FakeSingleSim()
         controller = RuntimeSpawnController(
             [SpawnEvent(1.0, "entrance", "entrance_a", "0", "train_platform_1")],
-            _SPAWN_POINTS, seed=1,
+            _SPAWN_POINTS,
+            seed=1,
         )
         r = _make_runner(sim, controller)
         HybridSimulationRunner._spawn_arrivals(r, 2.0)
@@ -123,7 +124,8 @@ class RuntimeSpawnTests(unittest.TestCase):
         # Force the first-built agent id to fail physical insertion.
         controller = RuntimeSpawnController(
             [SpawnEvent(1.0, "entrance", "entrance_a", "0", "train_platform_1")],
-            _SPAWN_POINTS, seed=1,
+            _SPAWN_POINTS,
+            seed=1,
         )
         # Peek the id the controller will assign (counter starts at 0).
         sim = _FakeMultiSim(fail_ids={"calib_entrance_0"})

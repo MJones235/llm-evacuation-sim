@@ -8,8 +8,8 @@ pedestrian simulation, marking them as successfully evacuated.
 
 from typing import Any
 
-from evacusim.utils.logger import get_logger
 from evacusim.jps.simulation_interface import PedestrianSimulation
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -176,9 +176,7 @@ class ExitTracker:
             }
         )
 
-    def _nearest_exit(
-        self, position: tuple[float, float] | None
-    ) -> tuple[str | None, float]:
+    def _nearest_exit(self, position: tuple[float, float] | None) -> tuple[str | None, float]:
         """Return (exit_name, distance) for the exit nearest `position`."""
         if position is None or self.station_layout is None:
             return None, float("inf")

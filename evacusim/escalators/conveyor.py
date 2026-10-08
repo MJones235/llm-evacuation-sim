@@ -104,8 +104,9 @@ class Conveyor:
 
     def board(self, agent_id: str, lane: str, walk_speed: float, time_s: float) -> Rider:
         """Put a passenger on the bottom step of ``lane``. Caller checks ``can_admit``."""
-        rider = Rider(agent_id=agent_id, lane=lane, walk_speed=max(0.0, walk_speed),
-                      board_time=time_s)
+        rider = Rider(
+            agent_id=agent_id, lane=lane, walk_speed=max(0.0, walk_speed), board_time=time_s
+        )
         self.riders[lane].append(rider)
         if lane == "stand":
             self._stand_gap = self._sample_stand_gap()
@@ -147,8 +148,9 @@ class Conveyor:
 
     def arrived(self) -> list[Rider]:
         length = self.params.length_m
-        return [r for lane_riders in self.riders.values() for r in lane_riders
-                if r.s >= length - 1e-9]
+        return [
+            r for lane_riders in self.riders.values() for r in lane_riders if r.s >= length - 1e-9
+        ]
 
     def remove(self, agent_id: str) -> Rider | None:
         for lane_riders in self.riders.values():
@@ -193,8 +195,11 @@ class Conveyor:
 
     def snapshot(self) -> list[list]:
         """``[[agent_id, lane, s_m], …]`` for recording/visualisation."""
-        return [[r.agent_id, lane, round(r.s, 3)]
-                for lane, lane_riders in self.riders.items() for r in lane_riders]
+        return [
+            [r.agent_id, lane, round(r.s, 3)]
+            for lane, lane_riders in self.riders.items()
+            for r in lane_riders
+        ]
 
     def max_boarding_rate(self, lane: str, walk_speed: float = 0.0) -> float:
         """Theoretical ceiling (people/s) for ``lane`` at this belt speed."""

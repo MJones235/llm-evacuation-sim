@@ -13,6 +13,8 @@ Modules:
     calibration_report  Compares realised arrivals/occupancy against expected.
 """
 
+from evacusim.calibration.poisson_scheduler import SpawnEvent, build_arrival_schedule
+from evacusim.calibration.spawn_controller import RuntimeSpawnController
 from evacusim.calibration.usage_data import (
     CalibrationDataError,
     TrainArrival,
@@ -20,8 +22,6 @@ from evacusim.calibration.usage_data import (
     load_entrance_usage,
     load_timetable,
 )
-from evacusim.calibration.poisson_scheduler import SpawnEvent, build_arrival_schedule
-from evacusim.calibration.spawn_controller import RuntimeSpawnController
 
 __all__ = [
     "CalibrationDataError",

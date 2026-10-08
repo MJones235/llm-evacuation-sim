@@ -46,7 +46,9 @@ def _load_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def _load_population_timeseries(results_path: Path, results: dict[str, Any]) -> dict[str, Any] | None:
+def _load_population_timeseries(
+    results_path: Path, results: dict[str, Any]
+) -> dict[str, Any] | None:
     embedded = results.get("population_timeseries")
     if isinstance(embedded, dict):
         return embedded
@@ -175,9 +177,7 @@ def summarize_run(results_path: Path) -> KpiSummary:
         maybe_repair = decision_telemetry.get("repair_status_counts")
         if isinstance(maybe_repair, dict):
             repair_status_counts = {
-                str(k): int(v)
-                for k, v in maybe_repair.items()
-                if isinstance(v, int)
+                str(k): int(v) for k, v in maybe_repair.items() if isinstance(v, int)
             }
 
     return KpiSummary(

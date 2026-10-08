@@ -7,8 +7,8 @@ including agent positions, nearby agents, and event history.
 
 from typing import Any
 
-from evacusim.utils.logger import get_logger
 from evacusim.jps.simulation_interface import PedestrianSimulation
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

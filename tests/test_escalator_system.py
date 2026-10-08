@@ -12,18 +12,26 @@ from pathlib import Path
 import pytest
 from shapely.geometry import Point, Polygon
 
-NETWORK = Path(os.environ.get(
-    "EVACUSIM_MONUMENT_NETWORK",
-    Path(__file__).resolve().parents[2] / "monument-evacuation" / "geometry" / "monument" / "network",
-))
-pytestmark = pytest.mark.skipif(not (NETWORK / "level_-1.xml").exists(),
-                                reason="Monument geometry not available")
+NETWORK = Path(
+    os.environ.get(
+        "EVACUSIM_MONUMENT_NETWORK",
+        Path(__file__).resolve().parents[2]
+        / "monument-evacuation"
+        / "geometry"
+        / "monument"
+        / "network",
+    )
+)
+pytestmark = pytest.mark.skipif(
+    not (NETWORK / "level_-1.xml").exists(), reason="Monument geometry not available"
+)
 
 DT = 0.1
 
 
 def make_sim(**kwargs):
     from evacusim.jps.multi_level_simulation import MultiLevelJuPedSimulation
+
     return MultiLevelJuPedSimulation(network_path=NETWORK, dt=DT, levels=["0", "-1"], **kwargs)
 
 
@@ -39,8 +47,13 @@ def spawn_on_platforms(ml, n, seed=1):
         if area.contains(Point(p)) and all(math.dist(p, q) >= 0.6 for q in placed):
             agent_id = f"a{len(placed)}"
             speeds[agent_id] = rng.uniform(0.6, 1.6)
-            ml.add_agent(agent_id, p, walking_speed=speeds[agent_id], level_id="-1",
-                         assign_default_destination=False)
+            ml.add_agent(
+                agent_id,
+                p,
+                walking_speed=speeds[agent_id],
+                level_id="-1",
+                assign_default_destination=False,
+            )
             placed.append(p)
     return speeds
 
@@ -74,7 +87,9 @@ def test_sixty_agents_ride_escalator_f_without_deadlock():
     # Boarding throughput: at or below the conveyor ceiling, and not starved.
     boards = sorted(r["board_s"] for r in log)
     rate = (len(boards) - 1) / (boards[-1] - boards[0])
-    ceiling = spec.belt_speed / spec.step_depth + (spec.belt_speed + 1.6 * spec.walk_speed_factor) / (2 * spec.step_depth)
+    ceiling = spec.belt_speed / spec.step_depth + (
+        spec.belt_speed + 1.6 * spec.walk_speed_factor
+    ) / (2 * spec.step_depth)
     assert 0.4 <= rate <= ceiling, rate
 
     # Each rider keeps their own walking speed after stepping off.
@@ -129,8 +144,9 @@ def test_closing_escalator_releases_queue_and_riders_finish():
     riders = set(es.riding)
     ml.block_escalator("escalator_f_up")
     assert not es.queue["escalator_f_up"]
-    assert ml.agents_needing_redecision >= {a for a in speeds if a not in riders
-                                            and ml.agent_levels.get(a) == "-1"}
+    assert ml.agents_needing_redecision >= {
+        a for a in speeds if a not in riders and ml.agent_levels.get(a) == "-1"
+    }
     run_until(ml, lambda: not es.riding, 120)
     assert all(ml.agent_levels.get(a) == "0" for a in riders)
 
@@ -155,8 +171,9 @@ def test_pre_blocked_escalator_is_not_offered():
 def test_last_agent_in_station_still_completes_the_ride():
     """The run must not end while the only agent is stepping onto an escalator."""
     ml = make_sim()
-    ml.add_agent("solo", (-35.5, 37.5), walking_speed=1.0, level_id="-1",
-                 assign_default_destination=False)
+    ml.add_agent(
+        "solo", (-35.5, 37.5), walking_speed=1.0, level_id="-1", assign_default_destination=False
+    )
     ml.set_agent_destination_exit("solo", "escalator_c_up")
     run_until(ml, lambda: ml.agent_levels.get("solo") == "0", 120)
     assert ml.agent_levels.get("solo") == "0"
@@ -175,7 +192,7 @@ def test_displaced_early_joiner_does_not_keep_the_head_of_the_line():
     for agent_id in ("early", "front"):
         ml.set_agent_destination_exit(agent_id, "escalator_c_up")
     q = es.queue["escalator_c_up"]
-    q["early"].join_s, q["early"].slot = 0.0, head    # joined first, then pushed back
+    q["early"].join_s, q["early"].slot = 0.0, head  # joined first, then pushed back
     q["front"].join_s = 5.0
     es._assign_slots("-1")
     assert q["front"].slot == head

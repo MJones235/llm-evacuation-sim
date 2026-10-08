@@ -86,9 +86,7 @@ def _make_ctx(dp, agent_id, offered_actions, offered_exit_ids, prompt_text="PROM
         offered_actions=list(offered_actions),
         offered_wait_reasons=[],
         offered_exit_ids=list(offered_exit_ids),
-        exit_options={
-            e: ExitOption(exit_id=e, display_name=e) for e in offered_exit_ids
-        },
+        exit_options={e: ExitOption(exit_id=e, display_name=e) for e in offered_exit_ids},
         route_blocked=False,
         cues=[],
         current_sim_time=0.0,

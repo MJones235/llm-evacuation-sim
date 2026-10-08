@@ -12,6 +12,7 @@ Key features:
 - Observation generation from simulation state
 """
 
+import contextlib
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -28,7 +29,6 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from evacusim.utils.logger import get_logger
 from evacusim.concordia.agent_builder import AgentBuilder
 from evacusim.coordination.observation_coordinator import ObservationCoordinator
 from evacusim.coordination.simulation_state_queries import SimulationStateQueries
@@ -39,10 +39,11 @@ from evacusim.jps.simulation_interface import PedestrianSimulation
 from evacusim.metrics.llm_cost_reporter import FinancialReporter
 from evacusim.metrics.population_monitor import PopulationMonitor
 from evacusim.metrics.results_writer import ResultsWriter
+from evacusim.systems.director_system import DirectorSystem
 from evacusim.systems.event_manager import EventManager
 from evacusim.systems.messaging import MessageSystem
 from evacusim.translation import ActionTranslator, ObservationGenerator
-from evacusim.systems.director_system import DirectorSystem
+from evacusim.utils.logger import get_logger
 from evacusim.utils.performance_monitor import PerformanceTimer
 from evacusim.visualization.position_history import PositionHistoryTracker
 
@@ -86,7 +87,9 @@ class HybridSimulationRunner:
             system = DirectorSystem(name, cfg)
             system.setup(jps_sim, station_layout, agent_roles)
             systems.append(system)
-            logger.info(f"[pre-spawn] System '{name}' set up ({len(system.agent_ids)} director agent(s))")
+            logger.info(
+                f"[pre-spawn] System '{name}' set up ({len(system.agent_ids)} director agent(s))"
+            )
         return systems, agent_roles
 
     @staticmethod
@@ -255,9 +258,7 @@ class HybridSimulationRunner:
             self.concordia_agents = {
                 cfg["id"]: NoOpAgent(cfg["id"], cfg.get("name")) for cfg in agents_config
             }
-            self.agent_injured = {
-                cfg["id"] for cfg in agents_config if cfg.get("is_injured")
-            }
+            self.agent_injured = {cfg["id"] for cfg in agents_config if cfg.get("is_injured")}
             logger.info(
                 "Non-LLM decision engine (%s) selected — skipped Concordia agent "
                 "construction for %d agents (no embedder, no model calls).",
@@ -410,14 +411,11 @@ class HybridSimulationRunner:
         # peak concurrency and preventing Azure rate-limit bursts.
         # Configure via performance.decision_groups (default 3). Set to 1 for
         # all-at-once behaviour each decision tick.
-        self._decision_groups: int = max(
-            1, int(self.performance_config.get("decision_groups", 3))
-        )
+        self._decision_groups: int = max(1, int(self.performance_config.get("decision_groups", 3)))
         agent_ids_sorted = sorted(self.concordia_agents.keys())
         n = len(agent_ids_sorted)
         self._agent_groups: list[list[str]] = [
-            agent_ids_sorted[i::self._decision_groups]
-            for i in range(self._decision_groups)
+            agent_ids_sorted[i :: self._decision_groups] for i in range(self._decision_groups)
         ]
         # Decision ticks happen every decision_interval / groups so each individual
         # agent still re-decides roughly every decision_interval.
@@ -484,12 +482,17 @@ class HybridSimulationRunner:
         try:
             if hasattr(self.jps_sim, "simulations"):
                 self.jps_sim.add_agent(
-                    agent_id, position, walking_speed=walking_speed,
-                    level_id=str(level_id), assign_default_destination=False,
+                    agent_id,
+                    position,
+                    walking_speed=walking_speed,
+                    level_id=str(level_id),
+                    assign_default_destination=False,
                 )
             else:
                 self.jps_sim.add_agent(
-                    agent_id, position, walking_speed=walking_speed,
+                    agent_id,
+                    position,
+                    walking_speed=walking_speed,
                     assign_default_destination=False,
                 )
         except Exception as e:
@@ -497,7 +500,10 @@ class HybridSimulationRunner:
             # the caller retries with a larger jitter, so log at debug.
             logger.debug(
                 "Runtime spawn attempt failed for %s at %s (level %s): %s",
-                agent_id, position, level_id, e,
+                agent_id,
+                position,
+                level_id,
+                e,
             )
             return False
 
@@ -525,7 +531,11 @@ class HybridSimulationRunner:
         )
         logger.debug(
             "Runtime-spawned %s (%s) at %s level %s -> %s",
-            agent_id, cfg.get("spawn_source"), position, level_id, cfg.get("target"),
+            agent_id,
+            cfg.get("spawn_source"),
+            position,
+            level_id,
+            cfg.get("target"),
         )
         return True
 
@@ -547,9 +557,7 @@ class HybridSimulationRunner:
             # out until a valid, non-colliding position is found.
             placed = False
             for attempt in range(1, self._SPAWN_MAX_ATTEMPTS):
-                position, level_id = self.spawn_controller.jittered_position(
-                    event, attempt=attempt
-                )
+                position, level_id = self.spawn_controller.jittered_position(event, attempt=attempt)
                 cfg["start_position"] = position
                 if self.register_runtime_agent(cfg, position, level_id):
                     placed = True
@@ -558,7 +566,9 @@ class HybridSimulationRunner:
                 logger.warning(
                     "Dropped runtime arrival %s (source=%s, location=%s): no valid "
                     "spawn position after %d attempts.",
-                    cfg["id"], cfg.get("spawn_source"), cfg.get("spawn_location"),
+                    cfg["id"],
+                    cfg.get("spawn_source"),
+                    cfg.get("spawn_location"),
                     self._SPAWN_MAX_ATTEMPTS,
                 )
 
@@ -617,6 +627,7 @@ class HybridSimulationRunner:
         if not zones_polygons:
             return None
         from shapely.geometry import Point as _Point
+
         pt = _Point(pos)
         for z_id, poly in zones_polygons.items():
             try:
@@ -637,7 +648,8 @@ class HybridSimulationRunner:
             logger.info(f"Bootstrapping initial agent decisions at t={initial_time:.1f}s")
             observations = self.observation_coordinator.generate_all_observations(initial_time)
             self.last_decision_time = self.decision_processor.process_all_agents(
-                observations, initial_time
+                observations,
+                initial_time,
                 # agent_ids=None → processes all agents
             )
         except Exception as e:
@@ -711,11 +723,13 @@ class HybridSimulationRunner:
                     # before the first arrival.  While the spawn controller still has
                     # queued arrivals (or live agents remain) clear that latch so
                     # stepping resumes and spawned passengers actually move.
-                    if self.spawn_controller is not None and getattr(
-                        self.jps_sim, "is_complete", False
-                    ) and (
-                        self.spawn_controller.remaining > 0
-                        or len(self.concordia_agents) > len(self.exited_agents)
+                    if (
+                        self.spawn_controller is not None
+                        and getattr(self.jps_sim, "is_complete", False)
+                        and (
+                            self.spawn_controller.remaining > 0
+                            or len(self.concordia_agents) > len(self.exited_agents)
+                        )
                     ):
                         self.jps_sim.is_complete = False
 
@@ -838,13 +852,18 @@ class HybridSimulationRunner:
                     # Consume agents rejected by blocked-corridor barrier logic.
                     # Clear stale route commitments and schedule an immediate
                     # re-decision so they pick a new action next cycle.
-                    if hasattr(self.jps_sim, "agents_needing_redecision") and self.jps_sim.agents_needing_redecision:
+                    if (
+                        hasattr(self.jps_sim, "agents_needing_redecision")
+                        and self.jps_sim.agents_needing_redecision
+                    ):
                         bounced = set(self.jps_sim.agents_needing_redecision)
                         self.jps_sim.agents_needing_redecision.clear()
                         logger.info(
                             f"Blocked-corridor contacts queued for immediate re-decision: {bounced}"
                         )
-                        if hasattr(self.observation_coordinator, "remember_blocked_exits_for_agents"):
+                        if hasattr(
+                            self.observation_coordinator, "remember_blocked_exits_for_agents"
+                        ):
                             self.observation_coordinator.remember_blocked_exits_for_agents(
                                 bounced,
                                 set(self.event_manager.blocked_exits),
@@ -878,7 +897,8 @@ class HybridSimulationRunner:
                     # closed train exit so those agents make a fresh decision.
                     active_train_exits = self.event_manager.active_train_exits
                     stranded = [
-                        aid for aid, dest in self.agent_destinations.items()
+                        aid
+                        for aid, dest in self.agent_destinations.items()
                         if dest.startswith("train_platform_")
                         and dest not in active_train_exits
                         and aid not in self.exited_agents
@@ -956,7 +976,8 @@ class HybridSimulationRunner:
                             # (e.g. recently transferred) into the current batch.
                             if self._pending_immediate_decisions:
                                 pending = {
-                                    a for a in self._pending_immediate_decisions
+                                    a
+                                    for a in self._pending_immediate_decisions
                                     if a not in self.exited_agents
                                 }
                                 self._pending_immediate_decisions.clear()
@@ -1121,10 +1142,8 @@ class HybridSimulationRunner:
         finally:
             # Drain any in-flight background write so results aren't truncated.
             if self._pending_write is not None:
-                try:
+                with contextlib.suppress(Exception):
                     self._pending_write.result(timeout=30)
-                except Exception:
-                    pass
             self._io_executor.shutdown(wait=False)
 
         # Compute final statistics
@@ -1151,7 +1170,9 @@ class HybridSimulationRunner:
         # force=True ensures the final state is always recorded even when the
         # last periodic interval (e.g. t=300 s) falls just past the actual end
         # time (e.g. t=299.95 s) and the normal guard would skip it.
-        self.population_monitor.record_snapshot(self.current_sim_time, self.exited_agents, force=True)
+        self.population_monitor.record_snapshot(
+            self.current_sim_time, self.exited_agents, force=True
+        )
         self.population_monitor.display_summary()
         if self.output_file:
             self.population_monitor.save(self.output_file.parent)
@@ -1164,6 +1185,7 @@ class HybridSimulationRunner:
                 from evacusim.calibration.calibration_report import (
                     write_calibration_report,
                 )
+
                 write_calibration_report(
                     getattr(self.spawn_controller, "expected_intervals", []) or [],
                     self.spawn_log,

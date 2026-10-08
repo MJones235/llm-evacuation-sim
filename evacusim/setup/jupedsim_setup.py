@@ -10,7 +10,6 @@ This module is responsible for:
 
 from pathlib import Path
 
-from evacusim.utils.logger import get_logger
 from evacusim.jps.jupedsim_integration import (
     ConcordiaJuPedSimulation,
 )
@@ -18,6 +17,7 @@ from evacusim.jps.multi_level_simulation import (
     MultiLevelJuPedSimulation,
 )
 from evacusim.jps.simulation_interface import PedestrianSimulation
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -46,9 +46,7 @@ class JuPedSimSetup:
         # Timed block_exit events are handled by EventManager when their
         # scheduled time is reached, so only explicit startup blocks (or
         # block_exit events at t<=0) are removed from navmesh at init.
-        initially_blocked_exits: set[str] = set(
-            sim_config.get("initially_blocked_exits", []) or []
-        )
+        initially_blocked_exits: set[str] = set(sim_config.get("initially_blocked_exits", []) or [])
         for event in config.get("events", []):
             if event.get("type") != "block_exit":
                 continue

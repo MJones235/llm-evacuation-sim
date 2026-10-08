@@ -34,17 +34,17 @@ def rider_floor_position(geom: dict[str, Any], s: float, lane: str) -> tuple[str
     if plan_s <= entry_m:
         mx, my = _mid(geom["entry_comb"])
         nx, ny = geom["entry_normal"]
-        tx, ty = -nx, -ny                     # into the escalator
+        tx, ty = -nx, -ny  # into the escalator
         d = plan_s
         level = geom["from_level"]
         width = geom["entry_width"]
     else:
         mx, my = _mid(geom["exit_comb"])
         nx, ny = geom["exit_normal"]
-        tx, ty = nx, ny                       # towards the far comb
-        d = -(entry_m + exit_m - plan_s)      # behind the exit comb
+        tx, ty = nx, ny  # towards the far comb
+        d = -(entry_m + exit_m - plan_s)  # behind the exit comb
         level = geom["to_level"]
         width = geom["exit_width"]
-    rx, ry = ty, -tx                          # right of travel
+    rx, ry = ty, -tx  # right of travel
     off = side * width / 4
     return level, mx + tx * d + rx * off, my + ty * d + ry * off

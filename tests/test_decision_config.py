@@ -3,8 +3,8 @@
 import unittest
 
 from evacusim.config.config_loader import ConfigLoader
-from evacusim.setup.simulation_runner_factory import SimulationRunnerFactory
 from evacusim.decision.rule_based_decision_engine import RuleBasedDecisionEngine
+from evacusim.setup.simulation_runner_factory import SimulationRunnerFactory
 
 
 class DecisionSectionValidationTests(unittest.TestCase):

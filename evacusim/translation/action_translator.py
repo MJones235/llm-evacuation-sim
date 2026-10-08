@@ -14,10 +14,10 @@ from typing import Any
 
 from concordia.language_model import language_model
 
-from evacusim.utils.logger import get_logger
 from evacusim.translation.exit_name_registry import (
     build_registry_from_station_layout,
 )
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -25,9 +25,7 @@ logger = get_logger(__name__)
 # Precompiled regex to normalise geometry zone names (e.g. "L0_esc_a_down") to
 # canonical escalator exit IDs ("escalator_a_down") at translation time.
 _ESC_ZONE_RE = re.compile(r"^L[^_]+_esc_([a-f])_(up|down)$")
-_ESC_ZONE_DOTTED_RE = re.compile(
-    r"^esc\.([A-F])\.zone\.(concourse|platform)\.(departure|arrival)$"
-)
+_ESC_ZONE_DOTTED_RE = re.compile(r"^esc\.([A-F])\.zone\.(concourse|platform)\.(departure|arrival)$")
 
 
 class ActionTranslator:
@@ -258,7 +256,11 @@ class ActionTranslator:
                         _m2 = _ESC_ZONE_DOTTED_RE.match(_raw_resolved)
                         if _m2:
                             _letter, _location, _role = _m2.groups()
-                            _direction = "down" if (_location == "concourse" and _role == "departure") else "up"
+                            _direction = (
+                                "down"
+                                if (_location == "concourse" and _role == "departure")
+                                else "up"
+                            )
                             _canonical_resolved = f"escalator_{_letter.lower()}_{_direction}"
                         else:
                             _canonical_resolved = _raw_resolved
@@ -390,14 +392,16 @@ class ActionTranslator:
         if is_street_exit:
             # Agent needs to go up: find UP escalators on current level.
             candidates = {
-                name: coords for name, coords in level_exits.items()
+                name: coords
+                for name, coords in level_exits.items()
                 if name.startswith("escalator_") and name.endswith("_up")
             }
             direction_label = "up escalator"
         elif is_down_escalator:
             # Agent wants to go down: find DOWN escalators on current level.
             candidates = {
-                name: coords for name, coords in level_exits.items()
+                name: coords
+                for name, coords in level_exits.items()
                 if name.startswith("escalator_") and name.endswith("_down")
             }
             direction_label = "down escalator"
@@ -406,7 +410,8 @@ class ActionTranslator:
             # about their location and needs to go up to reach the concourse first.
             if not candidates:
                 candidates = {
-                    name: coords for name, coords in level_exits.items()
+                    name: coords
+                    for name, coords in level_exits.items()
                     if name.startswith("escalator_") and name.endswith("_up")
                 }
                 direction_label = "up escalator (redirected from down request)"
@@ -612,7 +617,7 @@ class ActionTranslator:
         concourses).  The executor further snaps the point to the walkable area in
         case the zone polygon extends beyond the actual navigable geometry.
         """
-        for zone_name in self.zones_polygons.keys():
+        for zone_name in self.zones_polygons:
             if zone_name.lower() in text:
                 polygon = self.zones_polygons[zone_name]
                 # representative_point() always lies inside the polygon; centroid does not.

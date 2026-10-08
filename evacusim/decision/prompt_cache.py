@@ -144,7 +144,11 @@ class PromptCache:
         # This prevents gradual crowd-count drift from re-triggering the LLM.
         hits = self._consecutive_hits.get(agent_id, 0)
         has_external_trigger = bool(received_messages or blocked_exits or recent_events)
-        if self.stable_skip_threshold > 0 and hits >= self.stable_skip_threshold and not has_external_trigger:
+        if (
+            self.stable_skip_threshold > 0
+            and hits >= self.stable_skip_threshold
+            and not has_external_trigger
+        ):
             significant_content = self._filter_stable_agent_content(significant_content)
 
         # Create hash of significant content + prompt

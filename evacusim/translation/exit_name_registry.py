@@ -286,7 +286,7 @@ def build_registry_from_station_layout(
     custom_names: dict[str, str] = station_layout.get("custom_exit_display_names", {})
 
     # Register all exits from station_layout
-    for exit_id in station_layout.get("exits", {}).keys():
+    for exit_id in station_layout.get("exits", {}):
         registry.register_exit(exit_id, custom_names.get(exit_id))
 
     # Register down-access exits (concourse escalators leading to platforms).
@@ -298,7 +298,7 @@ def build_registry_from_station_layout(
     _esc_zone_dotted_re = re.compile(
         r"^esc\.([A-F])\.zone\.(concourse|platform)\.(departure|arrival)$"
     )
-    for zone_key in station_layout.get("down_access_exits", {}).keys():
+    for zone_key in station_layout.get("down_access_exits", {}):
         m = _esc_zone_re.match(zone_key)
         if m:
             canonical_id = f"escalator_{m.group(1)}_{m.group(2)}"
@@ -319,7 +319,7 @@ def build_registry_from_station_layout(
     if jps_sim and hasattr(jps_sim, "simulations"):
         for _, level_sim in jps_sim.simulations.items():
             if hasattr(level_sim, "exit_manager"):
-                for exit_id in level_sim.exit_manager.evacuation_exits.keys():
+                for exit_id in level_sim.exit_manager.evacuation_exits:
                     if exit_id not in registry._id_to_display:
                         registry.register_exit(exit_id, custom_names.get(exit_id))
 

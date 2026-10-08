@@ -156,15 +156,16 @@ class PopulationMonitor:
 
         zone_summary = ", ".join(z["name"] for z in self._zones)
         logger.info(
-            f"PopulationMonitor initialised — zones=[{zone_summary}], "
-            f"interval={interval_seconds}s"
+            f"PopulationMonitor initialised — zones=[{zone_summary}], interval={interval_seconds}s"
         )
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def record_snapshot(self, sim_time: float, exited_agents: set[str], force: bool = False) -> None:
+    def record_snapshot(
+        self, sim_time: float, exited_agents: set[str], force: bool = False
+    ) -> None:
         """
         Record a snapshot if the simulation has reached the next interval.
 

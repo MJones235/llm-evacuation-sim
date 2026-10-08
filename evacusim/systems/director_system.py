@@ -91,6 +91,7 @@ Director agents are registered in the shared ``agent_roles`` dict so that
 nearby Concordia agents can see their role label in observations.
 """
 
+import contextlib
 import math
 from typing import Any
 
@@ -101,6 +102,7 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Phase normalisation helper (module-level so it can be unit-tested)
 # ---------------------------------------------------------------------------
+
 
 def _normalize_phases(system_config: dict) -> list[dict]:
     """
@@ -161,6 +163,7 @@ def _normalize_phases(system_config: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 # DirectorSystem
 # ---------------------------------------------------------------------------
+
 
 class DirectorSystem:
     """
@@ -295,10 +298,8 @@ class DirectorSystem:
                     # Waiting for trigger — stand still
                     self._agent_phase[agent_id] = -1
                     self._agent_phase_activated_at[agent_id] = -1.0
-                    try:
+                    with contextlib.suppress(Exception):
                         jps_sim.set_agent_target(agent_id, position)
-                    except Exception:
-                        pass
 
                 # Initialise per-agent state
                 dwell = first_phase["patrol_dwell_time"] if first_phase else 20.0
@@ -392,13 +393,18 @@ class DirectorSystem:
                 continue
 
             # Periodic debug log so phase/level/position can be verified in logs
-            if int(current_sim_time) % 10 == 0 and (current_sim_time % 1.0) < self.dt if hasattr(self, 'dt') else int(current_sim_time) % 10 == 0:
+            if (
+                int(current_sim_time) % 10 == 0 and (current_sim_time % 1.0) < self.dt
+                if hasattr(self, "dt")
+                else int(current_sim_time) % 10 == 0
+            ):
                 current_level = (
-                    jps_sim.agent_levels.get(agent_id)
-                    if hasattr(jps_sim, "agent_levels") else "?"
+                    jps_sim.agent_levels.get(agent_id) if hasattr(jps_sim, "agent_levels") else "?"
                 )
                 grace_until = self._phase_transition_grace_until.get(agent_id, 0.0)
-                grace_note = f" [grace until t={grace_until:.0f}s]" if grace_until > current_sim_time else ""
+                grace_note = (
+                    f" [grace until t={grace_until:.0f}s]" if grace_until > current_sim_time else ""
+                )
                 logger.debug(
                     f"[{self.system_name}] {agent_id} t={current_sim_time:.1f}s "
                     f"phase={current_idx} movement={phase['movement']} "
@@ -409,9 +415,7 @@ class DirectorSystem:
             if phase["movement"] == "zone_patrol":
                 self._step_patrol(agent_id, phase, current_sim_time, jps_sim, position)
             elif phase["movement"] == "hold":
-                self._step_hold_agent(
-                    agent_id, phase, position, current_sim_time, jps_sim
-                )
+                self._step_hold_agent(agent_id, phase, position, current_sim_time, jps_sim)
 
             # Broadcast directive
             if not phase["message"] and not phase["messages_by_zone"]:
@@ -529,10 +533,8 @@ class DirectorSystem:
             # the cross-level case on the next tick.
             if current_level is None or first_wp["level_id"] == current_level:
                 if position is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         jps_sim.set_agent_target(agent_id, first_wp["pos"])
-                    except Exception:
-                        pass
         # Hold: target is set lazily on the first _step_hold_agent call
 
     # ------------------------------------------------------------------
@@ -561,19 +563,18 @@ class DirectorSystem:
                 hold_target = position
             self._hold_targets[agent_id] = hold_target
             # Set immediately
-            try:
+            with contextlib.suppress(Exception):
                 jps_sim.set_agent_target(agent_id, hold_target)
-            except Exception:
-                pass
             self._last_hold_refresh[agent_id] = current_sim_time
             return
 
         # Periodic refresh to resist crowd-pressure drift
-        if current_sim_time - self._last_hold_refresh.get(agent_id, 0.0) >= self._HOLD_REFRESH_INTERVAL:
-            try:
+        if (
+            current_sim_time - self._last_hold_refresh.get(agent_id, 0.0)
+            >= self._HOLD_REFRESH_INTERVAL
+        ):
+            with contextlib.suppress(Exception):
                 jps_sim.set_agent_target(agent_id, hold_target)
-            except Exception:
-                pass
             self._last_hold_refresh[agent_id] = current_sim_time
 
     def _step_patrol(
@@ -647,20 +648,16 @@ class DirectorSystem:
                 self._cross_level_routing[agent_id] = None
                 self._patrol_arrived_at[agent_id] = -phase["patrol_dwell_time"]
                 if current_level is None or next_wp["level_id"] == current_level:
-                    try:
+                    with contextlib.suppress(Exception):
                         jps_sim.set_agent_target(agent_id, next_wp["pos"])
-                    except Exception:
-                        pass
                 logger.debug(
                     f"[{self.system_name}] {agent_id} → patrol waypoint "
                     f"{next_idx}: {next_wp['pos']} (level {next_wp['level_id']})"
                 )
         else:
             if arrived_at < 0:
-                try:
+                with contextlib.suppress(Exception):
                     jps_sim.set_agent_target(agent_id, target_pos)
-                except Exception:
-                    pass
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -688,7 +685,8 @@ class DirectorSystem:
         candidates = [
             (math.dist(position, e.landing_point), name)
             for name, e in escalators.escalators.items()
-            if e.spec.from_level == str(current_level) and e.spec.to_level == str(target_level)
+            if e.spec.from_level == str(current_level)
+            and e.spec.to_level == str(target_level)
             and not e.conveyor.closed
         ]
         if not candidates:

@@ -158,9 +158,7 @@ class AgentTracker:
 
         return nearby
 
-    def get_all_nearby_agents_bulk(
-        self, radius: float
-    ) -> dict[str, list[dict[str, Any]]]:
+    def get_all_nearby_agents_bulk(self, radius: float) -> dict[str, list[dict[str, Any]]]:
         """
         Compute nearby agents for ALL agents in a single O(n²/2) pass.
 
@@ -193,9 +191,7 @@ class AgentTracker:
                 continue
             concordia_ids.append(cid)
             positions.append((float(agent.position[0]), float(agent.position[1])))
-            is_moving_flags.append(
-                hasattr(agent, "orientation") and agent.orientation is not None
-            )
+            is_moving_flags.append(hasattr(agent, "orientation") and agent.orientation is not None)
 
         if not concordia_ids:
             return {}
@@ -215,7 +211,7 @@ class AgentTracker:
                 dy = pos_array[j, 1] - yi
                 dist_sq = dx * dx + dy * dy
                 if dist_sq <= radius_sq:
-                    dist = dist_sq ** 0.5
+                    dist = dist_sq**0.5
                     result[concordia_ids[i]].append(
                         {
                             "id": concordia_ids[j],
@@ -244,11 +240,7 @@ class AgentTracker:
         jps_id = self.agent_ids[agent_id]
 
         # Check if agent exists in simulation
-        for agent in self.simulation.agents():
-            if agent.id == jps_id:
-                return True
-
-        return False
+        return any(agent.id == jps_id for agent in self.simulation.agents())
 
     def get_jps_id(self, agent_id: str) -> int | None:
         """

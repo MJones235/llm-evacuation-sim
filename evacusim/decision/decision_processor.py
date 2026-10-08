@@ -25,11 +25,11 @@ from concordia.typing import entity as entity_lib
 from shapely.geometry import Point
 from shapely.ops import nearest_points
 
-from evacusim.utils.logger import get_logger
-from evacusim.decision.action_utils import extract_exit_name
-from evacusim.decision.prompt_cache import PromptCache
 from evacusim.concordia.azure_llm_concordia import llm_current_agent_id, llm_current_sim_time
 from evacusim.core.decision_engine import DecisionContext, DecisionResult, ExitOption
+from evacusim.decision.action_utils import extract_exit_name
+from evacusim.decision.prompt_cache import PromptCache
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -49,9 +49,7 @@ _RE_BLOCKED_EXIT_LINE = re.compile(r"The (.+?) appears blocked or obstructed")
 _RE_CIRCULAR_FOLLOW = re.compile(
     r"You are following (Person (\w+)), and Person \2 is following YOU"
 )
-_RE_FOLLOWER_SINGULAR = re.compile(
-    r"\u26a0\ufe0f (Person (\w+)) is trying to follow YOU"
-)
+_RE_FOLLOWER_SINGULAR = re.compile(r"\u26a0\ufe0f (Person (\w+)) is trying to follow YOU")
 _RE_FOLLOWER_PLURAL = re.compile(r"\u26a0\ufe0f (.+?) are trying to follow YOU")
 
 
@@ -213,6 +211,7 @@ class DecisionProcessor:
         # entity is required to produce a decision.
         if decision_engine is None:
             from evacusim.decision.llm_decision_engine import LLMDecisionEngine
+
             decision_engine = LLMDecisionEngine(self)
         self._engine = decision_engine
 
@@ -241,9 +240,7 @@ class DecisionProcessor:
         chosen_path = Path(template_path).expanduser() if template_path else default_path
 
         if not chosen_path.exists():
-            raise FileNotFoundError(
-                f"Decision prompt template file not found: {chosen_path}"
-            )
+            raise FileNotFoundError(f"Decision prompt template file not found: {chosen_path}")
 
         try:
             template_text = chosen_path.read_text(encoding="utf-8")
@@ -340,7 +337,7 @@ class DecisionProcessor:
         if not lines:
             return ""
         bullets = "\n".join(lines)
-        return "\nAvailable zones:\n" f"{bullets}\n\n"
+        return f"\nAvailable zones:\n{bullets}\n\n"
 
     def _get_valid_exits_section(
         self,
@@ -479,9 +476,7 @@ class DecisionProcessor:
                 continue
 
             zones = {
-                str(z).strip().lower()
-                for z in policy.get("applies_in_zones", [])
-                if str(z).strip()
+                str(z).strip().lower() for z in policy.get("applies_in_zones", []) if str(z).strip()
             }
             if zones and zone_lower not in zones:
                 continue
@@ -560,9 +555,7 @@ class DecisionProcessor:
             if agent_id in self._evacuation_committed_agents:
                 self._evacuation_committed_agents.discard(agent_id)
                 self.agent_goals.pop(agent_id, None)
-                logger.info(
-                    f"{agent_id}: all-clear cue detected — released evacuation commitment"
-                )
+                logger.info(f"{agent_id}: all-clear cue detected — released evacuation commitment")
             return
 
         action = str(decision_payload.get("action", ""))
@@ -578,9 +571,7 @@ class DecisionProcessor:
             if self._goal_is_train_oriented(current_goal):
                 return
             if agent_id not in self._evacuation_committed_agents:
-                logger.info(
-                    f"{agent_id}: evacuation decision committed as persistent goal"
-                )
+                logger.info(f"{agent_id}: evacuation decision committed as persistent goal")
             self._evacuation_committed_agents.add(agent_id)
             self.agent_goals[agent_id] = self._evacuation_goal_text()
 
@@ -647,18 +638,13 @@ class DecisionProcessor:
         min_x, min_y, max_x, max_y = safe_polygon.bounds
         for _ in range(500):
             candidate = Point(rng.uniform(min_x, max_x), rng.uniform(min_y, max_y))
-            if (
-                safe_polygon.contains(candidate)
-                and candidate.distance(Point(position)) <= 30.0
-            ):
+            if safe_polygon.contains(candidate) and candidate.distance(Point(position)) <= 30.0:
                 return (float(candidate.x), float(candidate.y))
 
         waypoint = nearest_points(Point(position), safe_polygon)[1]
         return (float(waypoint.x), float(waypoint.y))
 
-    def _defer_for_post_transfer_route(
-        self, agent_id: str, position: tuple[float, float]
-    ) -> bool:
+    def _defer_for_post_transfer_route(self, agent_id: str, position: tuple[float, float]) -> bool:
         """Advance local-egress and assigned-platform waypoints without stopping."""
         platform_waypoints = getattr(self.jps_sim, "transfer_platform_waypoints", {})
         if agent_id in platform_waypoints:
@@ -695,9 +681,7 @@ class DecisionProcessor:
         if agent_level == "0" and not self._goal_is_train_oriented(current_goal):
             del escape_waypoints[agent_id]
             self._post_transfer_exit_choice_agents.add(agent_id)
-            logger.debug(
-                f"{agent_id}: transferred to concourse — choosing a street exit"
-            )
+            logger.debug(f"{agent_id}: transferred to concourse — choosing a street exit")
             return False
 
         # Unknown journeys retain the local egress waypoint so they at least
@@ -759,7 +743,9 @@ class DecisionProcessor:
         current_display = (
             registry.get_display_name(current_dest) if registry is not None else current_dest
         )
-        blocked_mentions = [_m.group(1).strip() for _m in _RE_BLOCKED_EXIT_LINE.finditer(observation)]
+        blocked_mentions = [
+            _m.group(1).strip() for _m in _RE_BLOCKED_EXIT_LINE.finditer(observation)
+        ]
         return any(name == current_display for name in blocked_mentions)
 
     def _build_available_actions_block(
@@ -911,7 +897,9 @@ class DecisionProcessor:
 
         if action == "evacuate":
             if exit_id not in offered_exit_ids:
-                errors.append(f"exit_id must be one of {sorted(offered_exit_ids)} when action=evacuate")
+                errors.append(
+                    f"exit_id must be one of {sorted(offered_exit_ids)} when action=evacuate"
+                )
         else:
             if exit_id is not None:
                 errors.append("exit_id must be null unless action=evacuate")
@@ -1114,8 +1102,7 @@ class DecisionProcessor:
         agents_to_process = [
             agent_id
             for agent_id in candidate_agents
-            if agent_id in self.concordia_agents
-            and agent_id not in self.exited_agents
+            if agent_id in self.concordia_agents and agent_id not in self.exited_agents
         ]
 
         # --- Per-cycle zone cache ---
@@ -1352,11 +1339,12 @@ class DecisionProcessor:
             age = str(cfg.get("age", "unknown"))
             gender = str(cfg.get("gender", "person"))
             personality_profile = str(
-                cfg.get("personality_anchor")
-                or cfg.get("personality_type", "unknown")
+                cfg.get("personality_anchor") or cfg.get("personality_type", "unknown")
             )
             journey_block = agent_goal if agent_goal else "Continue your assigned journey."
-            previous_decision_summary = self._build_last_decision_summary(agent_id, current_sim_time)
+            previous_decision_summary = self._build_last_decision_summary(
+                agent_id, current_sim_time
+            )
             new_info_text = self._extract_new_information_text(observation)
             cue_text = ", ".join(cues) if cues else "none"
             new_since_last_decision = (
@@ -1409,9 +1397,7 @@ class DecisionProcessor:
                     if str(t).strip()
                 )
                 avoid_exit_tags = tuple(
-                    str(t).strip()
-                    for t in goal_policy.get("avoid_exit_tags", [])
-                    if str(t).strip()
+                    str(t).strip() for t in goal_policy.get("avoid_exit_tags", []) if str(t).strip()
                 )
             # Resolve the agent's concrete destination (its target platform) to
             # the down-escalator that serves it, so a boarder descends via the
@@ -1576,7 +1562,6 @@ class DecisionProcessor:
         offered_actions_set = ctx.offered_actions_set
         offered_wait_reasons_set = ctx.offered_wait_reasons_set
         offered_exit_ids_set = ctx.offered_exit_ids_set
-        position = ctx.position
         current_sim_time = ctx.current_sim_time
         agent = self.concordia_agents[agent_id]
         action = None
@@ -1712,8 +1697,10 @@ class DecisionProcessor:
                                                 agent.act, attempt_action_spec
                                             )
                                     else:
-                                        raw_action = await asyncio.to_thread(agent.act, attempt_action_spec)
-                            except asyncio.TimeoutError:
+                                        raw_action = await asyncio.to_thread(
+                                            agent.act, attempt_action_spec
+                                        )
+                            except TimeoutError:
                                 timeout_secs = self._per_agent_timeout_secs
                                 logger.warning(
                                     f"{agent_id}: decision timed out after {timeout_secs:.0f}s — "
@@ -1769,9 +1756,7 @@ class DecisionProcessor:
             repair_status=repair_status,
         )
 
-    def _build_exit_options(
-        self, agent_id, position, zone_id, offered_exit_ids, observation=""
-    ):
+    def _build_exit_options(self, agent_id, position, zone_id, offered_exit_ids, observation=""):
         """Assemble structured routing signals for each offered exit.
 
         Returns ``{exit_id -> ExitOption}`` carrying the three signals a
@@ -1811,7 +1796,7 @@ class DecisionProcessor:
             all_positions = self.jps_sim.get_all_agent_positions() if self.jps_sim else {}
         except Exception:
             all_positions = {}
-        crowd_radius_sq = 5.0 ** 2
+        crowd_radius_sq = 5.0**2
 
         for exit_id in offered_exit_ids:
             display = exit_id

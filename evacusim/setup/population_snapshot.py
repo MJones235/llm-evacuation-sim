@@ -111,8 +111,7 @@ def load_snapshot(path: str | Path) -> list[dict[str, Any]]:
             agent["start_position"] = tuple(float(v) for v in agent["start_position"])
 
     logger.info(
-        f"Population snapshot loaded: {path} ({len(agents)} agents, "
-        f"format version {version})"
+        f"Population snapshot loaded: {path} ({len(agents)} agents, format version {version})"
     )
     return agents
 
@@ -120,6 +119,7 @@ def load_snapshot(path: str | Path) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _json_default(obj: Any) -> Any:
     """JSON serialisation fallback for non-standard Python types."""

@@ -44,8 +44,15 @@ def _validator():
     )
 
 
-def _ctx(exit_options, offered_actions, offered_exit_ids, *, goal="Leave the station.",
-         route_blocked=False, offered_wait_reasons=("awaiting_information",)):
+def _ctx(
+    exit_options,
+    offered_actions,
+    offered_exit_ids,
+    *,
+    goal="Leave the station.",
+    route_blocked=False,
+    offered_wait_reasons=("awaiting_information",),
+):
     return DecisionContext(
         agent_id="agent_0",
         position=(0.0, 0.0),
@@ -128,8 +135,12 @@ class RuleBasedEngineTests(unittest.TestCase):
         ids = ["near_busy", "far_quiet"]
         prox_eng = RuleBasedDecisionEngine(w_proximity=1.0, w_busyness=0.0, w_familiarity=0.0)
         busy_eng = RuleBasedDecisionEngine(w_proximity=0.0, w_busyness=1.0, w_familiarity=0.0)
-        self.assertEqual(_decide(prox_eng, _ctx(opts, offered, ids)).payload["exit_id"], "near_busy")
-        self.assertEqual(_decide(busy_eng, _ctx(opts, offered, ids)).payload["exit_id"], "far_quiet")
+        self.assertEqual(
+            _decide(prox_eng, _ctx(opts, offered, ids)).payload["exit_id"], "near_busy"
+        )
+        self.assertEqual(
+            _decide(busy_eng, _ctx(opts, offered, ids)).payload["exit_id"], "far_quiet"
+        )
 
     def test_visible_exit_can_beat_hidden_exit(self):
         eng = RuleBasedDecisionEngine(
@@ -140,12 +151,20 @@ class RuleBasedEngineTests(unittest.TestCase):
         )
         opts = [
             ExitOption(
-                "grey", "Grey Street", route_distance_m=20.0,
-                crowd_count=0, familiar=True, visible=False,
+                "grey",
+                "Grey Street",
+                route_distance_m=20.0,
+                crowd_count=0,
+                familiar=True,
+                visible=False,
             ),
             ExitOption(
-                "blackett", "Blackett Street", route_distance_m=24.0,
-                crowd_count=0, familiar=True, visible=True,
+                "blackett",
+                "Blackett Street",
+                route_distance_m=24.0,
+                crowd_count=0,
+                familiar=True,
+                visible=True,
             ),
         ]
         ctx = _ctx(opts, ["evacuate", "wait"], ["grey", "blackett"])
@@ -197,7 +216,9 @@ class RuleBasedEngineTests(unittest.TestCase):
     def test_blocked_route_waits(self):
         eng = RuleBasedDecisionEngine()
         ctx = _ctx(
-            [], ["wait", "continue_activity"], [],
+            [],
+            ["wait", "continue_activity"],
+            [],
             route_blocked=True,
             offered_wait_reasons=("awaiting_information", "route_blocked"),
         )

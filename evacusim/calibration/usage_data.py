@@ -62,9 +62,7 @@ def _require_columns(header, required, path) -> None:
     have = set(header or [])
     missing = [c for c in required if c not in have]
     if missing:
-        raise CalibrationDataError(
-            f"{path}: missing required column(s): {', '.join(missing)}"
-        )
+        raise CalibrationDataError(f"{path}: missing required column(s): {', '.join(missing)}")
 
 
 def load_entrance_usage(path) -> list[UsageInterval]:

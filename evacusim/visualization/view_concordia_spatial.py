@@ -65,7 +65,7 @@ class SpatialConcordiaViewer:
         self._initial_agents: set[str] = set()
         self._last_known_level: dict[str, str] = {}
         self._boarded_agents: set[str] = set()
-        self._status_text = None       # single compact status badge on platform panel
+        self._status_text = None  # single compact status badge on platform panel
         self.active_train_exits: list[str] = []  # populated from sidecar
 
         # Load geometry for both levels
@@ -256,7 +256,7 @@ class SpatialConcordiaViewer:
         # solid green rectangles without a text label — the platform number is
         # instead shown on the much larger platform walkable area below.
         if "train_entrance_areas" in geometry:
-            for name, coords in geometry["train_entrance_areas"].items():
+            for coords in geometry["train_entrance_areas"].values():
                 if coords:
                     polygon = MPLPolygon(
                         coords,
@@ -290,9 +290,14 @@ class SpatialConcordiaViewer:
                 ys = [c[1] for c in coords]
                 cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
                 ax.text(
-                    cx, cy, f"P{platform_num}",
-                    ha="center", va="center",
-                    fontsize=11, color="#994400", fontweight="bold",
+                    cx,
+                    cy,
+                    f"P{platform_num}",
+                    ha="center",
+                    va="center",
+                    fontsize=11,
+                    color="#994400",
+                    fontweight="bold",
                     clip_on=True,
                     zorder=6,
                 )
@@ -336,9 +341,7 @@ class SpatialConcordiaViewer:
 
         try:
             # --- Lightweight sidecar: positions, time, levels, blocked exits ---
-            sidecar = self.output_file.with_name(
-                self.output_file.stem + "_positions.json"
-            )
+            sidecar = self.output_file.with_name(self.output_file.stem + "_positions.json")
             if sidecar.exists():
                 with open(sidecar) as f:
                     pos_data = json.load(f)
@@ -500,7 +503,9 @@ class SpatialConcordiaViewer:
                 is_director = bool(self.agent_roles.get(agent_id))
                 size = 10 if is_director else 8
                 dot = ax.plot(
-                    x, y, "o",
+                    x,
+                    y,
+                    "o",
                     color=face,
                     markeredgecolor=edge,
                     markeredgewidth=1.5,
@@ -521,8 +526,7 @@ class SpatialConcordiaViewer:
         boarded = len(self._boarded_agents)
         if self.active_train_exits:
             platforms = " ".join(
-                f"P{n.rsplit('_',1)[-1]}"
-                for n in sorted(self.active_train_exits)
+                f"P{n.rsplit('_', 1)[-1]}" for n in sorted(self.active_train_exits)
             )
             status_str = f"🚂 Boarding: {platforms}   Boarded: {boarded}"
             status_color = "#006600"
@@ -542,11 +546,14 @@ class SpatialConcordiaViewer:
             self._status_text.get_bbox_patch().set_facecolor(face_color)
         else:
             self._status_text = self.ax_level_m1.text(
-                0.02, 0.97,
+                0.02,
+                0.97,
                 status_str,
                 transform=self.ax_level_m1.transAxes,
-                ha="left", va="top",
-                fontsize=8, color=status_color,
+                ha="left",
+                va="top",
+                fontsize=8,
+                color=status_color,
                 bbox=dict(boxstyle="round,pad=0.25", facecolor=face_color, alpha=0.85),
                 zorder=5,
             )

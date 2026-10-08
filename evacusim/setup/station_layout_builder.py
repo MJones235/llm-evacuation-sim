@@ -11,8 +11,9 @@ This module is responsible for:
 from typing import Any
 
 from shapely.geometry import Point
-from evacusim.utils.logger import get_logger
+
 from evacusim.jps.simulation_interface import PedestrianSimulation
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -142,7 +143,9 @@ class StationLayoutBuilder:
                         # which would produce a confusingly nested display string.
                         plat_labels = sorted(
                             {
-                                zone_labels_cfg.get(p, p.replace("_", " ").title()).split("(")[0].strip()
+                                zone_labels_cfg.get(p, p.replace("_", " ").title())
+                                .split("(")[0]
+                                .strip()
                                 for p in platforms
                                 if _re.match(r"^platform_\d+$", p)
                             }

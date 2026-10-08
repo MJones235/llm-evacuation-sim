@@ -9,16 +9,15 @@ This module is responsible for:
 - Coordinating all agent-related operations
 """
 
+import math
 import random
 from typing import Any
 
-from evacusim.utils.logger import get_logger
-from evacusim.utils.walking_speed import sample_walking_speed
 from evacusim.jps.simulation_interface import PedestrianSimulation
 from evacusim.setup.agent_factory import AgentFactory
 from evacusim.setup.spawn_manager import SpawnManager
-
-import math
+from evacusim.utils.logger import get_logger
+from evacusim.utils.walking_speed import sample_walking_speed
 
 logger = get_logger(__name__)
 
@@ -66,11 +65,10 @@ class AgentManager:
         # ------------------------------------------------------------------
         if snapshot_load_path:
             from evacusim.setup.population_snapshot import load_snapshot
+
             agents_config = load_snapshot(snapshot_load_path)
             AgentManager._add_agents_to_jupedsim_from_snapshot(jps_sim, agents_config)
-            logger.info(
-                f"Agent population restored from snapshot: {len(agents_config)} agents"
-            )
+            logger.info(f"Agent population restored from snapshot: {len(agents_config)} agents")
             return agents_config
 
         # ------------------------------------------------------------------
@@ -92,7 +90,8 @@ class AgentManager:
             _MIN_SEP = 0.6  # slightly above JuPedSim's physical minimum (~0.24 m)
             before = len(spawn_positions)
             spawn_positions = [
-                pos for pos in spawn_positions
+                pos
+                for pos in spawn_positions
                 if all(
                     math.hypot(pos[0] - ex[0], pos[1] - ex[1]) >= _MIN_SEP
                     for ex in existing_positions
@@ -143,6 +142,7 @@ class AgentManager:
         # Optionally persist the generated population for future runs.
         if snapshot_save_path:
             from evacusim.setup.population_snapshot import save_snapshot
+
             save_snapshot(agents_config, snapshot_save_path)
 
         return agents_config
@@ -215,9 +215,7 @@ class AgentManager:
                 position=start_pos,
                 level_id=str(level_id),
                 preferred_zone_names={
-                    z
-                    for role_cfg in roles_config.values()
-                    for z in role_cfg.get("spawn_zones", [])
+                    z for role_cfg in roles_config.values() for z in role_cfg.get("spawn_zones", [])
                 },
             )
 
@@ -283,13 +281,18 @@ class AgentManager:
             if hasattr(jps_sim, "simulations"):
                 # Multi-level simulation
                 jps_sim.add_agent(
-                    agent_id, start_pos, walking_speed=walking_speed, level_id=level_id,
+                    agent_id,
+                    start_pos,
+                    walking_speed=walking_speed,
+                    level_id=level_id,
                     assign_default_destination=True,
                 )
             else:
                 # Single-level simulation
                 jps_sim.add_agent(
-                    agent_id, start_pos, walking_speed=walking_speed,
+                    agent_id,
+                    start_pos,
+                    walking_speed=walking_speed,
                     assign_default_destination=True,
                 )
 
@@ -319,14 +322,16 @@ class AgentManager:
 
             if hasattr(jps_sim, "simulations"):
                 jps_sim.add_agent(
-                    agent_id, start_pos,
+                    agent_id,
+                    start_pos,
                     walking_speed=walking_speed,
                     level_id=level_id,
                     assign_default_destination=True,
                 )
             else:
                 jps_sim.add_agent(
-                    agent_id, start_pos,
+                    agent_id,
+                    start_pos,
                     walking_speed=walking_speed,
                     assign_default_destination=True,
                 )

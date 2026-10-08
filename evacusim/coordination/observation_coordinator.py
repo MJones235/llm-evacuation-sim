@@ -121,8 +121,8 @@ class ObservationCoordinator:
         # This avoids the O(n²) cost of calling get_nearby_agents() per agent,
         # each of which was iterating the full JuPedSim agent list.
         observation_radius = 20.0
-        jps_sim_for_bulk = self.jps_sim if self.jps_sim else getattr(
-            self.state_queries, "jps_sim", None
+        jps_sim_for_bulk = (
+            self.jps_sim if self.jps_sim else getattr(self.state_queries, "jps_sim", None)
         )
         if jps_sim_for_bulk is not None and hasattr(jps_sim_for_bulk, "get_all_nearby_agents_bulk"):
             bulk_nearby = jps_sim_for_bulk.get_all_nearby_agents_bulk(observation_radius)
@@ -217,15 +217,15 @@ class ObservationCoordinator:
                 # Update persistent blocked-exit memory from the returned observation.
                 # Scan for lines like "The X appears blocked or obstructed".
                 import re as _re
-                newly_blocked = _re.findall(
-                    r"The (.+?) appears blocked or obstructed", obs
-                )
+
+                newly_blocked = _re.findall(r"The (.+?) appears blocked or obstructed", obs)
                 if newly_blocked:
                     agent_kb = self._agent_known_blocked.setdefault(agent_id, set())
                     # Resolve display names to canonical IDs via the exit registry.
                     registry = getattr(
                         getattr(self.observation_generator, "action_translator", None),
-                        "exit_registry", None,
+                        "exit_registry",
+                        None,
                     )
                     if registry is None:
                         registry = getattr(self.observation_generator, "exit_registry", None)

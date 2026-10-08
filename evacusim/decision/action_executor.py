@@ -11,8 +11,8 @@ import math
 import random
 from typing import Any
 
-from evacusim.utils.logger import get_logger
 from evacusim.decision.action_utils import extract_exit_name
+from evacusim.utils.logger import get_logger
 from evacusim.utils.speed_utils import convert_speed_to_ms
 
 logger = get_logger(__name__)
@@ -605,10 +605,7 @@ class ActionExecutor:
             preserve_boarding_route = (
                 train_oriented
                 and wait_reason != "route_blocked"
-                and (
-                    current_dest.startswith("train_platform_")
-                    or current_dest.endswith("_down")
-                )
+                and (current_dest.startswith("train_platform_") or current_dest.endswith("_down"))
             )
             if preserve_boarding_route:
                 self.agent_action[agent_id] = "moving"

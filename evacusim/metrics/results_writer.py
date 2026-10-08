@@ -10,10 +10,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from evacusim.utils.logger import get_logger
 from evacusim.metrics.analytics_generator import AnalyticsGenerator
 from evacusim.metrics.decision_telemetry import build_decision_telemetry
 from evacusim.metrics.llm_cost_reporter import FinancialReporter
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -179,8 +179,17 @@ class ResultsWriter:
     def _save_escalator_log(path: Path, ride_log: list[dict[str, Any]]) -> None:
         """Write escalator_log.csv: one row per completed ride."""
         fields = [
-            "agent_id", "escalator", "direction", "lane", "chose_s", "queue_join_s", "board_s",
-            "alight_s", "ride_s", "stall_wait_s", "discharge_attempts",
+            "agent_id",
+            "escalator",
+            "direction",
+            "lane",
+            "chose_s",
+            "queue_join_s",
+            "board_s",
+            "alight_s",
+            "ride_s",
+            "stall_wait_s",
+            "discharge_attempts",
         ]
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", newline="") as f:
@@ -296,9 +305,7 @@ class ResultsWriter:
         # Per-agent exit log, joined with spawn provenance so each row says
         # where the person came from as well as where they left.
         if exit_log is not None:
-            ResultsWriter._save_exit_log(
-                output_path.parent / "exit_log.csv", exit_log, spawn_log
-            )
+            ResultsWriter._save_exit_log(output_path.parent / "exit_log.csv", exit_log, spawn_log)
 
         # One row per completed escalator ride, plus static escalator
         # geometry so plots can draw the conveyors on their own axes.

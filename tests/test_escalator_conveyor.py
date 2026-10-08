@@ -1,6 +1,7 @@
 """Kinematics of the two-lane escalator conveyor (no JuPedSim)."""
 
 import random
+from itertools import pairwise
 
 import pytest
 
@@ -66,9 +67,9 @@ def test_walkers_keep_a_free_step_and_never_overtake():
         # A rider parked at the far comb is stepped off (or the belt paused)
         # that same step, so spacing applies to riders still on the incline.
         on_incline = [r for r in walkers if r.s < conv.params.length_m]
-        for ahead, behind in zip(on_incline, on_incline[1:]):
+        for ahead, behind in pairwise(on_incline):
             assert ahead.s - behind.s >= 2 * conv.params.step_depth - 1e-6
-        assert [r.agent_id for r in walkers] == order[len(order) - len(walkers):]
+        assert [r.agent_id for r in walkers] == order[len(order) - len(walkers) :]
         for rider in conv.arrived():
             conv.remove(rider.agent_id)
         t += DT

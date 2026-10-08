@@ -10,8 +10,6 @@ from typing import Any
 
 import jupedsim as jps
 
-from evacusim.utils.logger import get_logger
-from evacusim.jps.geometry_processor import GeometryProcessor
 from evacusim.escalators.spec_loader import load_combs
 from evacusim.jps.geometry_loader import (
     load_entrance_areas,
@@ -22,6 +20,8 @@ from evacusim.jps.geometry_loader import (
     load_train_entrance_areas,
     load_walkable_areas,
 )
+from evacusim.jps.geometry_processor import GeometryProcessor
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -37,8 +37,13 @@ class GeometryManager:
     - Providing access to geometry data for visualization
     """
 
-    def __init__(self, network_path: Path, dt: float = 0.05, level_id: int | str = 0,
-                 initially_blocked_exits: set[str] | None = None):
+    def __init__(
+        self,
+        network_path: Path,
+        dt: float = 0.05,
+        level_id: int | str = 0,
+        initially_blocked_exits: set[str] | None = None,
+    ):
         """
         Initialize geometry manager and load station geometry.
 
@@ -123,9 +128,7 @@ class GeometryManager:
             logger.info(f"Loading geometry from legacy file: {walking_areas_file.name}")
         else:
             raise FileNotFoundError(
-                f"Geometry file not found. Looked for:\n"
-                f"  - {level_file}\n"
-                f"  - {walking_areas_file}"
+                f"Geometry file not found. Looked for:\n  - {level_file}\n  - {walking_areas_file}"
             )
 
         walkable_areas = load_walkable_areas(str(geom_file))
@@ -137,9 +140,13 @@ class GeometryManager:
         exit_thresholds = load_exit_thresholds(str(geom_file))
         train_entrance_areas = load_train_entrance_areas(str(geom_file))
         if exit_thresholds:
-            logger.info(f"  Loaded {len(exit_thresholds)} exit thresholds: {list(exit_thresholds.keys())}")
+            logger.info(
+                f"  Loaded {len(exit_thresholds)} exit thresholds: {list(exit_thresholds.keys())}"
+            )
         if train_entrance_areas:
-            logger.info(f"  Loaded {len(train_entrance_areas)} train entrance areas: {list(train_entrance_areas.keys())}")
+            logger.info(
+                f"  Loaded {len(train_entrance_areas)} train entrance areas: {list(train_entrance_areas.keys())}"
+            )
 
         # Integrate obstacles into walkable areas as polygon holes
         walkable_areas_with_obstacles, fixed_obstacles = GeometryProcessor.integrate_obstacles(
@@ -231,7 +238,9 @@ class GeometryManager:
                 (ax, ay), (bx, by) = comb["a"], comb["b"]
                 nx, ny = comb["floor_normal"]
                 self.blocked_exit_positions[comb["exit_name"]] = (
-                    (ax + bx) / 2 + nx * 1.5, (ay + by) / 2 + ny * 1.5)
+                    (ax + bx) / 2 + nx * 1.5,
+                    (ay + by) / 2 + ny * 1.5,
+                )
                 logger.info(f"🚧 Pre-blocked '{comb['exit_name']}' on level {self.level_id}")
 
     def add_obstacle_polygon(self, obstacle_poly) -> None:

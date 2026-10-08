@@ -2,7 +2,7 @@
 
 import unittest
 
-from evacusim.calibration.poisson_scheduler import SpawnEvent, build_arrival_schedule
+from evacusim.calibration.poisson_scheduler import build_arrival_schedule
 from evacusim.calibration.usage_data import TrainArrival, UsageInterval
 
 _SPAWN_CFG = {
@@ -94,13 +94,11 @@ class PoissonSchedulerTests(unittest.TestCase):
         ]
 
         self.assertTrue(
-            all(
-                event.dest_exit == "train_platform_1"
-                for event in entrance
-                if event.time_s < 200
-            )
+            all(event.dest_exit == "train_platform_1" for event in entrance if event.time_s < 200)
         )
-        self.assertIn("train_platform_4", {event.dest_exit for event in entrance if event.time_s >= 200})
+        self.assertIn(
+            "train_platform_4", {event.dest_exit for event in entrance if event.time_s >= 200}
+        )
 
 
 if __name__ == "__main__":
