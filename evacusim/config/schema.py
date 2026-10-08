@@ -540,8 +540,6 @@ class PerformanceConfig(Section):
         3, ge=1, description="Agents decide in this many staggered groups."
     )
     bootstrap_initial_decisions: bool = True
-    enable_group_decisions: bool = False
-    group_decision_min_size: int = Field(3, ge=2)
     file_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
 

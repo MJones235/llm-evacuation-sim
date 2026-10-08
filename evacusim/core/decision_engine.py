@@ -1,33 +1,25 @@
-"""Engine-neutral decision interface.
+"""The decision engine interface: the seam between simulation and cognition.
 
-This module defines the seam between the simulation's *situation assembly* /
-*action execution* pipeline (owned by
-:class:`evacusim.decision.decision_processor.DecisionProcessor`) and the
-pluggable *cognition* that chooses an action for an agent.
+Each decision cycle, for every deciding agent::
 
-Two implementations are provided:
+    SituationAssembler ──DecisionContext──▶ DecisionEngine ──DecisionResult──▶ execution
+    (evacusim.decision.situation)            (pluggable)        (payload)       (translator,
+                                                                                 executor)
 
-- :class:`evacusim.decision.llm_decision_engine.LLMDecisionEngine` — the default
-  Concordia/LLM-backed engine (prompt rendering, prompt cache, ``agent.act``
-  retry/repair/fallback).
-- :class:`evacusim.decision.rule_based_decision_engine.RuleBasedDecisionEngine`
-  — a deterministic, LLM-free engine that routes by weighting proximity,
-  busyness, and familiarity and handles blocked exits.
+Both engines see the same :class:`DecisionContext` and return the same kind of
+:class:`DecisionResult`, whose ``payload`` follows
+:mod:`evacusim.decision.payload`. Two engines are provided:
 
-The contract between an engine and the rest of the pipeline is the
-``decision_payload`` dict validated by
-``DecisionProcessor._validate_decision_payload``::
-
-    {action, wait_reason, exit_id, pace, reassess_when, assessment}
-
-Everything downstream of the engine (action translation, JuPedSim execution,
-telemetry) is engine-agnostic and consumes only that payload.
+- :class:`~evacusim.decision.llm_decision_engine.LLMDecisionEngine` renders the
+  context into a prompt and asks a language model (via Concordia agents).
+- :class:`~evacusim.decision.rule_based_decision_engine.RuleBasedDecisionEngine`
+  applies deterministic rules; no language model is used.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 
 @dataclass
@@ -53,10 +45,9 @@ class ExitOption:
 class DecisionContext:
     """Engine-neutral snapshot of one agent's decision situation.
 
-    Built by the assembly phase of ``DecisionProcessor._process_single_agent``
-    and handed to :meth:`DecisionEngine.decide`.  Structured fields drive the
-    rule-based engine; the ``prompt_text`` / ``received_messages`` fields are
-    LLM-only extras that the rule-based engine ignores.
+    Built by :class:`~evacusim.decision.situation.SituationAssembler` and
+    handed to :meth:`DecisionEngine.decide`. Engines must choose from the
+    ``offered_*`` lists.
     """
 
     agent_id: str
@@ -75,8 +66,7 @@ class DecisionContext:
     cues: list[str]
     current_sim_time: float
 
-    # Validation sets (mirror the offered_* lists; precomputed for the engine
-    # and for _validate_decision_payload).
+    # The offered_* lists as sets, for fast membership tests.
     offered_actions_set: set[str] = field(default_factory=set)
     offered_wait_reasons_set: set[str] = field(default_factory=set)
     offered_exit_ids_set: set[str] = field(default_factory=set)
@@ -108,9 +98,13 @@ class DecisionContext:
     # therefore cannot be retained.
     committed_exit_id: str | None = None
 
-    # LLM-only extras (ignored by non-LLM engines).
-    prompt_text: str | None = None
-    received_messages: list[str] | None = None
+    # True while the agent is walking to ``committed_exit_id``.
+    is_moving: bool = False
+
+    # The ``station.goal_semantic_policies`` entry matching this goal and zone
+    # (its tags are also in prefer/avoid_exit_tags); the LLM prompt quotes its
+    # instruction.
+    goal_policy: dict[str, Any] | None = None
 
 
 @dataclass
@@ -118,12 +112,13 @@ class DecisionResult:
     """What an engine returns for one agent.
 
     Attributes:
-        payload: The validated ``decision_payload`` dict, or ``None`` if the
-            engine produced nothing usable (the orchestrator then skips the
-            agent, keeping their current waypoint).
-        action_json: Canonical JSON string form of ``payload`` (the LLM engine
-            already has this; other engines may leave it ``None`` and let the
-            orchestrator serialize).
+        payload: The validated decision payload (see
+            :mod:`evacusim.decision.payload`), or ``None`` if the engine
+            produced nothing usable (the agent keeps its current waypoint).
+        action_json: The payload as the JSON text the engine produced, if any
+            (the LLM's own response, possibly with surrounding text); ``None``
+            means "serialize ``payload``".
+        prompt: The prompt the engine sent or would have sent (LLM engine only).
         llm_was_called: True if a real LLM request was issued (telemetry).
         repair_status: One of ``ok`` / ``repair_1`` / ``repair_2`` /
             ``fallback`` / ``cached`` — mirrors existing decision telemetry.
@@ -134,18 +129,33 @@ class DecisionResult:
 
     payload: dict[str, Any] | None
     action_json: str | None = None
+    prompt: str | None = None
     llm_was_called: bool = False
     repair_status: str = "ok"
     skip_downstream: bool = False
 
 
-@runtime_checkable
-class DecisionEngine(Protocol):
-    """Pluggable cognition that turns a :class:`DecisionContext` into a decision.
+class DecisionEngine:
+    """Pluggable cognition: turns a :class:`DecisionContext` into a decision.
 
-    Implementations must return a :class:`DecisionResult` whose ``payload``, when
-    not ``None``, satisfies ``DecisionProcessor._validate_decision_payload``
-    against the context's offered sets.
+    Subclasses implement :meth:`decide`. The other methods are optional hooks
+    with no-op defaults.
     """
 
-    async def decide(self, ctx: DecisionContext) -> DecisionResult: ...
+    async def decide(self, ctx: DecisionContext) -> DecisionResult:
+        """Choose an action for one agent from the context's offered set."""
+        raise NotImplementedError
+
+    def reset_agent(self, agent_id: str) -> None:
+        """Forget anything that would make the agent's next decision a repeat.
+
+        Called when an agent's situation changes discontinuously (it changed
+        level, or its route must be re-planned).
+        """
+
+    def on_agent_exit(self, agent_id: str) -> None:
+        """Release per-agent state when an agent leaves the simulation."""
+
+    def statistics(self) -> dict[str, Any]:
+        """Engine-specific counters for the end-of-run report."""
+        return {}

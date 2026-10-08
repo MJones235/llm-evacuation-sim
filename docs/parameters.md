@@ -392,8 +392,6 @@ Normal operations: passengers arrive over time from observed usage data.
 | `immediate_redecision_on_transfer` | bool | `false` |  |
 | `decision_groups` | int | `3` | Agents decide in this many staggered groups. (≥ 1) |
 | `bootstrap_initial_decisions` | bool | `true` |  |
-| `enable_group_decisions` | bool | `false` |  |
-| `group_decision_min_size` | int | `3` | (≥ 2) |
 | `file_log_level` | `"DEBUG"` \| `"INFO"` \| `"WARNING"` \| `"ERROR"` | `"INFO"` |  |
 
 ## `output` — OutputConfig

@@ -1,47 +1,17 @@
 """Unit tests for the LLM-free RuleBasedDecisionEngine (Feature B, B4/B6).
 
 Each route-distance/visibility/busyness/familiarity signal is isolated via the weights, and
-every produced payload is checked against the *real* decision schema validator
-(DecisionProcessor._validate_decision_payload) so the rule engine's output is
-guaranteed interchangeable with the LLM engine's downstream.
+every produced payload is checked against the decision payload validator
+(evacusim.decision.payload.validate), the same contract the LLM engine's
+output must meet.
 """
 
 import asyncio
-import contextlib
 import unittest
 
 from evacusim.core.decision_engine import DecisionContext, ExitOption
-from evacusim.decision.decision_processor import DecisionProcessor
+from evacusim.decision import payload
 from evacusim.decision.rule_based_decision_engine import RuleBasedDecisionEngine
-
-
-# --- minimal processor purely to reuse the schema validator -----------------
-class _PerfTimer:
-    @contextlib.contextmanager
-    def measure(self, *a, **k):
-        yield
-
-
-class _MsgSys:
-    def get_received_messages(self, agent_id):
-        return []
-
-
-def _validator():
-    return DecisionProcessor(
-        concordia_agents={},
-        exited_agents=set(),
-        action_translator=object(),
-        action_executor=object(),
-        message_system=_MsgSys(),
-        state_queries=object(),
-        station_layout={},
-        agent_decisions={},
-        agent_destinations={},
-        last_observations={},
-        last_actions={},
-        perf_timer=_PerfTimer(),
-    )
 
 
 def _ctx(
@@ -78,17 +48,12 @@ def _decide(engine, ctx):
 
 
 class RuleBasedEngineTests(unittest.TestCase):
-    def setUp(self):
-        self.dp = _validator()
-
-    def _assert_valid(self, payload, ctx):
-        errors = self.dp._validate_decision_payload(
-            payload,
-            ctx.offered_actions_set,
-            ctx.offered_wait_reasons_set,
-            ctx.offered_exit_ids_set,
+    def _assert_valid(self, decision, ctx):
+        offered = payload.OfferedSet(
+            tuple(ctx.offered_actions), tuple(ctx.offered_wait_reasons), tuple(ctx.offered_exit_ids)
         )
-        self.assertEqual(errors, [], f"payload failed schema: {errors}\n{payload}")
+        errors = payload.validate(decision, offered)
+        self.assertEqual(errors, [], f"payload failed schema: {errors}\n{decision}")
 
     def test_proximity_dominates(self):
         eng = RuleBasedDecisionEngine(w_proximity=1.0, w_busyness=0.0, w_familiarity=0.0)

@@ -22,6 +22,7 @@ import unittest
 from shapely.geometry import box
 
 from evacusim.coordination.noop_agent import NoOpAgent
+from evacusim.decision import payload as payload_lib
 from evacusim.decision.decision_processor import DecisionProcessor
 from evacusim.decision.rule_based_decision_engine import RuleBasedDecisionEngine
 from evacusim.metrics.llm_cost_reporter import FinancialReporter
@@ -104,8 +105,6 @@ def _make_processor(agents_config, positions):
         station_layout=layout,
         agent_decisions={},
         agent_destinations={},
-        last_observations={},
-        last_actions={},
         perf_timer=_PerfTimer(),
         jps_sim=jps,
         agent_configs=agents_config,
@@ -147,12 +146,12 @@ class ZeroLLMFullCycleTests(unittest.TestCase):
             payload = last["decision_payload"]
 
             # (2) Payload is schema-valid against the offered sets.
-            errors = dp._validate_decision_payload(
-                payload,
-                set(last["offered_set"]),
-                {"awaiting_information", "awaiting_instruction", "route_blocked"},
-                {"main_exit"},
+            offered = payload_lib.OfferedSet(
+                tuple(last["offered_set"]),
+                ("awaiting_information", "awaiting_instruction", "route_blocked"),
+                ("main_exit",),
             )
+            errors = payload_lib.validate(payload, offered)
             self.assertEqual(errors, [], f"{agent_id} payload invalid: {errors}")
 
             # (3) The rule engine produced it — not the LLM.
@@ -160,8 +159,8 @@ class ZeroLLMFullCycleTests(unittest.TestCase):
             # (4) No LLM prompt was issued for this decision.
             self.assertEqual(last["prompt"], "cached")
 
-        # (5) The processor recorded zero LLM calls for the whole cycle.
-        self.assertEqual(dp.llm_calls_made, 0)
+        # (5) The rule engine reports no LLM statistics at all.
+        self.assertEqual(dp.get_cache_statistics(), {})
 
         # (6) With a leave-the-station goal and a known exit, the rule engine
         # routes to evacuate — proving the translate/execute path ran LLM-free.
