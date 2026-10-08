@@ -102,6 +102,7 @@ class AgentFactory:
 
         age = random.randint(agents.age.min, agents.age.max)
         gender = random.choice(["man", "woman"])
+        # Recorded on the agent but not yet used by either decision engine.
         risk_tolerance = random.choice(["low", "moderate", "high"])
 
         # Sample purpose from config. Target is assigned later by AgentManager

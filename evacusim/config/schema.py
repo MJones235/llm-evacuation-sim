@@ -204,9 +204,6 @@ class AgentsConfig(Section):
         description="OCEAN level weights per dimension (Neuroticism, Openness, "
         "Conscientiousness); a missing dimension is sampled uniformly.",
     )
-    risk_tolerance: dict[Literal["low", "moderate", "high"], float] = Field(
-        default_factory=dict, description="Relative weights of risk-tolerance levels."
-    )
     age: AgeRange = Field(default_factory=AgeRange, description="Uniform age range (years).")
     purposes: list[str] = Field(
         ["their destination"], description="Values sampled for the ``{purpose}`` placeholder."
