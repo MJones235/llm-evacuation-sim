@@ -1,7 +1,7 @@
 """
 Agent demographics utilities.
 
-Provides OCEAN_ANCHORS dict and build_personality_anchor() / generate_random_demographics()
+Provides OCEAN_ANCHORS dict and build_personality_anchor()
 helpers used by AgentFactory when building Concordia agents.
 
 Anchor sentences are grounded in Costa and McCrae (1992) NEO-PI-R facet definitions.
@@ -13,8 +13,6 @@ Note: The StationAgent class from the original NewcastleSim has been intentional
 omitted — it depended on the old scenarios.base framework which is not part of
 evacusim.  Concordia-based agents are constructed via evacusim.concordia.agent_builder.
 """
-
-import random
 
 from evacusim.utils.logger import get_logger
 
@@ -61,22 +59,3 @@ def build_personality_anchor(n_level: str, o_level: str, c_level: str) -> str:
     o = OCEAN_ANCHORS["O"].get(o_level, OCEAN_ANCHORS["O"]["medium"])
     c = OCEAN_ANCHORS["C"].get(c_level, OCEAN_ANCHORS["C"]["medium"])
     return f"{n} {o} {c}"
-
-
-def generate_random_demographics() -> dict:
-    """Generate random age, gender, and OCEAN personality levels for an agent."""
-    age = random.randint(18, 75)
-    gender = random.choice(["man", "woman"])
-    n_level = random.choice(_OCEAN_LEVELS)
-    o_level = random.choice(_OCEAN_LEVELS)
-    c_level = random.choice(_OCEAN_LEVELS)
-    anchor = build_personality_anchor(n_level, o_level, c_level)
-    return {
-        "age": age,
-        "gender": gender,
-        "ocean_n": n_level,
-        "ocean_o": o_level,
-        "ocean_c": c_level,
-        "personality_anchor": anchor,
-        "personality_type": f"N:{n_level}/O:{o_level}/C:{c_level}",
-    }

@@ -1,12 +1,10 @@
-"""Characterization tests for the pluggable decision-engine seam (Feature B, B1-B3).
+"""The decision-engine seam: the LLM engine's contract, and engine injection.
 
-These lock two things after the DecisionProcessor refactor:
-  1. The extracted LLM production path (``_llm_produce_decision``) still turns a
-     valid model response into a validated decision_payload with the expected
-     telemetry (llm_was_called / repair_status), i.e. behaviour is unchanged.
-  2. A custom engine can be injected and is what the processor delegates to,
-     and the default engine is the LLM engine — so a run can be made LLM-free
-     purely by injecting a different engine.
+1. The LLM engine turns a model response into a validated payload, repairs an
+   invalid one, falls back when every attempt fails, and reuses a decision
+   when the prompt is unchanged.
+2. The processor uses the LLM engine by default and an injected engine when
+   given one, so a run is made LLM-free by injecting a different engine.
 """
 
 import asyncio
@@ -14,14 +12,14 @@ import contextlib
 import json
 import unittest
 
-from evacusim.core.decision_engine import (
-    DecisionContext,
-    DecisionEngine,
-    DecisionResult,
-    ExitOption,
-)
+from evacusim.core.decision_engine import DecisionContext, DecisionEngine, DecisionResult
+from evacusim.decision import payload
 from evacusim.decision.decision_processor import DecisionProcessor
 from evacusim.decision.llm_decision_engine import LLMDecisionEngine
+from evacusim.decision.llm_prompt import DecisionPromptBuilder
+
+OFFERED = payload.OfferedSet(("continue_activity", "wait"), ("awaiting_information",), ())
+VALID = payload.fallback(None, OFFERED)
 
 
 class _PerfTimer:
@@ -35,135 +33,136 @@ class _MessageSystem:
         return []
 
 
-class _ActionExecutor:
-    def __init__(self):
-        self.agent_action = {}
+class _Registry:
+    def get_display_name(self, exit_id):
+        return exit_id
+
+    def get_all_ids(self):
+        return []
+
+
+class _Translator:
+    exit_registry = _Registry()
+    zones_polygons = {}
 
 
 class _FakeAgent:
-    """Concordia-entity stand-in: observe() is a no-op, act() returns canned JSON."""
+    """Concordia-entity stand-in: act() returns the queued responses in turn."""
 
-    def __init__(self, response):
-        self._response = response
-        self.observed = []
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.prompts = []
 
-    def observe(self, obs):
-        self.observed.append(obs)
+    def observe(self, observation):
+        pass
 
-    def act(self, action_spec):
-        return self._response
+    def act(self, spec):
+        self.prompts.append(spec.call_to_action)
+        return self._responses.pop(0) if len(self._responses) > 1 else self._responses[0]
 
 
-def _make_processor(concordia_agents, decision_engine=None):
-    return DecisionProcessor(
-        concordia_agents=concordia_agents,
-        exited_agents=set(),
-        action_translator=object(),
-        action_executor=_ActionExecutor(),
+def _engine(agent):
+    history = {}
+    return LLMDecisionEngine(
+        agents={"agent_0": agent},
+        prompt_builder=DecisionPromptBuilder(_Registry(), {}, history),
         message_system=_MessageSystem(),
-        state_queries=object(),
-        station_layout={},
-        agent_decisions={},
-        agent_destinations={},
-        last_observations={},
-        last_actions={},
+        agent_decisions=history,
         perf_timer=_PerfTimer(),
-        decision_engine=decision_engine,
+        max_parallel=1,
     )
 
 
-def _make_ctx(dp, agent_id, offered_actions, offered_exit_ids, prompt_text="PROMPT"):
-    oa = set(offered_actions)
-    oe = set(offered_exit_ids)
-    ow = set()
+def _ctx(observation="No significant new information."):
     return DecisionContext(
-        agent_id=agent_id,
+        agent_id="agent_0",
         position=(0.0, 0.0),
         zone_id="concourse",
         goal="Leave the station.",
-        observation="No significant new information.",
+        observation=observation,
         agent_cfg={},
-        offered_actions=list(offered_actions),
-        offered_wait_reasons=[],
-        offered_exit_ids=list(offered_exit_ids),
-        exit_options={e: ExitOption(exit_id=e, display_name=e) for e in offered_exit_ids},
+        offered_actions=list(OFFERED.actions),
+        offered_wait_reasons=list(OFFERED.wait_reasons),
+        offered_exit_ids=[],
+        exit_options={},
         route_blocked=False,
         cues=[],
         current_sim_time=0.0,
-        offered_actions_set=oa,
-        offered_wait_reasons_set=ow,
-        offered_exit_ids_set=oe,
-        prompt_text=prompt_text,
+        offered_actions_set=set(OFFERED.actions),
+        offered_wait_reasons_set=set(OFFERED.wait_reasons),
+        offered_exit_ids_set=set(),
     )
 
 
-class DecisionEngineSeamTests(unittest.TestCase):
-    def test_default_engine_is_llm_engine(self):
-        dp = _make_processor({})
-        self.assertIsInstance(dp._engine, LLMDecisionEngine)
-        self.assertIsInstance(dp._engine, DecisionEngine)
+def _decide(engine, ctx):
+    return asyncio.run(engine.decide(ctx))
 
-    def test_llm_path_produces_validated_payload(self):
-        offered_actions = ["continue_activity", "wait"]
-        offered_exit_ids = []
-        # Build the processor first so we can ask it for a guaranteed-valid
-        # payload (avoids hardcoding the decision schema in the test).
-        dp = _make_processor({})
-        fallback = dp._build_fallback_decision(
-            "agent_0", set(offered_actions), set(), set(offered_exit_ids)
-        )
-        valid_json = dp._decision_payload_to_json(fallback)
 
-        dp = _make_processor({"agent_0": _FakeAgent(valid_json)})
-        ctx = _make_ctx(dp, "agent_0", offered_actions, offered_exit_ids)
-
-        async def run():
-            dp._state_lock = asyncio.Lock()
-            dp._llm_semaphore = asyncio.Semaphore(1)
-            return await dp._llm_produce_decision(ctx)
-
-        result = asyncio.run(run())
-        self.assertIsInstance(result, DecisionResult)
-        self.assertIsNotNone(result.payload)
+class LLMEngineTests(unittest.TestCase):
+    def test_valid_response_is_returned(self):
+        result = _decide(_engine(_FakeAgent(json.dumps(VALID))), _ctx())
+        self.assertEqual(result.payload, VALID)
         self.assertTrue(result.llm_was_called)
         self.assertEqual(result.repair_status, "ok")
-        self.assertFalse(result.skip_downstream)
-        # action_json round-trips to the same validated payload.
         self.assertEqual(json.loads(result.action_json), result.payload)
-        errors = dp._validate_decision_payload(
-            result.payload, set(offered_actions), set(), set(offered_exit_ids)
-        )
-        self.assertEqual(errors, [])
+        self.assertIn("Choose exactly one action from this offered set:", result.prompt)
 
-    def test_llm_path_falls_back_on_garbage_response(self):
-        offered_actions = ["continue_activity", "wait"]
-        dp = _make_processor({"agent_0": _FakeAgent("not json at all")})
-        ctx = _make_ctx(dp, "agent_0", offered_actions, [])
+    def test_invalid_response_is_repaired(self):
+        agent = _FakeAgent("not json", json.dumps(VALID))
+        result = _decide(_engine(agent), _ctx())
+        self.assertEqual(result.repair_status, "repair_1")
+        self.assertIn("SYSTEM NOTE", agent.prompts[1])
 
-        async def run():
-            dp._state_lock = asyncio.Lock()
-            dp._llm_semaphore = asyncio.Semaphore(1)
-            return await dp._llm_produce_decision(ctx)
-
-        result = asyncio.run(run())
-        self.assertIsNotNone(result.payload)
+    def test_falls_back_when_every_attempt_fails(self):
+        result = _decide(_engine(_FakeAgent("not json at all")), _ctx())
         self.assertEqual(result.repair_status, "fallback")
-        self.assertTrue(result.llm_was_called)
+        self.assertEqual(payload.validate(result.payload, OFFERED), [])
+
+    def test_unchanged_prompt_reuses_the_decision(self):
+        agent = _FakeAgent(json.dumps(VALID))
+        engine = _engine(agent)
+        _decide(engine, _ctx())
+        second = _decide(engine, _ctx())
+        self.assertEqual(second.repair_status, "cached")
+        self.assertFalse(second.llm_was_called)
+        self.assertEqual(len(agent.prompts), 1)
+
+    def test_reset_agent_forces_a_fresh_decision(self):
+        agent = _FakeAgent(json.dumps(VALID))
+        engine = _engine(agent)
+        _decide(engine, _ctx())
+        engine.reset_agent("agent_0")
+        self.assertTrue(_decide(engine, _ctx()).llm_was_called)
+
+
+class EngineInjectionTests(unittest.TestCase):
+    def _processor(self, engine=None):
+        return DecisionProcessor(
+            concordia_agents={},
+            exited_agents=set(),
+            action_translator=_Translator(),
+            action_executor=object(),
+            message_system=_MessageSystem(),
+            state_queries=object(),
+            station_layout={},
+            agent_decisions={},
+            agent_destinations={},
+            perf_timer=_PerfTimer(),
+            decision_engine=engine,
+        )
+
+    def test_default_engine_is_llm_engine(self):
+        engine = self._processor().engine
+        self.assertIsInstance(engine, LLMDecisionEngine)
+        self.assertIsInstance(engine, DecisionEngine)
 
     def test_injected_engine_is_used(self):
-        calls = []
-
-        class StubEngine:
+        class StubEngine(DecisionEngine):
             async def decide(self, ctx):
-                calls.append(ctx.agent_id)
-                return DecisionResult(payload={"action": "wait"}, action_json='{"action": "wait"}')
+                return DecisionResult(payload={"action": "wait"})
 
-        dp = _make_processor({}, decision_engine=StubEngine())
-        self.assertIsInstance(dp._engine, DecisionEngine)
-        ctx = _make_ctx(dp, "agent_9", ["wait"], [])
-        result = asyncio.run(dp._engine.decide(ctx))
-        self.assertEqual(calls, ["agent_9"])
-        self.assertEqual(result.payload, {"action": "wait"})
+        stub = StubEngine()
+        self.assertIs(self._processor(stub).engine, stub)
 
 
 if __name__ == "__main__":

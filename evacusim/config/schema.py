@@ -397,6 +397,8 @@ class StationConfig(Section):
     """What agents know about the station, and how zones and exits are named."""
 
     knowledge: StationKnowledge
+    street_level: LevelId = Field("0", description="Level id of the street exits (concourse).")
+    platform_level: LevelId = Field("-1", description="Level id of the train platforms.")
     zone_labels: dict[str, str] = Field(
         default_factory=dict, description="Human-readable names of zones and levels."
     )
@@ -540,8 +542,6 @@ class PerformanceConfig(Section):
         3, ge=1, description="Agents decide in this many staggered groups."
     )
     bootstrap_initial_decisions: bool = True
-    enable_group_decisions: bool = False
-    group_decision_min_size: int = Field(3, ge=2)
     file_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
 

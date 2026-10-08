@@ -130,25 +130,6 @@ class CrowdAnalyzer:
 
         return " ".join(parts)
 
-    def count_agents_per_exit(self, nearby_agents: list[dict[str, Any]]) -> dict[str, int]:
-        """
-        Count how many nearby agents appear to be heading toward each exit.
-
-        Args:
-            nearby_agents: List of nearby agent info dictionaries
-
-        Returns:
-            Dict mapping exit name to approximate agent count
-        """
-        exit_counts: dict[str, int] = {}
-
-        for agent in nearby_agents:
-            target_exit = agent.get("target_exit")
-            if target_exit and target_exit in self.exits:
-                exit_counts[target_exit] = exit_counts.get(target_exit, 0) + 1
-
-        return exit_counts
-
     @staticmethod
     def categorize_density(num_nearby: int) -> str:
         """
@@ -168,65 +149,3 @@ class CrowdAnalyzer:
             return "moderate crowd nearby"
         else:
             return "crowded (many people nearby)"
-
-    @staticmethod
-    def categorize_count(count: int) -> str:
-        """
-        Categorize people count to prevent minor changes from triggering LLM.
-
-        Args:
-            count: Number of people
-
-        Returns:
-            Count category string
-        """
-        if count == 0:
-            return "empty"
-        elif count <= 3:
-            return "sparse (few people)"
-        elif count <= 10:
-            return "moderate crowd"
-        else:
-            return "crowded (many people)"
-
-    @staticmethod
-    def analyze_movement_pattern(nearby_agents: list[dict[str, Any]]) -> str:
-        """
-        Analyze overall movement pattern of nearby agents.
-
-        Args:
-            nearby_agents: List of nearby agent info dictionaries
-
-        Returns:
-            Movement pattern description
-        """
-        if not nearby_agents:
-            return ""
-
-        moving_count = sum(1 for a in nearby_agents if a.get("is_moving", True))
-        moving_pct = (moving_count / len(nearby_agents)) * 100
-        majority_moving = moving_pct > 70 and moving_count >= CrowdAnalyzer.MIN_MAJORITY_MOVERS
-
-        dest_counts: dict[str, int] = {}
-        for agent in nearby_agents:
-            if agent.get("is_moving", True):
-                dest = CrowdAnalyzer._classify_destination(agent.get("target_exit"))
-                if dest:
-                    dest_counts[dest] = dest_counts.get(dest, 0) + 1
-
-        if majority_moving:
-            if dest_counts:
-                top_dest = max(dest_counts, key=dest_counts.__getitem__)
-                if len(dest_counts) == 1:
-                    return f"Most people around you are heading toward {top_dest}."
-                dest_list = sorted(dest_counts, key=dest_counts.__getitem__, reverse=True)
-                return f"Most people around you are heading toward {' and '.join(dest_list[:2])}."
-            return "Most people around you are on the move."
-        elif moving_pct > 40:
-            if dest_counts:
-                dest_list = sorted(dest_counts, key=dest_counts.__getitem__, reverse=True)
-                top_two = " and ".join(dest_list[:2])
-                return f"The crowd is mixed — some heading toward {top_two}, others waiting."
-            return "The crowd is mixed — some moving, others waiting."
-        else:
-            return "Many people around you are waiting or stationary."

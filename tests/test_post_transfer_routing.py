@@ -2,20 +2,15 @@ from types import SimpleNamespace
 
 from shapely.geometry import Point
 
-from evacusim.decision.decision_processor import DecisionProcessor
+from evacusim.decision.situation import GoalTracker
+from evacusim.decision.transfer_routing import PostTransferRouting
 from evacusim.jps.jupedsim_integration import ConcordiaJuPedSimulation
 
 
-def _processor(simulation, agent_configs, zones=None):
-    processor = DecisionProcessor.__new__(DecisionProcessor)
-    processor.jps_sim = simulation
-    processor._agent_cfg = agent_configs
-    processor.action_translator = SimpleNamespace(zones_polygons=zones or {})
-    processor.station_layout = {"street_exits": ["grey_street", "blackett_street"]}
-    processor.agent_destinations = {}
-    processor._deferred_escalator_agents = set()
-    processor._post_transfer_exit_choice_agents = set()
-    return processor
+def _routing(simulation, agent_configs, zones=None, goals=None):
+    tracker = GoalTracker(agent_configs)
+    tracker.goals.update(goals or {})
+    return PostTransferRouting(simulation, zones or {}, agent_configs, tracker)
 
 
 def test_reaching_egress_distributes_agents_across_assigned_platform():
@@ -31,7 +26,7 @@ def test_reaching_egress_distributes_agents_across_assigned_platform():
     )
     simulation.set_agent_target = lambda agent_id, target: setattr(simulation, "target", target)
     simulation.get_agent_level = lambda agent_id: "-1"
-    processor = _processor(
+    routing = _routing(
         simulation,
         {
             "passenger_1": {"target": "train_platform_4"},
@@ -41,7 +36,7 @@ def test_reaching_egress_distributes_agents_across_assigned_platform():
     )
 
     for agent_id in ("passenger_1", "passenger_2"):
-        assert processor._defer_for_post_transfer_route(agent_id, (-24.87, 40.56))
+        assert routing.should_defer(agent_id, (-24.87, 40.56))
 
     waypoints = simulation.transfer_platform_waypoints
     assert waypoints["passenger_1"] != waypoints["passenger_2"]
@@ -61,14 +56,15 @@ def test_concourse_transfer_requests_exit_choice_without_stopping():
         simulation, "routed_exit", exit_id
     )
     simulation.get_agent_level = lambda agent_id: "0"
-    processor = _processor(simulation, {"alighter": {"target": ""}})
-    processor.agent_goals = {"alighter": "Leave the station."}
+    routing = _routing(
+        simulation, {"alighter": {"target": ""}}, goals={"alighter": "Leave the station."}
+    )
 
-    assert not processor._defer_for_post_transfer_route("alighter", (29.24, 38.48))
+    # The alighter decides now (to choose a street exit) rather than walking
+    # to the egress waypoint first.
+    assert not routing.should_defer("alighter", (29.24, 38.48))
     assert simulation.routed_exit is None
-    assert processor.agent_destinations == {}
     assert simulation.transfer_escape_waypoints == {}
-    assert processor._post_transfer_exit_choice_agents == {"alighter"}
 
 
 def test_boarded_agent_is_not_reclassified_as_escalator_exit():

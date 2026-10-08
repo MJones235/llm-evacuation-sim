@@ -418,35 +418,6 @@ class PromptCache:
             "timestamp": None,  # Can be updated by caller if needed
         }
 
-    def _describe_change(self, agent_id: str, old_hash: str, new_hash: str) -> str:
-        """Generate human-readable description of what changed."""
-        # Get old and new content previews for comparison
-        old_preview = self.agent_prompts.get(agent_id, {}).get("content_preview", "")
-
-        # Basic hash change info
-        basic_info = f"hash {old_hash[:8]}... → {new_hash[:8]}..."
-
-        # Try to identify what likely changed
-        # (This is heuristic since we don't store full old content)
-        change_hints = []
-
-        # Check if this looks like a message-triggered change
-        if "MSG:" in old_preview or "MSG:" in str(self.agent_prompts.get(agent_id, {})):
-            change_hints.append("messages")
-
-        # Check if blocked exits changed
-        if "BLOCKED:" in old_preview:
-            change_hints.append("blocked_exits")
-
-        # Check if events changed
-        if "EVENTS:" in old_preview:
-            change_hints.append("events")
-
-        if change_hints:
-            return f"{basic_info} (likely: {', '.join(change_hints)})"
-        else:
-            return f"{basic_info} (observation changed)"
-
     def _describe_change_detailed(
         self, agent_id: str, old_hash: str, new_hash: str, old_content: str, new_content: str
     ) -> str:
@@ -530,48 +501,3 @@ class PromptCache:
         # Keep only last 20 changes per agent to avoid unbounded growth
         if len(self.agent_change_history[agent_id]) > 20:
             self.agent_change_history[agent_id] = self.agent_change_history[agent_id][-20:]
-
-
-class SignificantChangeDetector:
-    """
-    Detects if a prompt change is truly "significant" (warrants LLM call).
-
-    This is a more sophisticated detector that can score how important a change is.
-    """
-
-    @staticmethod
-    def score_change_significance(
-        old_observation: str,
-        new_observation: str,
-        received_messages: list | None = None,
-        blocked_exits_changed: bool = False,
-        recent_events: list | None = None,
-    ) -> float:
-        """
-        Score how significant the change is (0.0 to 1.0).
-
-        Returns:
-            Significance score. 1.0 = definitely call LLM, 0.0 = reuse cached decision
-        """
-        score = 0.0
-
-        # Messages are HIGH priority (agent received new info)
-        if received_messages:
-            score += 0.9
-
-        # Blocked exits changed is HIGH priority (must reroute!)
-        if blocked_exits_changed:
-            score += 0.8
-
-        # Recent events are MEDIUM-HIGH priority
-        if recent_events:
-            score += 0.6
-
-        # Observation differences...
-        # For now just check if it changed (not character-by-character diff)
-        if old_observation != new_observation:
-            # Only add small amount for observation changes
-            # (many changes are just nearby agents moving)
-            score += 0.1
-
-        return min(score, 1.0)  # Cap at 1.0

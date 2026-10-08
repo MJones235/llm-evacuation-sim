@@ -133,15 +133,6 @@ class PositionHistoryTracker:
             self._stream_file.close()
             self._stream_file = None
 
-    def get_history(self) -> list[dict[str, Any]]:
-        """
-        Get complete position history.
-
-        Returns:
-            List of frame dicts with time, positions, and states
-        """
-        return self.position_history
-
     def save_to_file(self, output_path: Path) -> None:
         """
         Save position history to file.

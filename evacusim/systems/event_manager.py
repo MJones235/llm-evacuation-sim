@@ -10,6 +10,7 @@ Handles:
 
 from typing import Any
 
+from evacusim.conventions import train_exit
 from evacusim.jps.simulation_interface import PedestrianSimulation
 from evacusim.utils.logger import get_logger
 
@@ -291,7 +292,7 @@ class EventManager:
 
         # Activate the train exits for the specified platforms.
         for platform_id in platforms:
-            exit_name = f"train_platform_{platform_id}"
+            exit_name = train_exit(platform_id)
             self.active_train_exits.add(exit_name)
             self._train_departure_times[exit_name] = departure_time
             self._train_departure_messages[exit_name] = event.get(

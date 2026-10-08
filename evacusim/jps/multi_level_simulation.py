@@ -8,6 +8,7 @@ via escalators. Each level has its own JuPedSim simulation instance.
 from pathlib import Path
 from typing import Any
 
+from evacusim.conventions import platform_zone
 from evacusim.escalators.spec_loader import build_specs
 from evacusim.escalators.system import EscalatorSystem
 from evacusim.jps.jupedsim_integration import (
@@ -35,6 +36,7 @@ class MultiLevelJuPedSimulation:
         initially_blocked_exits: set[str] | None = None,
         escalator_config: dict[str, Any] | None = None,
         escalator_seed: int = 0,
+        platform_level: str = "-1",
     ):
         """
         Initialize multi-level simulation.
@@ -49,6 +51,7 @@ class MultiLevelJuPedSimulation:
             escalator_config: ``simulation.escalators`` config (defaults and
                 per-escalator overrides) for the conveyor model.
             escalator_seed: Seed for lane choice and stander step gaps.
+            platform_level: Level id of the train platforms.
         """
         self.dt = dt
         self.exit_radius = exit_radius
@@ -61,6 +64,7 @@ class MultiLevelJuPedSimulation:
         if levels is None:
             levels = ["0", "-1"]
         self.levels = levels
+        self.platform_level = platform_level
 
         _initially_blocked = set(initially_blocked_exits or [])
 
@@ -374,10 +378,6 @@ class MultiLevelJuPedSimulation:
             result.update(sim.get_all_nearby_agents_bulk(radius))
         return result
 
-    def get_simulation_time(self) -> float:
-        """Get current simulation time in seconds."""
-        return self.current_step * self.dt
-
     def get_all_agent_positions(self) -> dict[str, tuple[float, float]]:
         """
         Get positions of all agents across all levels.
@@ -449,8 +449,8 @@ class MultiLevelJuPedSimulation:
         Returns:
             List of Concordia IDs marked for removal this step.
         """
-        platform_name = "platform_" + exit_name.rsplit("_", 1)[-1]
-        level_sim = self.simulations.get("-1")
+        platform_name = platform_zone(exit_name)
+        level_sim = self.simulations.get(self.platform_level)
         if level_sim is None:
             return []
 

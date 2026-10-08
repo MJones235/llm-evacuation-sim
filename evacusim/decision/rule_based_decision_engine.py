@@ -23,7 +23,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from evacusim.core.decision_engine import DecisionContext, DecisionResult, ExitOption
+from evacusim.core.decision_engine import (
+    DecisionContext,
+    DecisionEngine,
+    DecisionResult,
+    ExitOption,
+)
 
 # Non-wait actions must declare a pace from this set (see
 # DecisionProcessor._validate_decision_payload).
@@ -34,7 +39,7 @@ _DEFAULT_PACE = "normal_pace"
 _TRAIN_GOAL_KEYWORDS = ("train", "platform", "board")
 
 
-class RuleBasedDecisionEngine:
+class RuleBasedDecisionEngine(DecisionEngine):
     """Route by weighting distance, visibility, busyness, and familiarity."""
 
     def __init__(

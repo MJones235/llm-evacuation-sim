@@ -1,19 +1,16 @@
-"""
-Translates natural language actions from Concordia agents into JuPedSim waypoints and goals.
+"""Translate decision payloads into pedestrian-simulation commands.
 
-Examples:
-    "I will evacuate through the north exit" → waypoint at north exit
-    "I will wait here for more information" → stay in current position
-    "I will help the person nearby" → move toward nearest agent
+``evacuate`` becomes a move to the chosen exit's position on the agent's
+level, ``leave_by_train`` a move to the nearest train, and ``wait``,
+``continue_activity`` and ``seek_information`` keep their meaning; the
+action executor applies the result.
 """
 
-import json
 import math
 import re
 from typing import Any
 
-from concordia.language_model import language_model
-
+from evacusim.conventions import is_train_exit
 from evacusim.translation.exit_name_registry import (
     build_registry_from_station_layout,
 )
@@ -22,22 +19,15 @@ from evacusim.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-# Precompiled regex to normalise geometry zone names (e.g. "L0_esc_a_down") to
-# canonical escalator exit IDs ("escalator_a_down") at translation time.
-_ESC_ZONE_RE = re.compile(r"^L[^_]+_esc_([a-f])_(up|down)$")
 _ESC_ZONE_DOTTED_RE = re.compile(r"^esc\.([A-F])\.zone\.(concourse|platform)\.(departure|arrival)$")
 
 
 class ActionTranslator:
-    """
-    Translates natural language actions from Concordia agents into
-    JuPedSim waypoints and goals.
-    """
+    """Locates exits and turns decision payloads into simulation commands."""
 
     def __init__(
         self,
         station_layout: dict[str, Any],
-        model: language_model.LanguageModel | None = None,
         jps_sim=None,
     ):
         """
@@ -45,11 +35,9 @@ class ActionTranslator:
 
         Args:
             station_layout: Dictionary with station geometry info (exits, zones, etc.)
-            model: Optional LLM for ambiguous action parsing
             jps_sim: JuPedSim simulation instance (for multi-level exit lookup)
         """
         self.station_layout = station_layout
-        self.model = model
         self.jps_sim = jps_sim
 
         # Define exit locations from layout (street-level exits)
@@ -60,403 +48,99 @@ class ActionTranslator:
         # Build exit name registry for natural language resolution
         self.exit_registry = build_registry_from_station_layout(station_layout, jps_sim)
 
-        # Down-access escalator zones on the concourse (level 0) that lead to platforms.
-        # Agents can now explicitly choose these as exits; this dict provides their
-        # coordinates for translation.
-        self._level0_down_esc_centroids: dict[str, tuple[float, float]] = station_layout.get(
-            "down_access_exits", {}
-        )
-        # Keep a mapping from platform zone name -> down escalator zone for the
-        # safety-net redirect (catches LLM hallucinations of platform zones on level 0).
-        self._platform_down_exits: dict[str, list[str]] = station_layout.get(
-            "platform_down_exits", {}
-        )
-
     def translate(
-        self, agent_id: str, action: str, current_position: tuple[float, float]
+        self, agent_id: str, decision: dict[str, Any], current_position: tuple[float, float]
     ) -> dict[str, Any]:
-        """
-        Translate a JSON action response to a concrete goal.
+        """Turn a validated decision payload into a pedestrian-simulation command.
 
         Args:
-            agent_id: ID of the acting agent
-            action: JSON action from Concordia agent
-            current_position: Agent's current (x, y) position
+            agent_id: The deciding agent.
+            decision: A payload valid for the agent's offered set
+                (:mod:`evacusim.decision.payload`).
+            current_position: The agent's (x, y) position.
 
         Returns:
-            Dictionary with:
-                - action_type: "move", "wait", "help", "follow"
-                - target: Target coordinates (x, y) or agent ID
-                - confidence: Parsing confidence (0-1)
-                - reasoning: Explanation of translation
+            A command dict whose ``action_type`` is ``continue``, ``wait``,
+            ``seek_information`` or ``move`` (with a ``target`` position and,
+            for exits, ``exit_name``), plus the decision's ``pace``. If the
+            chosen exit or train cannot be located, the agent waits.
         """
-        # Get agent's level for multi-level exit lookup
         agent_level = None
         if self.jps_sim and hasattr(self.jps_sim, "agent_levels"):
             agent_level = self.jps_sim.agent_levels.get(agent_id)
-        # Try parsing as JSON first
-        try:
-            # Strip agent name prefix (e.g., "Agent 0 {" -> "{")
-            json_start = action.find("{")
-            if json_start > 0:
-                action = action[json_start:]
 
-            data = json.loads(action)
+        verb = decision.get("action")
+        pace = decision.get("pace")
 
-            # v1.1 schema: action-level verbs with optional wait_reason/exit_id/pace.
-            if "action" in data:
-                verb = data.get("action")
-                wait_reason = data.get("wait_reason")
-                exit_id = data.get("exit_id")
-                pace = data.get("pace")
-
-                if verb == "continue_activity":
-                    return {
-                        "action_type": "continue",
-                        "target": None,
-                        "target_type": "journey",
-                        "confidence": 0.95,
-                        "reasoning": "Continuing assigned journey",
-                        "pace": pace,
-                    }
-
-                if verb == "wait":
-                    return {
-                        "action_type": "wait",
-                        "target": current_position,
-                        "target_type": "current_position",
-                        "confidence": 0.95,
-                        "reasoning": "Waiting at current position",
-                        "wait_reason": wait_reason,
-                        "pace": pace,
-                    }
-
-                if verb == "seek_information":
-                    return {
-                        "action_type": "seek_information",
-                        "target": current_position,
-                        "target_type": "information_source",
-                        "confidence": 0.9,
-                        "reasoning": "Seeking information from deterministic resolver",
-                        "pace": pace,
-                    }
-
-                if verb == "evacuate":
-                    requested_exit = exit_id
-                    if requested_exit:
-                        exit_coords = self._get_exit_coordinates(requested_exit, agent_level)
-                    else:
-                        exit_coords = None
-
-                    if exit_coords:
-                        return {
-                            "action_type": "move",
-                            "target": exit_coords,
-                            "target_type": "exit",
-                            "exit_name": requested_exit,
-                            "resolved_exit_id": requested_exit,
-                            "confidence": 0.95,
-                            "reasoning": f"Evacuating via {requested_exit}",
-                            "pace": pace,
-                        }
-
-                if verb == "leave_by_train":
-                    nearest_train = self._find_nearest_train_exit(current_position, agent_level)
-                    if nearest_train is not None:
-                        return {
-                            "action_type": "move",
-                            "target": nearest_train["coords"],
-                            "target_type": "exit",
-                            "exit_name": nearest_train["name"],
-                            "resolved_exit_id": nearest_train["name"],
-                            "confidence": 0.9,
-                            "reasoning": "Heading to nearest train platform for boarding",
-                            "pace": pace,
-                        }
-
-                # Invalid v1.1 payload falls through to safe wait default.
-                return {
-                    "action_type": "wait",
-                    "target": current_position,
-                    "target_type": "current_position",
-                    "confidence": 0.4,
-                    "reasoning": "Invalid v1.1 action payload; defaulting to wait",
-                    "wait_reason": "awaiting_information",
-                    "pace": None,
-                }
-
-            action_type = data.get("action_type")
-            target_type = data.get("target_type")
-            exit_name = data.get("exit_name")
-            zone_name = data.get("zone_name")
-
-            # Reject placeholder/invalid exit names that the LLM sometimes returns
-            _INVALID_EXIT_NAMES = {
-                "none",
-                "null",
-                "n/a",
-                "nearest exit",
-                "nearest",
-                "concourse",
-                "street exit",
-                "unknown",
-                "exit",
-                "",
+        if verb == "continue_activity":
+            return {
+                "action_type": "continue",
+                "target": None,
+                "target_type": "journey",
+                "confidence": 0.95,
+                "reasoning": "Continuing assigned journey",
+                "pace": pace,
             }
-            if exit_name and str(exit_name).lower().strip() in _INVALID_EXIT_NAMES:
-                exit_name = None
-            target_agent = data.get("target_agent")  # Agent ID to move toward or follow
-            wait_reason = data.get("wait_reason")  # Phase 4.3: Information seeking
-            speed = data.get("speed")  # Phase 4.3: Dynamic speed selection
 
-            # Move toward another agent (helping, following, or approaching)
-            # ONLY if target_type explicitly says so (not if just mentioned in context)
-            if action_type == "move" and target_agent and target_type == "agent":
+        if verb == "wait":
+            return {
+                "action_type": "wait",
+                "target": current_position,
+                "target_type": "current_position",
+                "confidence": 0.95,
+                "reasoning": "Waiting at current position",
+                "wait_reason": decision.get("wait_reason"),
+                "pace": pace,
+            }
+
+        if verb == "seek_information":
+            return {
+                "action_type": "seek_information",
+                "target": current_position,
+                "target_type": "information_source",
+                "confidence": 0.9,
+                "reasoning": "Seeking information from deterministic resolver",
+                "pace": pace,
+            }
+
+        if verb == "evacuate":
+            exit_id = decision.get("exit_id")
+            exit_coords = self._get_exit_coordinates(exit_id, agent_level) if exit_id else None
+            if exit_coords:
                 return {
                     "action_type": "move",
-                    "target": None,  # Will be resolved to agent position later
-                    "target_agent": target_agent,
-                    "target_type": "agent",
-                    "confidence": 0.9,
-                    "reasoning": f"Moving toward {target_agent}",
-                    "speed": speed,
+                    "target": exit_coords,
+                    "target_type": "exit",
+                    "exit_name": exit_id,
+                    "resolved_exit_id": exit_id,
+                    "confidence": 0.95,
+                    "reasoning": f"Evacuating via {exit_id}",
+                    "pace": pace,
                 }
 
-            if action_type == "wait" or target_type == "current_position":
-                # Phase 4.3: Include wait reason if provided
-                wait_reason_str = f" ({wait_reason})" if wait_reason else ""
-                # Default speed for wait actions: slow_walk for seeking_information, otherwise null (keep current)
-                default_speed = "slow_walk" if wait_reason == "seeking_information" else None
+        if verb == "leave_by_train":
+            nearest_train = self._find_nearest_train_exit(current_position, agent_level)
+            if nearest_train is not None:
                 return {
-                    "action_type": "wait",
-                    "target": current_position,
+                    "action_type": "move",
+                    "target": nearest_train["coords"],
+                    "target_type": "exit",
+                    "exit_name": nearest_train["name"],
+                    "resolved_exit_id": nearest_train["name"],
                     "confidence": 0.9,
-                    "reasoning": f"Agent chose to wait at current position{wait_reason_str}",
-                    "wait_reason": wait_reason,  # Pass through for tracking
-                    "speed": speed or default_speed,  # Use LLM speed if provided, else default
+                    "reasoning": "Heading to nearest train platform for boarding",
+                    "pace": pace,
                 }
 
-            if action_type == "move" and target_type == "exit":
-                if exit_name:
-                    exit_coords = self._get_exit_coordinates(exit_name, agent_level)
-                    resolved_id = self.exit_registry.resolve_to_id(exit_name)
-                else:
-                    exit_coords = None
-                    resolved_id = None
-
-                if exit_coords:
-                    # Normalise the resolved ID: zone-form names like "L0_esc_a_down"
-                    # must become "escalator_a_down" so set_agent_evacuation_exit
-                    # finds them in the level's evacuation_exits dict.
-                    _raw_resolved = resolved_id or exit_name
-                    _m = re.match(r"^L[^_]+_esc_([a-f])_(up|down)$", _raw_resolved)
-                    if _m:
-                        _canonical_resolved = f"escalator_{_m.group(1)}_{_m.group(2)}"
-                    else:
-                        _m2 = _ESC_ZONE_DOTTED_RE.match(_raw_resolved)
-                        if _m2:
-                            _letter, _location, _role = _m2.groups()
-                            _direction = (
-                                "down"
-                                if (_location == "concourse" and _role == "departure")
-                                else "up"
-                            )
-                            _canonical_resolved = f"escalator_{_letter.lower()}_{_direction}"
-                        else:
-                            _canonical_resolved = _raw_resolved
-                    # Log successful resolution if display name was converted
-                    if _canonical_resolved and _canonical_resolved != exit_name:
-                        logger.debug(
-                            f"Agent {agent_id} exit name '{exit_name}' → resolved to '{_canonical_resolved}'"
-                        )
-                    return {
-                        "action_type": "move",
-                        "target": exit_coords,
-                        "target_type": "exit",
-                        "exit_name": exit_name,
-                        "resolved_exit_id": _canonical_resolved,
-                        "confidence": 0.95,
-                        "reasoning": f"Moving to known exit {exit_name}",
-                        "speed": speed,  # Phase 4.3: Dynamic speed
-                    }
-                else:
-                    # Exit not available on this level.  If the resolved exit
-                    # lives on a different (higher) level, transparently redirect
-                    # the agent to the nearest UP escalator on their current level
-                    # so they make progress toward the requested exit.
-                    if resolved_id and agent_level:
-                        redirect = self._redirect_to_next_level_exit(
-                            agent_id, resolved_id, agent_level, current_position
-                        )
-                        if redirect is not None:
-                            redirect["speed"] = redirect.get("speed") or speed
-                            return redirect
-                    if resolved_id:
-                        logger.warning(
-                            f"Agent {agent_id} exit name '{exit_name}' resolved to '{resolved_id}' "
-                            f"but no coordinates found (may not be on level {agent_level})"
-                        )
-                    else:
-                        known_names = self.exit_registry.get_all_display_names()[:5]
-                        logger.warning(
-                            f"Agent {agent_id} requested unknown exit '{exit_name}'. "
-                            f"Could not resolve to any exit ID. Examples of known exits: {known_names}"
-                        )
-
-            if action_type == "move" and target_type == "zone" and zone_name:
-                zone_target = self._find_zone_target(zone_name.lower())
-                if zone_target:
-                    zone_name_resolved, zone_coords = zone_target
-                    # Safety net: if a level-0 agent somehow requests a platform zone
-                    # (which is physically on level -1), redirect to the appropriate
-                    # down-access escalator rather than sending them to invalid coords.
-                    import re as _re
-
-                    if agent_level == "0" and _re.match(r"^platform_", zone_name_resolved.lower()):
-                        # Look up the correct escalator for this specific platform
-                        down_zones = self._platform_down_exits.get(zone_name_resolved.lower(), [])
-                        if not down_zones:
-                            # Fall back to any available down escalator
-                            down_zones = list(self._level0_down_esc_centroids.keys())[:1]
-                        for esc_zone in down_zones:
-                            esc_coords = self._level0_down_esc_centroids.get(esc_zone)
-                            if esc_coords:
-                                logger.warning(
-                                    f"{agent_id} (level 0) requested platform zone "
-                                    f"'{zone_name_resolved}' — redirecting to {esc_zone}"
-                                )
-                                return {
-                                    "action_type": "move",
-                                    "target": esc_coords,
-                                    "target_type": "zone",
-                                    "zone_name": zone_name_resolved,
-                                    "confidence": 0.6,
-                                    "reasoning": "Redirected from platform zone to down escalator",
-                                    "speed": speed,
-                                }
-                    return {
-                        "action_type": "move",
-                        "target": zone_coords,
-                        "target_type": "zone",
-                        "zone_name": zone_name_resolved,
-                        "confidence": 0.9,
-                        "reasoning": f"Moving to zone {zone_name_resolved}",
-                        "speed": speed,  # Phase 4.3: Dynamic speed
-                    }
-
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse action as JSON: {action[:100]}")
-
+        # The chosen exit or train could not be located: wait.
         return {
             "action_type": "wait",
             "target": current_position,
             "target_type": "current_position",
-            "confidence": 0.3,
-            "reasoning": f"Parse failed, defaulting to wait: {action[:100]}",
-        }
-
-    def _redirect_to_next_level_exit(
-        self,
-        agent_id: str,
-        resolved_exit_id: str,
-        agent_level: str,
-        current_position: tuple[float, float],
-    ) -> dict[str, Any] | None:
-        """
-        When an agent requests an exit that doesn't exist on their current level,
-        find the nearest exit on the current level that leads toward it.
-
-        For platform agents (level -1) requesting a street exit: redirect to the
-        nearest UP escalator on level -1.
-        For concourse agents (level 0) requesting a platform escalator: redirect
-        to the nearest DOWN escalator on level 0.
-
-        Returns a translated-action dict, or None if no redirect is possible.
-        """
-        if not (self.jps_sim and hasattr(self.jps_sim, "simulations")):
-            return None
-
-        level_sim = self.jps_sim.simulations.get(agent_level)
-        if level_sim is None:
-            return None
-
-        level_exits = level_sim.exit_manager.exit_coordinates
-
-        # Determine which direction this agent needs to travel.
-        # Street exits (no "escalator_" prefix) are on level 0 → agents on level -1
-        # must go UP.  Down-escalator exits (escalator_*_down) are used to reach
-        # level -1 → agents on level 0 must use those.
-        is_street_exit = not resolved_exit_id.startswith("escalator_")
-        is_down_escalator = resolved_exit_id.endswith("_down")
-
-        if is_street_exit:
-            # Agent needs to go up: find UP escalators on current level.
-            candidates = {
-                name: coords
-                for name, coords in level_exits.items()
-                if name.startswith("escalator_") and name.endswith("_up")
-            }
-            direction_label = "up escalator"
-        elif is_down_escalator:
-            # Agent wants to go down: find DOWN escalators on current level.
-            candidates = {
-                name: coords
-                for name, coords in level_exits.items()
-                if name.startswith("escalator_") and name.endswith("_down")
-            }
-            direction_label = "down escalator"
-            # If no down escalators exist on this level (e.g. agent is already on
-            # the lowest level), fall back to UP escalators — the agent is confused
-            # about their location and needs to go up to reach the concourse first.
-            if not candidates:
-                candidates = {
-                    name: coords
-                    for name, coords in level_exits.items()
-                    if name.startswith("escalator_") and name.endswith("_up")
-                }
-                direction_label = "up escalator (redirected from down request)"
-        else:
-            return None
-
-        if not candidates:
-            return None
-
-        nearest_name = min(
-            candidates,
-            key=lambda name: math.hypot(
-                current_position[0] - candidates[name][0],
-                current_position[1] - candidates[name][1],
-            ),
-        )
-        nearest_coords = candidates[nearest_name]
-
-        _m = re.match(r"^L[^_]+_esc_([a-f])_(up|down)$", nearest_name)
-        if _m:
-            canonical_name = f"escalator_{_m.group(1)}_{_m.group(2)}"
-        else:
-            _m2 = _ESC_ZONE_DOTTED_RE.match(nearest_name)
-            if _m2:
-                _letter, _location, _role = _m2.groups()
-                _direction = "down" if (_location == "concourse" and _role == "departure") else "up"
-                canonical_name = f"escalator_{_letter.lower()}_{_direction}"
-            else:
-                canonical_name = nearest_name
-
-        logger.info(
-            f"Agent {agent_id} on level {agent_level} requested '{resolved_exit_id}' "
-            f"(not on this level) — redirecting to {direction_label} '{canonical_name}'"
-        )
-        return {
-            "action_type": "move",
-            "target": nearest_coords,
-            "target_type": "exit",
-            "exit_name": self.exit_registry.get_display_name(canonical_name),
-            "resolved_exit_id": canonical_name,
-            "confidence": 0.8,
-            "reasoning": (
-                f"'{resolved_exit_id}' is not on level {agent_level}; "
-                f"routing via {canonical_name} to reach it"
-            ),
+            "confidence": 0.4,
+            "reasoning": "Invalid v1.1 action payload; defaulting to wait",
+            "wait_reason": "awaiting_information",
+            "pace": None,
         }
 
     def _get_exit_coordinates(
@@ -550,33 +234,6 @@ class ActionTranslator:
 
         return None
 
-    def _find_nearest_exit(
-        self, position: tuple[float, float], agent_level: str | None = None
-    ) -> dict[str, Any]:
-        """Find the nearest exit to a given position (level-aware)."""
-        # Get all exits available to this agent (from their current level)
-        available_exits = dict(self.exits)  # Start with station_layout exits
-
-        # Add level-specific exits (escalators, etc.) if multi-level
-        if agent_level and self.jps_sim and hasattr(self.jps_sim, "simulations"):
-            level_sim = self.jps_sim.simulations.get(agent_level)
-            if level_sim and hasattr(level_sim, "exit_manager"):
-                if hasattr(level_sim.exit_manager, "exit_coordinates"):
-                    available_exits.update(level_sim.exit_manager.exit_coordinates)
-
-        min_dist = float("inf")
-        nearest = None
-
-        for exit_name, exit_coords in available_exits.items():
-            dist = (
-                (position[0] - exit_coords[0]) ** 2 + (position[1] - exit_coords[1]) ** 2
-            ) ** 0.5
-            if dist < min_dist:
-                min_dist = dist
-                nearest = {"name": exit_name, "coords": exit_coords}
-
-        return nearest if nearest else {"name": "default", "coords": (0, 0)}
-
     def _find_nearest_train_exit(
         self,
         position: tuple[float, float],
@@ -589,12 +246,12 @@ class ActionTranslator:
             level_sim = self.jps_sim.simulations.get(agent_level)
             if level_sim and hasattr(level_sim, "exit_manager"):
                 for name, coords in level_sim.exit_manager.exit_coordinates.items():
-                    if str(name).startswith("train_platform_"):
+                    if is_train_exit(name):
                         candidates[name] = coords
 
         if not candidates:
             for name, coords in self.exits.items():
-                if str(name).startswith("train_platform_"):
+                if is_train_exit(name):
                     candidates[name] = coords
 
         if not candidates:
@@ -608,26 +265,3 @@ class ActionTranslator:
             ),
         )
         return {"name": nearest_name, "coords": candidates[nearest_name]}
-
-    def _find_zone_target(self, text: str) -> tuple[str, tuple[float, float]] | None:
-        """Find zone coordinates from zone name in text.
-
-        Uses ``representative_point()`` (guaranteed inside the polygon) instead of
-        ``centroid`` (which can fall outside concave shapes such as L- or U-shaped
-        concourses).  The executor further snaps the point to the walkable area in
-        case the zone polygon extends beyond the actual navigable geometry.
-        """
-        for zone_name in self.zones_polygons:
-            if zone_name.lower() in text:
-                polygon = self.zones_polygons[zone_name]
-                # representative_point() always lies inside the polygon; centroid does not.
-                pt = polygon.representative_point()
-                return zone_name, (pt.x, pt.y)
-
-        for zone_name, zone_bounds in self.zones.items():
-            if zone_name.lower() in text:
-                x_center = (zone_bounds["x_min"] + zone_bounds["x_max"]) / 2
-                y_center = (zone_bounds["y_min"] + zone_bounds["y_max"]) / 2
-                return zone_name, (x_center, y_center)
-
-        return None

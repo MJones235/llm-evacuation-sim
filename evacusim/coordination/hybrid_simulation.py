@@ -30,10 +30,12 @@ from rich.progress import (
 )
 
 from evacusim.concordia.agent_builder import AgentBuilder
+from evacusim.conventions import is_train_exit
 from evacusim.coordination.observation_coordinator import ObservationCoordinator
 from evacusim.coordination.simulation_state_queries import SimulationStateQueries
 from evacusim.decision.action_executor import ActionExecutor
 from evacusim.decision.decision_processor import DecisionProcessor
+from evacusim.decision.situation import goal_is_train_oriented
 from evacusim.jps.exit_tracker import ExitTracker
 from evacusim.jps.simulation_interface import PedestrianSimulation
 from evacusim.metrics.llm_cost_reporter import FinancialReporter
@@ -215,7 +217,7 @@ class HybridSimulationRunner:
         self.llm_provider = language_model if hasattr(language_model, "get_usage_stats") else None
 
         # Translation layer components
-        self.action_translator = ActionTranslator(station_layout, language_model, self.jps_sim)
+        self.action_translator = ActionTranslator(station_layout, self.jps_sim)
         self.observation_generator = ObservationGenerator(station_layout, self.jps_sim)
 
         # Build Concordia agents (each with their own memory bank)
@@ -272,8 +274,6 @@ class HybridSimulationRunner:
         self.current_sim_time = self.start_time_s
         self.current_step = 0  # Track current simulation step for logging
         self.agent_decisions: dict[str, dict[str, Any]] = {}
-        self.last_observations: dict[str, str] = {}  # Cache observations for change detection
-        self.last_actions: dict[str, str] = {}  # Cache actions to reuse
 
         # Route changing tracking
         self.agent_destinations: dict[str, str] = {}  # agent_id -> current exit name
@@ -303,10 +303,7 @@ class HybridSimulationRunner:
         self.wait_events: list[dict[str, Any]] = []  # Track all wait decisions with reasons
 
         # Agent-to-agent messaging
-        self.message_system = MessageSystem(
-            default_radius=10.0,
-            memory_window=60.0,
-        )
+        self.message_system = MessageSystem(default_radius=10.0)
         # Performance profiling (must be initialized before decision_processor)
         self.perf_timer = PerformanceTimer()
         # Action execution
@@ -336,18 +333,9 @@ class HybridSimulationRunner:
             station_layout=station_layout,
             agent_decisions=self.agent_decisions,
             agent_destinations=self.agent_destinations,
-            last_observations=self.last_observations,
-            last_actions=self.last_actions,
             perf_timer=self.perf_timer,
             jps_sim=self.jps_sim,
-            event_manager=self.event_manager,
             agent_configs=agents_config,
-            enable_group_decisions=bool(
-                self.performance_config.get("enable_group_decisions", False)
-            ),
-            group_decision_min_size=max(
-                2, int(self.performance_config.get("group_decision_min_size", 3))
-            ),
             llm_semaphore_limit=int(self.performance_config.get("max_parallel_agents", 10)),
             per_agent_timeout_secs=self.performance_config.get("decision_timeout_seconds", 30.0),
             min_redecision_interval_secs=float(
@@ -779,12 +767,10 @@ class HybridSimulationRunner:
                             aid
                             for aid, goal in self.decision_processor.agent_goals.items()
                             if aid not in self.exited_agents
-                            and self.decision_processor._goal_is_train_oriented(goal)
+                            and goal_is_train_oriented(goal)
                             and (
                                 not self.agent_destinations.get(aid, "")
-                                or self.agent_destinations.get(aid, "").startswith(
-                                    "train_platform_"
-                                )
+                                or is_train_exit(self.agent_destinations.get(aid, ""))
                             )
                         }
                         for _exit_name in sorted(self.event_manager.active_train_exits):
@@ -804,7 +790,7 @@ class HybridSimulationRunner:
                                             "intended_exit": _exit_name,
                                             "exit_distance_m": "",
                                             "time_s": round(self.current_sim_time, 2),
-                                            "level": "-1",
+                                            "level": getattr(self.jps_sim, "platform_level", "-1"),
                                             "x": "",
                                             "y": "",
                                             "validated": True,
@@ -838,7 +824,7 @@ class HybridSimulationRunner:
                                 self.exited_agents.discard(_tid)
                                 self.agent_destinations.pop(_tid, None)
                                 self.decision_processor.clear_goal_for_redecision(_tid)
-                                self.decision_processor.prompt_cache.clear_agent(_tid)
+                                self.decision_processor.reset_agent_decision(_tid)
                                 self._pending_immediate_decisions.add(_tid)
                             if immediate_transfer_redecision:
                                 force_immediate_decision_cycle = True
@@ -871,7 +857,7 @@ class HybridSimulationRunner:
                         for _bid in bounced:
                             self.agent_destinations.pop(_bid, None)
                             self.decision_processor.clear_goal_for_redecision(_bid)
-                            self.decision_processor.prompt_cache.clear_agent(_bid)
+                            self.decision_processor.reset_agent_decision(_bid)
                             self._pending_immediate_decisions.add(_bid)
                         force_immediate_decision_cycle = True
 
@@ -899,7 +885,7 @@ class HybridSimulationRunner:
                     stranded = [
                         aid
                         for aid, dest in self.agent_destinations.items()
-                        if dest.startswith("train_platform_")
+                        if is_train_exit(dest)
                         and dest not in active_train_exits
                         and aid not in self.exited_agents
                     ]
@@ -907,7 +893,7 @@ class HybridSimulationRunner:
                         for aid in stranded:
                             self.agent_destinations.pop(aid, None)
                             self.decision_processor.clear_goal_for_redecision(aid)
-                            self.decision_processor.prompt_cache.clear_agent(aid)
+                            self.decision_processor.reset_agent_decision(aid)
                         new_event_fired = True
                         logger.info(
                             f"Train departed — cleared stale destinations for "

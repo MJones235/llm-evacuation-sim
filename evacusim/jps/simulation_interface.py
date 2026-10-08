@@ -45,15 +45,6 @@ class PedestrianSimulation(Protocol):
         """
         ...
 
-    def get_simulation_time(self) -> float:
-        """
-        Get current simulation time in seconds.
-
-        Returns:
-            Current simulation time
-        """
-        ...
-
     # Agent management methods
     def add_agent(
         self, agent_id: str, position: tuple[float, float], walking_speed: float = 1.34

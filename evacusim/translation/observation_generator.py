@@ -5,7 +5,6 @@ Converts geometric and simulation data into observations that Concordia
 agents can reason about.
 """
 
-import re
 from typing import Any
 
 from evacusim.translation.crowd_analyzer import CrowdAnalyzer
@@ -468,55 +467,6 @@ class ObservationGenerator:
         lines.append("; ".join(updates))
 
         return lines
-
-    def _humanize_exit_crowd_keys(self, exit_crowds: dict[str, int]) -> dict[str, int]:
-        """Translate technical exit IDs into display names and merge equivalent escalator IDs."""
-        if not exit_crowds:
-            return exit_crowds
-
-        merged: dict[str, dict[str, Any]] = {}
-
-        for exit_id, count in exit_crowds.items():
-            canonical_key = self._canonical_exit_key(exit_id)
-            display_name = (
-                self.exit_registry.get_display_name(exit_id) if self.exit_registry else exit_id
-            )
-
-            if canonical_key not in merged:
-                merged[canonical_key] = {"display_name": display_name, "count": count}
-            else:
-                merged[canonical_key]["count"] += count
-                merged[canonical_key]["display_name"] = self._prefer_exit_label(
-                    merged[canonical_key]["display_name"], display_name
-                )
-
-        return {
-            data["display_name"]: data["count"]
-            for data in sorted(merged.values(), key=lambda item: item["display_name"].lower())
-        }
-
-    def _canonical_exit_key(self, exit_id: str) -> str:
-        """Map equivalent exit IDs (zone IDs vs escalator IDs) to one canonical key."""
-        escalator_match = re.match(r"^escalator_([a-z])_(up|down)$", exit_id)
-        if escalator_match:
-            letter, direction = escalator_match.groups()
-            return f"escalator_{letter}_{direction}"
-
-        zone_escalator_match = re.match(r"^L[^_]+_esc_([a-z])_(up|down)$", exit_id)
-        if zone_escalator_match:
-            letter, direction = zone_escalator_match.groups()
-            return f"escalator_{letter}_{direction}"
-
-        zone_dotted_match = re.match(
-            r"^esc\.([A-Z])\.zone\.(concourse|platform)\.(departure|arrival)$",
-            exit_id,
-        )
-        if zone_dotted_match:
-            letter, location, role = zone_dotted_match.groups()
-            direction = "down" if (location == "concourse" and role == "departure") else "up"
-            return f"escalator_{letter.lower()}_{direction}"
-
-        return exit_id
 
     def _prefer_exit_label(self, current_label: str, candidate_label: str) -> str:
         """Prefer more descriptive display labels when combining equivalent exits."""

@@ -66,6 +66,7 @@ class JuPedSimSetup:
                 initially_blocked_exits=initially_blocked_exits,
                 escalator_config=as_dict(sim.escalators) if sim.escalators else None,
                 escalator_seed=derive_seed(params.seed, "escalators"),
+                platform_level=params.station.platform_level,
             )
             jps_sim.clock_offset_s = sim.start_time_s
             logger.info("Multi-level JuPedSim simulation created successfully")
