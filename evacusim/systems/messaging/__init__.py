@@ -1,9 +1,4 @@
-"""
-Agent messaging system.
-
-This package contains the message system for agent-to-agent communication
-with memory, deduplication, and conversation tracking.
-"""
+"""Spoken messages to agents: PA announcements and staff directives."""
 
 from evacusim.systems.messaging.message_system import MessageSystem
 

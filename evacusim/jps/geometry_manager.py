@@ -192,7 +192,7 @@ class GeometryManager:
         # Combine into a single geometry
         main_area = GeometryProcessor.combine_geometry(all_areas)
 
-        # Keep a live reference so add_obstacle_polygon() can rebuild geometry at runtime.
+        # Keep a live reference to the geometry.
         self._combined_geometry = main_area
 
         # Create JuPedSim simulation
@@ -242,26 +242,6 @@ class GeometryManager:
                     (ay + by) / 2 + ny * 1.5,
                 )
                 logger.info(f"🚧 Pre-blocked '{comb['exit_name']}' on level {self.level_id}")
-
-    def add_obstacle_polygon(self, obstacle_poly) -> None:
-        """Remove *obstacle_poly* from the walkable geometry and call switch_geometry.
-
-        Raises:
-            RuntimeError: propagated from JuPedSim if the new geometry is invalid
-                (e.g. disconnected area, stages outside bounds).  Callers should
-                catch and handle/ignore as appropriate.
-        """
-        new_geometry = GeometryProcessor.fix_topology(
-            self._combined_geometry.difference(obstacle_poly)
-        )
-        if new_geometry.is_empty:
-            logger.warning("Obstacle subtraction produced empty geometry — skipping switch")
-            return
-        # May raise RuntimeError ("accessible area not connected", "stages outside
-        # geometry", etc.).  Let the caller decide whether to swallow it.
-        self.simulation.switch_geometry(new_geometry)
-        self._combined_geometry = new_geometry
-        logger.info(f"Geometry updated: obstacle removed ({obstacle_poly.area:.2f} m²)")
 
     def get_geometry_data(self) -> dict[str, Any]:
         """

@@ -13,7 +13,6 @@ from typing import Any
 
 from evacusim.decision.action_utils import extract_exit_name
 from evacusim.utils.logger import get_logger
-from evacusim.utils.speed_utils import convert_speed_to_ms
 
 logger = get_logger(__name__)
 
@@ -152,55 +151,6 @@ class ActionExecutor:
             pace = translated_action.get("pace")
             if isinstance(pace, str):
                 self._apply_pace_speed(agent_id, pace)
-
-            # Backward-compatible speed handling for legacy prompt schemas.
-            speed_str = translated_action.get("speed")
-            if speed_str:
-                speed_ms = convert_speed_to_ms(speed_str)
-                if speed_ms:
-                    self.jps_sim.set_agent_speed(agent_id, speed_ms)
-                    logger.debug(f"Set {agent_id} speed to {speed_ms:.2f} m/s ({speed_str})")
-
-            # Resolve target_agent to actual position if specified
-            target_agent_id = translated_action.get("target_agent")
-            target_type = translated_action.get("target_type", "")
-
-            if target_agent_id and action_type == "move":
-                target_position = self.state_queries.get_agent_position(target_agent_id)
-                if target_position is not None:
-                    if target_type == "agent":
-                        agent_pos = self.state_queries.get_agent_position(agent_id)
-                        target_position = self._safe_follow_target(
-                            agent_id, agent_pos, target_position
-                        )
-                    target = target_position
-                    translated_action["target"] = target
-
-                    # For "following" type, optionally match speed for coordinated movement
-                    if target_type == "agent":
-                        logger.debug(f"{agent_id} following {target_agent_id} at {target}")
-
-                        if agent_pos is not None:
-                            distance = (
-                                (agent_pos[0] - target_position[0]) ** 2
-                                + (agent_pos[1] - target_position[1]) ** 2
-                            ) ** 0.5
-
-                            # Match speed if close enough and no explicit speed set
-                            if distance < 10.0 and not speed_str:
-                                try:
-                                    target_speed = self.jps_sim.get_agent_speed(target_agent_id)
-                                    if target_speed:
-                                        self.jps_sim.set_agent_speed(agent_id, target_speed)
-                                        logger.debug(
-                                            f"{agent_id} matching {target_agent_id}'s speed: "
-                                            f"{target_speed:.2f} m/s (distance: {distance:.1f}m)"
-                                        )
-                                except Exception:
-                                    pass  # If speed matching fails, continue with default
-                    else:
-                        # Regular agent approach (not following)
-                        logger.debug(f"{agent_id} moving toward {target_agent_id} at {target}")
 
             if action_type == "continue":
                 self._handle_continue_action(agent_id)
@@ -478,16 +428,6 @@ class ActionExecutor:
         """Handle move action: agent moving to exit, waypoint, or toward another agent."""
         # Update action state
         self.agent_action[agent_id] = "moving"
-
-        target_agent = translated_action.get("target_agent")
-        target_type = translated_action.get("target_type", "")
-
-        if target_agent and target_type == "agent":
-            # Agent is following someone - this is coordinated movement, not helping detection
-            logger.debug(f"{agent_id} following {target_agent}")
-        elif target_agent:
-            # Regular agent approach (not following)
-            logger.debug(f"{agent_id} moving toward {target_agent}")
 
         # Log current agent position and target for debugging
         agent_pos = self.state_queries.get_agent_position(agent_id)

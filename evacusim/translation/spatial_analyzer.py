@@ -46,10 +46,6 @@ class SpatialAnalyzer:
         # Keyed by level_id string; populated lazily on first use.
         self._walkable_union_cache: dict[str, Any] = {}
 
-    @staticmethod
-    def _is_platform_level(level_id: str | None) -> bool:
-        return bool(level_id and str(level_id).startswith("-"))
-
     def identify_zone(self, position: tuple[float, float]) -> str:
         """
         Identify which zone a position is in.
@@ -144,103 +140,6 @@ class SpatialAnalyzer:
             if self._point_in_bounds(position, zone_bounds):
                 return zone_name
         return "unknown area"
-
-    def get_nearest_exit_info(
-        self, position: tuple[float, float], agent_level: str | None = None, jps_sim=None
-    ) -> str:
-        """
-        Get information about the nearest exit on the agent's current level.
-
-        Args:
-            position: (x, y) coordinates
-            agent_level: Current level ID (e.g., "0", "-1")
-            jps_sim: JuPedSim simulation (for multi-level exit access)
-
-        Returns:
-            String like "exit_name (distance_category)"
-        """
-        # Get level-specific exits for multi-level simulations
-        exits_to_use = self.exits
-
-        if agent_level and jps_sim and hasattr(jps_sim, "simulations"):
-            level_sim = jps_sim.simulations.get(agent_level)
-            if level_sim:
-                # Get exits from the agent's current level
-                level_exits = {}
-                for exit_name in level_sim.exit_manager.evacuation_exits:
-                    # Find position for this exit
-                    if exit_name.startswith("escalator_"):
-                        # Get from walkable areas matching this escalator
-                        for (
-                            zone_name,
-                            zone_poly,
-                        ) in level_sim.geometry_manager.walkable_areas.items():
-                            # Match escalator ID (e.g., "escalator_a_up" matches "L-1_esc_a_up")
-                            esc_id = exit_name.replace("escalator_", "")
-                            if f"_esc_{esc_id}" in zone_name:
-                                level_exits[exit_name] = (
-                                    zone_poly.centroid.x,
-                                    zone_poly.centroid.y,
-                                )
-                                break
-                            m = re.match(
-                                r"^esc\.([A-F])\.zone\.(concourse|platform)\.(departure|arrival)$",
-                                zone_name,
-                            )
-                            if m:
-                                letter, location, role = m.groups()
-                                direction = (
-                                    "down"
-                                    if (location == "concourse" and role == "departure")
-                                    else "up"
-                                )
-                                if esc_id == f"{letter.lower()}_{direction}":
-                                    level_exits[exit_name] = (
-                                        zone_poly.centroid.x,
-                                        zone_poly.centroid.y,
-                                    )
-                                    break
-                    elif exit_name in level_sim.geometry_manager.entrance_areas:
-                        poly = level_sim.geometry_manager.entrance_areas[exit_name]
-                        level_exits[exit_name] = (poly.centroid.x, poly.centroid.y)
-
-                if level_exits:
-                    exits_to_use = level_exits
-
-        if not exits_to_use:
-            return "unknown"
-
-        min_dist = float("inf")
-        nearest_name = "unknown"
-
-        for name, coords in exits_to_use.items():
-            dist = ((position[0] - coords[0]) ** 2 + (position[1] - coords[1]) ** 2) ** 0.5
-            if dist < min_dist:
-                min_dist = dist
-                nearest_name = name
-
-        # Make escalator names more readable
-        display_name = nearest_name
-        if nearest_name.startswith("escalator_"):
-            # Convert "escalator_a_up" to "escalator A (up to concourse)"
-            parts = nearest_name.replace("escalator_", "").split("_")
-            if len(parts) == 2:
-                letter, direction = parts
-                if direction == "up":
-                    display_name = f"escalator {letter.upper()} (up to concourse)"
-                elif direction == "down":
-                    display_name = f"escalator {letter.upper()} (down to platforms)"
-                else:
-                    display_name = f"escalator {letter.upper()}"
-
-        # Categorize distance to prevent small changes from triggering LLM calls
-        if min_dist >= 100:
-            dist_category = "100m+"
-        elif min_dist >= 50:
-            dist_category = "50-100m"
-        else:
-            dist_category = "<50m"
-        return f"{display_name} ({dist_category})"
 
     def get_visible_exits(
         self,

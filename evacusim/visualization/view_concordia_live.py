@@ -36,52 +36,6 @@ class ConcordiaViewer:
         if RICH_AVAILABLE:
             self.console = Console()
 
-    def parse_concordia_action(self, action: str) -> dict:
-        """
-        Parse Concordia's multi-question action format.
-
-        Returns dict with questions and answers extracted.
-        """
-        result = {
-            "self_perception": "",
-            "situation": "",
-            "risk": "",
-            "social": "",
-            "strategy": "",
-            "final_action": "",
-        }
-
-        lines = action.split("\n")
-        current_section = None
-
-        for line in lines:
-            line = line.strip()
-
-            if "What kind of person is" in line:
-                current_section = "self_perception"
-            elif "What situation is" in line:
-                current_section = "situation"
-            elif "How dangerous is" in line:
-                current_section = "risk"
-            elif "What are other people doing" in line:
-                current_section = "social"
-            elif "What would a person like" in line:
-                current_section = "strategy"
-            elif "What will you do next" in line or "Exercise:" in line:
-                current_section = "final_action"
-            elif line.startswith("Answer:") and current_section:
-                answer = line.replace("Answer:", "").strip()
-                if answer:
-                    result[current_section] = answer
-            elif current_section and line and not line.startswith("-"):
-                # Continuation of previous answer
-                if result[current_section]:
-                    result[current_section] += " " + line
-                else:
-                    result[current_section] = line
-
-        return result
-
     def format_decision_rich(self, agent_id: str, decision: dict) -> Panel:
         """Format a decision using rich formatting."""
         time_val = decision.get("time", 0.0)

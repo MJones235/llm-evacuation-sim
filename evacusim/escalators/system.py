@@ -330,9 +330,6 @@ class EscalatorSystem:
             agent_id == held[0] for hold in self.boarding_hold.values() for held in hold
         )
 
-    def is_riding(self, agent_id: str) -> bool:
-        return self.is_in_transit(agent_id)
-
     def is_committed(self, agent_id: str) -> bool:
         """Queueing at the landing (joined) or admitted to step on."""
         exit_name = self.queued_on.get(agent_id)

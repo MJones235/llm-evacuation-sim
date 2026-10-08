@@ -252,10 +252,6 @@ class ExitNameRegistry:
 
         return best_match if best_score > 0 else None
 
-    def get_all_display_names(self) -> list[str]:
-        """Get list of all registered display names."""
-        return list(self._id_to_display.values())
-
     def get_all_ids(self) -> list[str]:
         """Get list of all registered technical IDs."""
         return list(self._id_to_display.keys())

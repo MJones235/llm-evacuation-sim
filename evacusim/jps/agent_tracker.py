@@ -254,18 +254,6 @@ class AgentTracker:
         """
         return self.agent_ids.get(agent_id)
 
-    def get_concordia_id(self, jps_id: int) -> str | None:
-        """
-        Get Concordia ID for a JuPedSim agent.
-
-        Args:
-            jps_id: JuPedSim agent ID
-
-        Returns:
-            Concordia ID if agent exists, None otherwise
-        """
-        return self.jps_to_concordia.get(jps_id)
-
     def remove_agent(self, agent_id: str) -> None:
         """Remove an agent from tracking after they exit simulation."""
         jps_id = self.agent_ids.pop(agent_id, None)

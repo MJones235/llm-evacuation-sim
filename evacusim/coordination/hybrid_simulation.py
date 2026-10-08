@@ -302,10 +302,7 @@ class HybridSimulationRunner:
         self.wait_events: list[dict[str, Any]] = []  # Track all wait decisions with reasons
 
         # Agent-to-agent messaging
-        self.message_system = MessageSystem(
-            default_radius=10.0,
-            memory_window=60.0,
-        )
+        self.message_system = MessageSystem(default_radius=10.0)
         # Performance profiling (must be initialized before decision_processor)
         self.perf_timer = PerformanceTimer()
         # Action execution

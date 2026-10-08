@@ -496,10 +496,6 @@ class ConcordiaJuPedSimulation:
         """
         return self.agent_tracker.get_all_nearby_agents_bulk(radius)
 
-    def get_simulation_time(self) -> float:
-        """Get current simulation time in seconds."""
-        return self.current_step * self.dt
-
     def get_all_agent_positions(self) -> dict[str, tuple[float, float]]:
         """
         Get positions of all agents for visualization.
