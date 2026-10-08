@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from evacusim.config.schema import CalibrationConfig
 from evacusim.setup.simulation_runner_factory import SimulationRunnerFactory
 
 
@@ -32,7 +33,7 @@ def _base_calibration(**over):
 
 class FactoryWiringTests(unittest.TestCase):
     def test_build_calibration_disabled_returns_none(self):
-        controller, timetable = SimulationRunnerFactory._build_calibration({})
+        controller, timetable = SimulationRunnerFactory._build_calibration(None)
         self.assertIsNone(controller)
         self.assertEqual(timetable, [])
 
@@ -48,7 +49,9 @@ class FactoryWiringTests(unittest.TestCase):
             cfg["calibration"]["entrance_usage_csv"] = str(u)
             cfg["calibration"]["timetable_csv"] = str(t)
 
-            controller, timetable = SimulationRunnerFactory._build_calibration(cfg)
+            controller, timetable = SimulationRunnerFactory._build_calibration(
+                CalibrationConfig.model_validate(cfg["calibration"])
+            )
         self.assertIsNotNone(controller)
         self.assertEqual(len(timetable), 1)
         self.assertGreater(controller.total, 10)  # entrance arrivals + 10 alighters

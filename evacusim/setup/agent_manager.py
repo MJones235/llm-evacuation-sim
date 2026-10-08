@@ -13,6 +13,7 @@ import math
 import random
 from typing import Any
 
+from evacusim.config.schema import AgentRole, RunConfig
 from evacusim.jps.simulation_interface import PedestrianSimulation
 from evacusim.setup.agent_factory import AgentFactory
 from evacusim.setup.spawn_manager import SpawnManager
@@ -27,7 +28,7 @@ class AgentManager:
 
     @staticmethod
     def create_and_populate_agents(
-        jps_sim: PedestrianSimulation, config: dict
+        jps_sim: PedestrianSimulation, params: RunConfig
     ) -> list[dict[str, Any]]:
         """
         Create agents and add them to the pedestrian simulation.
@@ -48,14 +49,14 @@ class AgentManager:
 
         Args:
             jps_sim: Pedestrian simulation instance (implements PedestrianSimulation)
-            config: Configuration dictionary
+            params: The run's parameters
 
         Returns:
             List of agent configuration dictionaries
         """
-        agent_config = config.get("agents", {})
-        snapshot_load_path = agent_config.get("snapshot_load_path")
-        snapshot_save_path = agent_config.get("snapshot_save_path")
+        agents = params.agents
+        snapshot_load_path = agents.snapshot_load_path
+        snapshot_save_path = agents.snapshot_save_path
 
         # ------------------------------------------------------------------
         # Fast path: restore population from a previously saved snapshot.
@@ -75,7 +76,7 @@ class AgentManager:
         # Normal path: generate fresh population.
         # ------------------------------------------------------------------
         # Determine number of agents
-        num_agents = agent_config.get("count", 1)
+        num_agents = agents.count
 
         # Generate spawn positions
         spawn_positions = SpawnManager.generate_spawn_positions(jps_sim, num_agents)
@@ -106,7 +107,7 @@ class AgentManager:
 
         # Enforce inter-passenger spawn spacing to avoid JuPedSim insertion
         # failures from near-overlapping sampled points.
-        spawn_min_sep = float(config.get("agents", {}).get("spawn_min_separation", 0.35))
+        spawn_min_sep = agents.spawn_min_separation
         before_sep = len(spawn_positions)
         spawn_positions = AgentManager._filter_positions_by_min_separation(
             spawn_positions,
@@ -130,11 +131,11 @@ class AgentManager:
             num_agents = actual_count
 
         # Create agent configurations
-        agents_config, injured_agents = AgentFactory.create_agents(num_agents, config)
+        agents_config, injured_agents = AgentFactory.create_agents(num_agents, agents)
 
         # Add agents to JuPedSim
         AgentManager._add_agents_to_jupedsim(
-            jps_sim, agents_config, spawn_positions, injured_agents, config
+            jps_sim, agents_config, spawn_positions, injured_agents, params
         )
 
         logger.info(f"Agent population complete: {num_agents} agents ready")
@@ -180,7 +181,7 @@ class AgentManager:
         return accepted
 
     @staticmethod
-    def _add_agents_to_jupedsim(jps_sim, agents_config, spawn_positions, injured_agents, config):
+    def _add_agents_to_jupedsim(jps_sim, agents_config, spawn_positions, injured_agents, params):
         """
         Add agents to JuPedSim simulation with appropriate walking speeds.
 
@@ -189,8 +190,10 @@ class AgentManager:
             agents_config: List of agent configuration dictionaries
             spawn_positions: List of spawn position tuples (x, y) or (x, y, level_id)
             injured_agents: Set of injured agent indices
-            config: Configuration dictionary
+            params: The run's parameters
         """
+        roles = params.agents.roles
+        zone_boundaries = params.station.zone_boundaries
         for i, agent_cfg in enumerate(agents_config):
             agent_id = agent_cfg["id"]
             spawn_data = spawn_positions[i]
@@ -209,36 +212,28 @@ class AgentManager:
             agent_cfg["level_id"] = level_id
             agent_cfg["start_position"] = start_pos
 
-            roles_config = config["agents"].get("roles", {})
             geometry_zone = AgentManager._infer_zone_from_geometry(
                 jps_sim=jps_sim,
                 position=start_pos,
                 level_id=str(level_id),
-                preferred_zone_names={
-                    z for role_cfg in roles_config.values() for z in role_cfg.get("spawn_zones", [])
-                },
+                preferred_zone_names={z for role in roles.values() for z in role.spawn_zones},
             )
 
             # Assign initial_zone from coordinate-based rules defined in
             # config under station.zone_boundaries.
-            zone_boundaries = config.get("station", {}).get("zone_boundaries", {})
             level_zones = zone_boundaries.get(str(level_id), {})
             px, py = float(start_pos[0]), float(start_pos[1])
             assigned_zone = None
             default_zone = None
-            for zone_name, conditions in level_zones.items():
-                if conditions.get("default", False):
+            for zone_name, bounds in level_zones.items():
+                if bounds.default:
                     default_zone = zone_name
                     continue
-                x_lt = conditions.get("x_lt")
-                x_gt = conditions.get("x_gt")
-                y_lt = conditions.get("y_lt")
-                y_gt = conditions.get("y_gt")
                 if (
-                    (x_lt is None or px < x_lt)
-                    and (x_gt is None or px > x_gt)
-                    and (y_lt is None or py < y_lt)
-                    and (y_gt is None or py > y_gt)
+                    (bounds.x_lt is None or px < bounds.x_lt)
+                    and (bounds.x_gt is None or px > bounds.x_gt)
+                    and (bounds.y_lt is None or py < bounds.y_lt)
+                    and (bounds.y_gt is None or py > bounds.y_gt)
                 ):
                     assigned_zone = zone_name
                     break
@@ -246,29 +241,24 @@ class AgentManager:
 
             # Assign role from config: find roles whose spawn_zones include this zone.
             initial_zone = agent_cfg["initial_zone"]
-            agent_cfg["agent_role"] = AgentManager._assign_role(initial_zone, roles_config)
-            role = agent_cfg["agent_role"]
-            role_cfg = roles_config.get(role, {})
-            role_targets = role_cfg.get("target", [])
-            if role_targets:
-                agent_cfg["target"] = random.choice(role_targets)
+            agent_cfg["agent_role"] = AgentManager._assign_role(initial_zone, roles)
+            role = roles.get(agent_cfg["agent_role"]) or AgentRole()
+            if role.target:
+                agent_cfg["target"] = random.choice(role.target)
 
             # Format goal and memory templates now that role, target, and purpose are known.
             subs = {
                 "target": agent_cfg.get("target", ""),
                 "purpose": agent_cfg.get("purpose", "their destination"),
             }
-            agent_cfg["goal_state"] = role_cfg.get("goal", "Continue your planned journey.").format(
-                **subs
-            )
-            agent_cfg["purpose_memories"] = [t.format(**subs) for t in role_cfg.get("memories", [])]
+            agent_cfg["goal_state"] = role.goal.format(**subs)
+            agent_cfg["purpose_memories"] = [t.format(**subs) for t in role.memories]
             agent_cfg["initial_goal"] = agent_cfg["goal_state"]
 
             # Optional per-role decision prompt extra — injected verbatim into the
             # LLM call-to-action so consumers can customise agent reasoning without
             # changing framework code.  Supports {target} / {purpose} substitution.
-            raw_extra = role_cfg.get("decision_prompt_extra", "")
-            agent_cfg["decision_prompt_extra"] = raw_extra.format(**subs) if raw_extra else ""
+            agent_cfg["decision_prompt_extra"] = role.decision_prompt_extra.format(**subs)
 
             is_injured = i in injured_agents
             walking_speed = sample_walking_speed() if not is_injured else 0.5
@@ -337,7 +327,7 @@ class AgentManager:
                 )
 
     @staticmethod
-    def _assign_role(initial_zone: str, roles_config: dict) -> str:
+    def _assign_role(initial_zone: str, roles: dict[str, AgentRole]) -> str:
         """
         Pick a role whose spawn_zones include ``initial_zone``, using configured weights.
 
@@ -346,19 +336,13 @@ class AgentManager:
         random selection.  Falls back to a uniform draw across all roles when no
         spawn_zones match.
         """
-        matching = [
-            (role, cfg)
-            for role, cfg in roles_config.items()
-            if initial_zone in cfg.get("spawn_zones", [])
-        ]
-
+        matching = [name for name, role in roles.items() if initial_zone in role.spawn_zones]
         if not matching:
-            matching = list(roles_config.items())
+            matching = list(roles)
         if not matching:
             return "default"
-        roles_list = [r for r, _ in matching]
-        weights = [float(cfg.get("weight", 1.0)) for _, cfg in matching]
-        return random.choices(roles_list, weights=weights, k=1)[0]
+        weights = [roles[name].weight for name in matching]
+        return random.choices(matching, weights=weights, k=1)[0]
 
     @staticmethod
     def _infer_zone_from_geometry(

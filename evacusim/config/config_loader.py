@@ -1,6 +1,6 @@
 """Load a run's YAML configuration and validate it against the parameter schema.
 
-Flow::
+Flow (all three steps run by :meth:`ConfigLoader.load_run_config`)::
 
     YAML file ──load_config──▶ merged dict ──apply_cli_overrides──▶ dict
         (follows ``extends:``)                                        │
@@ -31,12 +31,13 @@ class ConfigLoader:
     """Loads, overrides and validates run configuration files."""
 
     @staticmethod
-    def load_and_validate(
+    def load_run_config(
         config_path: str,
         agents: int | None = None,
         max_steps: int | None = None,
         output_dir: str | None = None,
-    ) -> dict[str, Any]:
+        start_time_s: float | None = None,
+    ) -> RunConfig:
         """Load a config file, apply command-line overrides and validate it.
 
         Args:
@@ -44,20 +45,20 @@ class ConfigLoader:
             agents: Overrides ``agents.count``.
             max_steps: Overrides ``simulation.max_iterations``.
             output_dir: Overrides ``output.directory``.
+            start_time_s: Overrides ``simulation.start_time_s``.
 
         Returns:
-            The merged configuration as a plain dict, exactly as written in the
-            YAML files (defaults are *not* filled in). It is guaranteed to
-            validate against :class:`~evacusim.config.schema.RunConfig`.
+            The run's typed parameters, with every default filled in.
 
         Raises:
             FileNotFoundError: The file (or a file it extends) does not exist.
             ConfigError: The configuration does not match the schema.
         """
         config = ConfigLoader.load_config(config_path)
-        config = ConfigLoader.apply_cli_overrides(config, agents, max_steps, output_dir)
-        ConfigLoader.validate_config(config)
-        return config
+        config = ConfigLoader.apply_cli_overrides(
+            config, agents, max_steps, output_dir, start_time_s
+        )
+        return ConfigLoader.validate_config(config)
 
     @staticmethod
     def load_config(config_path: str) -> dict[str, Any]:
@@ -104,6 +105,7 @@ class ConfigLoader:
         agents: int | None = None,
         max_steps: int | None = None,
         output_dir: str | None = None,
+        start_time_s: float | None = None,
     ) -> dict[str, Any]:
         """Apply command-line overrides in place and return the config."""
         if agents is not None:
@@ -115,6 +117,9 @@ class ConfigLoader:
         if output_dir is not None:
             config.setdefault("output", {})["directory"] = output_dir
             logger.info(f"Override: output directory = {output_dir}")
+        if start_time_s is not None:
+            config.setdefault("simulation", {})["start_time_s"] = start_time_s
+            logger.info(f"Override: simulation starts at {start_time_s:.1f}s")
         return config
 
     @staticmethod

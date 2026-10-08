@@ -568,6 +568,15 @@ class PromptsConfig(Section):
 # ---------------------------------------------------------------------------
 
 
+def as_dict(section: BaseModel) -> dict[str, Any]:
+    """A section as a plain dict, for components that still take dicts.
+
+    Unset optional values (``None``) are omitted, so ``d.get(key, default)``
+    in those components behaves as it did when they read the YAML directly.
+    """
+    return section.model_dump(exclude_none=True)
+
+
 class RunConfig(Section):
     """Every parameter of one simulation run."""
 
