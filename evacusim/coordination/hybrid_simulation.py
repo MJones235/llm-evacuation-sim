@@ -52,6 +52,10 @@ from evacusim.visualization.position_history import PositionHistoryTracker
 logger = get_logger(__name__)
 
 
+class SimulationError(RuntimeError):
+    """The simulation failed; partial outputs were written before raising."""
+
+
 class HybridSimulationRunner:
     """
     Manages the hybrid Concordia + JuPedSim simulation.
@@ -631,18 +635,12 @@ class HybridSimulationRunner:
         At bootstrap we process ALL agents regardless of group so every agent
         has an initial journey before physics starts.
         """
-        try:
-            initial_time = self.start_time_s
-            logger.info(f"Bootstrapping initial agent decisions at t={initial_time:.1f}s")
-            observations = self.observation_coordinator.generate_all_observations(initial_time)
-            self.last_decision_time = self.decision_processor.process_all_agents(
-                observations,
-                initial_time,
-                # agent_ids=None → processes all agents
-            )
-        except Exception as e:
-            logger.error(f"Failed to bootstrap initial decisions: {e}", exc_info=True)
-            # Continue with normal runtime decision flow as fallback
+        initial_time = self.start_time_s
+        logger.info(f"Bootstrapping initial agent decisions at t={initial_time:.1f}s")
+        observations = self.observation_coordinator.generate_all_observations(initial_time)
+        self.last_decision_time = self.decision_processor.process_all_agents(
+            observations, initial_time
+        )
 
     def run(self) -> dict[str, Any]:
         """
@@ -650,8 +648,13 @@ class HybridSimulationRunner:
 
         Returns:
             Dictionary with simulation results and statistics
+
+        Raises:
+            SimulationError: The simulation failed. Partial outputs (population
+                series, calibration report, position frames) are written first.
         """
         logger.info("Starting hybrid Concordia + JuPedSim simulation")
+        failure: BaseException | None = None
         start_time = time.time()
 
         results = {
@@ -725,10 +728,11 @@ class HybridSimulationRunner:
                     with self.perf_timer.measure("jupedsim_step"):
                         if not self._step_jupedsim():
                             if self._last_step_error:
-                                logger.error(
-                                    "JuPedSim simulation aborted due to step error: "
+                                failure = SimulationError(
+                                    f"physics step failed at t={self.current_sim_time:.2f}s: "
                                     f"{self._last_step_error}"
                                 )
+                                logger.error(str(failure))
                                 break
                             # Physics reports no agents remain this step.  When a
                             # calibration spawn controller still has arrivals queued,
@@ -1125,6 +1129,7 @@ class HybridSimulationRunner:
             logger.info("Simulation interrupted by user")
         except Exception as e:
             logger.error(f"Simulation error: {e}", exc_info=True)
+            failure = e
         finally:
             # Drain any in-flight background write so results aren't truncated.
             if self._pending_write is not None:
@@ -1141,7 +1146,7 @@ class HybridSimulationRunner:
         results["events_triggered"] = len(self.event_manager.event_history)
 
         logger.info(
-            f"Simulation complete: {results['steps']} steps, "
+            f"Simulation {'FAILED' if failure else 'complete'}: {results['steps']} steps, "
             f"{results['sim_time']:.1f}s sim time, "
             f"{elapsed_time:.1f}s real time"
         )
@@ -1189,6 +1194,12 @@ class HybridSimulationRunner:
             self.position_tracker.save_to_file(history_file)
             results["position_history_file"] = str(history_file)
 
+        if failure is not None:
+            if isinstance(failure, SimulationError):
+                raise failure
+            raise SimulationError(
+                f"simulation failed at t={self.current_sim_time:.2f}s: {failure}"
+            ) from failure
         return results
 
     def cleanup(self):
