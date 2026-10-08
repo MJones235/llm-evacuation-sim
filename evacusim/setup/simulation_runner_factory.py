@@ -20,6 +20,7 @@ from evacusim.config.schema import (
 )
 from evacusim.coordination.hybrid_simulation import HybridSimulationRunner
 from evacusim.utils.logger import get_logger, setup_logger
+from evacusim.utils.seeding import derive_seed
 
 logger = get_logger(__name__)
 
@@ -67,7 +68,7 @@ class SimulationRunnerFactory:
         # Calibration runs spawn passengers at runtime from usage and timetable
         # data (normal operations, no evacuation).
         spawn_controller, calibration_timetable = SimulationRunnerFactory._build_calibration(
-            params.calibration
+            params.calibration, seed=derive_seed(params.seed, "calibration")
         )
 
         logger.info("Creating HybridSimulationRunner...")
@@ -164,7 +165,7 @@ class SimulationRunnerFactory:
         )
 
     @staticmethod
-    def _build_calibration(calibration: CalibrationConfig | None):
+    def _build_calibration(calibration: CalibrationConfig | None, seed: int = 0):
         """Build the runtime spawn controller for a calibration run.
 
         Returns ``(spawn_controller, timetable)``. When calibration is absent
@@ -195,12 +196,12 @@ class SimulationRunnerFactory:
             },
             "train_alighting_duration_s": calibration.train_alighting_duration_s,
         }
-        schedule = build_arrival_schedule(intervals, timetable, spawn_cfg, seed=calibration.seed)
+        schedule = build_arrival_schedule(intervals, timetable, spawn_cfg, seed=seed)
 
         controller = RuntimeSpawnController(
             schedule,
             spawn_points,
-            seed=calibration.seed,
+            seed=seed,
             jitter_m=calibration.spawn_jitter_m,
             train_door_jitter_m=calibration.train_door_jitter_m,
             walking_speed_mean=calibration.walking_speed_mean,
@@ -218,7 +219,7 @@ class SimulationRunnerFactory:
             len(schedule),
             len(intervals),
             len(timetable),
-            calibration.seed,
+            seed,
         )
         return controller, timetable
 

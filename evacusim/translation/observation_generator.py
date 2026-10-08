@@ -393,7 +393,7 @@ class ObservationGenerator:
             registry = getattr(self, "exit_registry", None) or getattr(
                 getattr(self, "action_translator", None), "exit_registry", None
             )
-            for cid in known_blocked_exits:
+            for cid in sorted(known_blocked_exits):
                 display = registry.get_display_name(cid) if registry else cid
                 if display not in visible_names:
                     visible_blocked.append({"name": display, "distance": "remembered"})

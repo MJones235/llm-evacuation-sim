@@ -22,7 +22,6 @@ MINIMAL = {
 
 CALIBRATION = {
     "enabled": True,
-    "seed": 7,
     "entrance_usage_csv": "u.csv",
     "timetable_csv": "t.csv",
     "entrance_dest_exits": ["train_platform_1"],
@@ -157,9 +156,13 @@ class CalibrationSectionTests(SchemaTests):
             self.rule_based(spawn_points={"e": {"level": "0", "xy": [1.0]}}), "spawn_points.e.xy"
         )
 
-    def test_bad_seed_and_dest_exits(self):
-        self.assertInvalid(self.rule_based(seed="seven"), "calibration.seed")
+    def test_bad_dest_exits(self):
         self.assertInvalid(self.rule_based(entrance_dest_exits="x"), "entrance_dest_exits")
+
+    def test_seed_is_top_level(self):
+        self.assertInvalid(self.rule_based(seed=7), "calibration.seed")
+        self.assertInvalid(config(seed="seven"), "seed")
+        self.assertEqual(ConfigLoader.validate_config(config(seed=7)).seed, 7)
 
 
 class EventTests(SchemaTests):

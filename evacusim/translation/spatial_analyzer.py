@@ -554,7 +554,7 @@ class SpatialAnalyzer:
 
         visible_blocked = []
 
-        for exit_name in blocked_exits:
+        for exit_name in sorted(blocked_exits):
             exit_pos = exits_to_check.get(exit_name)
             # Determine whether this is a pre-blocked exit (navmesh removed).
             # Pre-blocked exits are surrounded by obstacle polygons that define

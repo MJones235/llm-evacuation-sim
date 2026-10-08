@@ -19,6 +19,7 @@ from evacusim.jps.multi_level_simulation import (
 )
 from evacusim.jps.simulation_interface import PedestrianSimulation
 from evacusim.utils.logger import get_logger
+from evacusim.utils.seeding import derive_seed
 
 logger = get_logger(__name__)
 
@@ -64,7 +65,7 @@ class JuPedSimSetup:
                 levels=sim.levels,
                 initially_blocked_exits=initially_blocked_exits,
                 escalator_config=as_dict(sim.escalators) if sim.escalators else None,
-                escalator_seed=params.calibration.seed if params.calibration else 0,
+                escalator_seed=derive_seed(params.seed, "escalators"),
             )
             jps_sim.clock_offset_s = sim.start_time_s
             logger.info("Multi-level JuPedSim simulation created successfully")

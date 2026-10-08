@@ -489,7 +489,6 @@ class CalibrationConfig(Section):
     """Normal operations: passengers arrive over time from observed usage data."""
 
     enabled: bool = False
-    seed: int = 0
     entrance_usage_csv: str = Field(description="Per-entrance arrivals per interval.")
     timetable_csv: str | None = Field(None, description="Train arrivals and alightings.")
     entrance_level: LevelId = "0"
@@ -577,7 +576,11 @@ def as_dict(section: BaseModel) -> dict[str, Any]:
 class RunConfig(Section):
     """Every parameter of one simulation run."""
 
-    seed: int = Field(0, description="Master random seed.")
+    seed: int = Field(
+        0,
+        description="Master random seed; every random component's seed is derived from it "
+        "(see evacusim.utils.seeding). Same seed and config, same run.",
+    )
     simulation: SimulationConfig
     agents: AgentsConfig
     events: list[Event] = Field(default_factory=list)

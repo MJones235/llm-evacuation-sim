@@ -787,7 +787,7 @@ class HybridSimulationRunner:
                                 )
                             )
                         }
-                        for _exit_name in list(self.event_manager.active_train_exits):
+                        for _exit_name in sorted(self.event_manager.active_train_exits):
                             for _cid in self.jps_sim.board_agents_on_platform(
                                 _exit_name,
                                 agent_destinations=self.agent_destinations,
@@ -988,7 +988,7 @@ class HybridSimulationRunner:
                                     else:
                                         extras = pending - set(current_group)
                                         if extras:
-                                            current_group = list(current_group) + list(extras)
+                                            current_group = list(current_group) + sorted(extras)
                                             logger.info(
                                                 f"Added {len(extras)} recently-transferred "
                                                 f"agent(s) to current decision batch: {extras}"

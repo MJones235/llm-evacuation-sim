@@ -18,6 +18,7 @@ from evacusim.jps.simulation_interface import PedestrianSimulation
 from evacusim.setup.agent_factory import AgentFactory
 from evacusim.setup.spawn_manager import SpawnManager
 from evacusim.utils.logger import get_logger
+from evacusim.utils.seeding import derive_seed
 from evacusim.utils.walking_speed import sample_walking_speed
 
 logger = get_logger(__name__)
@@ -77,9 +78,12 @@ class AgentManager:
         # ------------------------------------------------------------------
         # Determine number of agents
         num_agents = agents.count
+        population_seed = derive_seed(params.seed, "population")
 
         # Generate spawn positions
-        spawn_positions = SpawnManager.generate_spawn_positions(jps_sim, num_agents)
+        spawn_positions = SpawnManager.generate_spawn_positions(
+            jps_sim, num_agents, seed=population_seed
+        )
 
         # Remove any candidate position that falls too close to a pre-spawned
         # director agent (fire marshal, RCI staff, etc.).  The position
@@ -131,7 +135,9 @@ class AgentManager:
             num_agents = actual_count
 
         # Create agent configurations
-        agents_config, injured_agents = AgentFactory.create_agents(num_agents, agents)
+        agents_config, injured_agents = AgentFactory.create_agents(
+            num_agents, agents, seed=population_seed
+        )
 
         # Add agents to JuPedSim
         AgentManager._add_agents_to_jupedsim(

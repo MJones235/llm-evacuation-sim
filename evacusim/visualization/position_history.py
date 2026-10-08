@@ -107,8 +107,8 @@ class PositionHistoryTracker:
             "time": current_time,
             "positions": dict(agent_positions),  # Copy to avoid mutation
             "agent_states": agent_states,
-            "blocked_exits": list(blocked_exits),
-            "active_train_exits": list(active_train_exits)
+            "blocked_exits": sorted(blocked_exits),
+            "active_train_exits": sorted(active_train_exits)
             if active_train_exits is not None
             else [],
         }

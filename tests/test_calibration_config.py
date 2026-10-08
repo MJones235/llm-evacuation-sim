@@ -16,7 +16,6 @@ def _base_calibration(**over):
         "decision": {"engine": "rule_based"},
         "calibration": {
             "enabled": True,
-            "seed": 7,
             "entrance_usage_csv": "u.csv",
             "timetable_csv": "t.csv",
             "entrance_dest_exits": ["train_platform_1"],

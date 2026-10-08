@@ -23,7 +23,7 @@ class AgentFactory:
     def create_agents(
         num_agents: int,
         agents: AgentsConfig,
-        seed: int = 42,
+        seed: int,
     ) -> tuple[list[dict], set[int]]:
         """
         Create agent configurations with randomized attributes.
