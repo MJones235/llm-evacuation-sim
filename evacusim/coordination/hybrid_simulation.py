@@ -35,7 +35,7 @@ from evacusim.coordination.observation_coordinator import ObservationCoordinator
 from evacusim.coordination.simulation_state_queries import SimulationStateQueries
 from evacusim.decision.action_executor import ActionExecutor
 from evacusim.decision.decision_processor import DecisionProcessor
-from evacusim.decision.situation import goal_is_train_oriented
+from evacusim.decision.situation import goal_is_train_oriented, zone_containing
 from evacusim.jps.exit_tracker import ExitTracker
 from evacusim.jps.simulation_interface import PedestrianSimulation
 from evacusim.metrics.llm_cost_reporter import FinancialReporter
@@ -611,23 +611,14 @@ class HybridSimulationRunner:
             )
 
     def _get_zone_id_for_agent(self, agent_id: str) -> str | None:
-        """Return the zone_id the given agent is currently in, or None."""
+        """The smallest named zone the agent is in (e.g. ``platform_1``, not ``level_-1``).
+
+        Used to address zone-specific PA announcements and staff directives.
+        """
         pos = self.state_queries.get_agent_position(agent_id)
         if pos is None:
             return None
-        zones_polygons = getattr(self.action_translator, "zones_polygons", {})
-        if not zones_polygons:
-            return None
-        from shapely.geometry import Point as _Point
-
-        pt = _Point(pos)
-        for z_id, poly in zones_polygons.items():
-            try:
-                if poly.covers(pt) or poly.contains(pt):
-                    return z_id
-            except Exception:
-                pass
-        return None
+        return zone_containing(pos, getattr(self.action_translator, "zones_polygons", {}))
 
     def _bootstrap_initial_decisions(self) -> None:
         """Run one decision cycle at the configured time before the first step.
