@@ -1700,7 +1700,7 @@ class DecisionProcessor:
                                         raw_action = await asyncio.to_thread(
                                             agent.act, attempt_action_spec
                                         )
-                            except asyncio.TimeoutError:
+                            except TimeoutError:
                                 timeout_secs = self._per_agent_timeout_secs
                                 logger.warning(
                                     f"{agent_id}: decision timed out after {timeout_secs:.0f}s — "

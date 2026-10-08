@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "evacusim"
 version = "0.1.0"
 description = "Reusable LLM-driven evacuation simulation framework (JuPedSim + Concordia)"
-requires-python = ">=3.10"
+requires-python = ">=3.12"  # gdm-concordia requires 3.12
 dependencies = [
     # Pedestrian physics
     "jupedsim>=1.3.1",
@@ -39,7 +39,7 @@ include = ["evacusim*"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 # pycodestyle, pyflakes, isort, bugbear, pyupgrade, simplify.
@@ -55,6 +55,6 @@ ignore = [
 testpaths = ["tests"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
