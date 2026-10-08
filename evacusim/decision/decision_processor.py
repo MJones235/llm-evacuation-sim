@@ -55,7 +55,7 @@ class DecisionProcessor:
     """Runs decision cycles: perceive, decide, record, execute.
 
     Args:
-        concordia_agents: Agent entities by id (Concordia entities for the LLM
+        agents: Agent entities by id (Concordia entities for the LLM
             engine, placeholders for the rule-based engine); live.
         exited_agents: Ids of agents who have left the simulation; live.
         action_translator: Turns decision payloads into simulation commands.
@@ -78,7 +78,7 @@ class DecisionProcessor:
 
     def __init__(
         self,
-        concordia_agents: dict[str, Any],
+        agents: dict[str, Any],
         exited_agents: set[str],
         action_translator,
         action_executor,
@@ -97,7 +97,7 @@ class DecisionProcessor:
         decision_prompt_template_path: str | None = None,
         decision_engine: DecisionEngine | None = None,
     ):
-        self.concordia_agents = concordia_agents
+        self.agents = agents
         self.exited_agents = exited_agents
         self.action_translator = action_translator
         self.action_executor = action_executor
@@ -139,7 +139,7 @@ class DecisionProcessor:
             from evacusim.decision.llm_prompt import DecisionPromptBuilder
 
             decision_engine = LLMDecisionEngine(
-                agents=concordia_agents,
+                agents=agents,
                 prompt_builder=DecisionPromptBuilder(
                     exit_registry=action_translator.exit_registry,
                     exit_semantic_tags=station_layout.get("exit_semantic_tags", {}),
@@ -239,10 +239,8 @@ class DecisionProcessor:
         for agent_id in sorted(self.exited_agents - self._released):
             self.on_agent_exit(agent_id)
             self._released.add(agent_id)
-        candidates = agent_ids if agent_ids is not None else list(self.concordia_agents)
-        deciding = [
-            a for a in candidates if a in self.concordia_agents and a not in self.exited_agents
-        ]
+        candidates = agent_ids if agent_ids is not None else list(self.agents)
+        deciding = [a for a in candidates if a in self.agents and a not in self.exited_agents]
 
         # Zones once per cycle, not once per agent per lookup.
         zones_polygons = getattr(self.action_translator, "zones_polygons", {})

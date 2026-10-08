@@ -96,7 +96,7 @@ def _make_processor(agents_config, positions):
     translator = ActionTranslator(layout, jps)
     executor = _RecordingExecutor()
     dp = DecisionProcessor(
-        concordia_agents={c["id"]: NoOpAgent(c["id"], c.get("name")) for c in agents_config},
+        agents={c["id"]: NoOpAgent(c["id"], c.get("name")) for c in agents_config},
         exited_agents=set(),
         action_translator=translator,
         action_executor=executor,

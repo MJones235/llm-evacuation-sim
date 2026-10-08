@@ -19,7 +19,7 @@ class ExitTracker:
 
     def __init__(
         self,
-        concordia_agents: dict[str, Any],
+        agents: dict[str, Any],
         exited_agents: set[str],
         agent_destinations: dict[str, str],
         jps_sim: PedestrianSimulation,
@@ -31,7 +31,7 @@ class ExitTracker:
         Initialize exit tracker.
 
         Args:
-            concordia_agents: Dict of agent_id -> Concordia entity
+            agents: Dict of agent_id -> Concordia entity
             exited_agents: Set of agent IDs who have exited
             agent_destinations: Dict of agent_id -> current exit name
             jps_sim: Pedestrian simulation instance (implements PedestrianSimulation)
@@ -39,7 +39,7 @@ class ExitTracker:
             exit_validation_radius: Radius within which agent must be near exit to count as evacuated
             exit_log: Shared list that each evacuation is appended to (owned by the runner)
         """
-        self.concordia_agents = concordia_agents
+        self.agents = agents
         self.exited_agents = exited_agents
         self.agent_destinations = agent_destinations
         self.jps_sim = jps_sim
@@ -77,7 +77,7 @@ class ExitTracker:
                 self.last_known_levels[agent_id] = str(tracked_levels_now[agent_id])
 
         # Log agent count for debugging
-        total_agents = len(self.concordia_agents)
+        total_agents = len(self.agents)
         active_agents = len(current_positions)
         exited_count = len(self.exited_agents)
 
@@ -85,7 +85,7 @@ class ExitTracker:
         newly_exited = []
         failed_validations = []
 
-        for agent_id in list(self.concordia_agents.keys()):
+        for agent_id in list(self.agents.keys()):
             if agent_id not in self.exited_agents and agent_id not in current_positions:
                 # Multi-level transfers can produce a one-step gap between an
                 # agent leaving one JuPedSim instance and becoming visible in

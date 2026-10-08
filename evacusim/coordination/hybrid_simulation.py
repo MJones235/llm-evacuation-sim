@@ -213,9 +213,9 @@ class HybridSimulationRunner:
         # When pre_built_systems is provided the systems were already set up (and
         # their director agents already added to JuPedSim) before random passengers
         # were spawned, preventing spawn-position collisions.
-        self._staff_systems: list[Any] = []
+        self.staff: list[Any] = []
         if pre_built_systems is not None:
-            self._staff_systems = list(pre_built_systems)
+            self.staff = list(pre_built_systems)
             self.agent_roles.update(pre_built_agent_roles or {})
         else:
             self._init_systems(systems_config or {}, jupedsim_simulation, station_layout)
@@ -232,7 +232,7 @@ class HybridSimulationRunner:
         self.observation_generator = ObservationGenerator(station_layout, self.jps_sim)
 
         # Build Concordia agents (each with their own memory bank)
-        self.concordia_agents: dict[str, entity_lib.Entity] = {}
+        self.agents: dict[str, entity_lib.Entity] = {}
         self.agent_configs = agents_config
 
         # Agent state tracking (three independent dimensions)
@@ -261,14 +261,12 @@ class HybridSimulationRunner:
             # Build agents asynchronously for faster initialization
             import asyncio
 
-            self.concordia_agents, injured_agents = asyncio.run(
-                agent_builder.build_agents(agents_config)
-            )
+            self.agents, injured_agents = asyncio.run(agent_builder.build_agents(agents_config))
             self.agent_injured = injured_agents
         else:
             from evacusim.coordination.noop_agent import NoOpAgent
 
-            self.concordia_agents = {
+            self.agents = {
                 cfg["id"]: NoOpAgent(cfg["id"], cfg.get("name")) for cfg in agents_config
             }
             self.agent_injured = {cfg["id"] for cfg in agents_config if cfg.get("is_injured")}
@@ -276,7 +274,7 @@ class HybridSimulationRunner:
                 "Non-LLM decision engine (%s) selected — skipped Concordia agent "
                 "construction for %d agents (no embedder, no model calls).",
                 type(decision_engine).__name__,
-                len(self.concordia_agents),
+                len(self.agents),
             )
 
         # Tracking
@@ -301,7 +299,7 @@ class HybridSimulationRunner:
         self.exit_log: list[dict[str, Any]] = []
 
         self.exit_tracker = ExitTracker(
-            concordia_agents=self.concordia_agents,
+            agents=self.agents,
             exited_agents=self.exited_agents,
             agent_destinations=self.agent_destinations,
             jps_sim=jupedsim_simulation,
@@ -335,7 +333,7 @@ class HybridSimulationRunner:
 
         # Decision processing
         self.decision_processor = DecisionProcessor(
-            concordia_agents=self.concordia_agents,
+            agents=self.agents,
             exited_agents=self.exited_agents,
             action_translator=self.action_translator,
             action_executor=self.action_executor,
@@ -359,7 +357,7 @@ class HybridSimulationRunner:
 
         # Observation coordination
         self.observation_coordinator = ObservationCoordinator(
-            concordia_agents=self.concordia_agents,
+            agents=self.agents,
             exited_agents=self.exited_agents,
             observation_generator=self.observation_generator,
             state_queries=self.state_queries,
@@ -412,7 +410,7 @@ class HybridSimulationRunner:
         # Configure via performance.decision_groups (default 3). Set to 1 for
         # all-at-once behaviour each decision tick.
         self._decision_groups: int = max(1, int(self.performance_config.get("decision_groups", 3)))
-        agent_ids_sorted = sorted(self.concordia_agents.keys())
+        agent_ids_sorted = sorted(self.agents.keys())
         n = len(agent_ids_sorted)
         self._agent_groups: list[list[str]] = [
             agent_ids_sorted[i :: self._decision_groups] for i in range(self._decision_groups)
@@ -463,7 +461,7 @@ class HybridSimulationRunner:
         """Insert a runtime-spawned passenger into the simulation and pipeline.
 
         Adds the agent to JuPedSim, registers an LLM-free ``NoOpAgent`` in the
-        shared ``concordia_agents`` map (so exit/observation/decision machinery
+        shared ``agents`` map (so exit/observation/decision machinery
         picks it up on the next cycle), and hands its config to the decision
         processor.  The agent spawns holding at its spawn point (no implicit
         destination) so it doesn't move on the level's default street-exit
@@ -509,7 +507,7 @@ class HybridSimulationRunner:
 
         from evacusim.coordination.noop_agent import NoOpAgent
 
-        self.concordia_agents[agent_id] = NoOpAgent(agent_id, cfg.get("name"))
+        self.agents[agent_id] = NoOpAgent(agent_id, cfg.get("name"))
         self.agent_configs.append(cfg)
         self.decision_processor.register_agent(cfg)
         # The staggered decision groups are fixed at init from the initial
@@ -584,7 +582,7 @@ class HybridSimulationRunner:
         """
         if self.spawn_controller is None:
             return False
-        live = len(self.concordia_agents) - len(self.exited_agents)
+        live = len(self.agents) - len(self.exited_agents)
         if live > 0:
             return False
         nxt = self.spawn_controller.peek_next_time()
@@ -603,12 +601,12 @@ class HybridSimulationRunner:
                 continue
             system = DirectorSystem(name, cfg)
             system.setup(jps_sim, station_layout, self.agent_roles)
-            self._staff_systems.append(system)
+            self.staff.append(system)
             logger.info(f"System '{name}' initialised ({len(system.agent_ids)} director agent(s))")
 
     def _step_systems(self, current_sim_time: float) -> None:
         """Let staff (e.g. RCIs, fire brigade) move and give directives."""
-        for system in self._staff_systems:
+        for system in self.staff:
             system.step(
                 current_sim_time=current_sim_time,
                 jps_sim=self.jps_sim,
@@ -779,10 +777,7 @@ class HybridSimulationRunner:
         if (
             self.spawn_controller is not None
             and getattr(self.jps_sim, "is_complete", False)
-            and (
-                self.spawn_controller.remaining > 0
-                or len(self.concordia_agents) > len(self.exited_agents)
-            )
+            and (self.spawn_controller.remaining > 0 or len(self.agents) > len(self.exited_agents))
         ):
             self.jps_sim.is_complete = False
 
@@ -907,7 +902,7 @@ class HybridSimulationRunner:
         with self.perf_timer.measure("event_checking"):
             new_event_fired = self.event_manager.check_and_trigger_events(
                 self.current_sim_time,
-                self.concordia_agents,
+                self.agents,
                 message_system=self.message_system,
                 exited_agents=self.exited_agents,
                 zone_id_for_agent_fn=self._get_zone_id_for_agent,
@@ -936,7 +931,7 @@ class HybridSimulationRunner:
 
         # Staff systems activated "on_event" start acting once any event fires.
         if new_event_fired:
-            for system in self._staff_systems:
+            for system in self.staff:
                 system.notify_event_fired()
         return new_event_fired, critical_event_fired, fired_event_types
 
@@ -1078,7 +1073,7 @@ class HybridSimulationRunner:
                     list(self.message_system.message_history),
                     self.decision_interval,
                     self.max_steps,
-                    len(self.concordia_agents),
+                    len(self.agents),
                     agent_levels,
                 )
 
@@ -1104,7 +1099,7 @@ class HybridSimulationRunner:
             f"{elapsed_time:.1f}s real time"
         )
         print(self.perf_timer.report())
-        print(FinancialReporter.generate_report(self.llm_provider, len(self.concordia_agents)))
+        print(FinancialReporter.generate_report(self.llm_provider, len(self.agents)))
 
         # force=True records the final state even when the last periodic
         # interval falls just past the end time.
@@ -1162,7 +1157,7 @@ class HybridSimulationRunner:
                 self.wait_events,
                 self.decision_interval,
                 self.max_steps,
-                len(self.concordia_agents),
+                len(self.agents),
                 self.perf_timer.report(),
                 self.llm_provider,
                 agent_levels,

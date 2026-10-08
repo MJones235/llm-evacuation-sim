@@ -71,7 +71,7 @@ def _schedule():
 def _make_runner(jps_sim, controller):
     r = HybridSimulationRunner.__new__(HybridSimulationRunner)
     r.jps_sim = jps_sim
-    r.concordia_agents = {}
+    r.agents = {}
     r.agent_configs = []
     r.decision_processor = _FakeProcessor()
     r.spawn_log = []
@@ -87,15 +87,15 @@ class RuntimeSpawnTests(unittest.TestCase):
         r = _make_runner(sim, controller)
 
         HybridSimulationRunner._spawn_arrivals(r, 0.5)
-        self.assertEqual(r.concordia_agents, {})  # nothing due yet
+        self.assertEqual(r.agents, {})  # nothing due yet
 
         HybridSimulationRunner._spawn_arrivals(r, 1.0)
-        self.assertEqual(len(r.concordia_agents), 2)
+        self.assertEqual(len(r.agents), 2)
         self.assertEqual(len(sim.added), 2)
         self.assertEqual(len(r.decision_processor.registered), 2)
         self.assertEqual(len(r.spawn_log), 2)
         # All spawned agents are LLM-free NoOpAgents.
-        self.assertTrue(all(isinstance(a, NoOpAgent) for a in r.concordia_agents.values()))
+        self.assertTrue(all(isinstance(a, NoOpAgent) for a in r.agents.values()))
         # Level routing preserved: one on "0", one on "-1".
         self.assertEqual({lvl for _, _, lvl in sim.added}, {"0", "-1"})
         # Spawned agents must NOT get the level's default (street-exit) journey:
@@ -105,7 +105,7 @@ class RuntimeSpawnTests(unittest.TestCase):
         self.assertEqual(sim.default_destination_flags, [False, False])
 
         HybridSimulationRunner._spawn_arrivals(r, 100.0)
-        self.assertEqual(len(r.concordia_agents), 3)  # remaining event consumed once
+        self.assertEqual(len(r.agents), 3)  # remaining event consumed once
         self.assertEqual(controller.remaining, 0)
 
     def test_single_level_path(self):
@@ -118,7 +118,7 @@ class RuntimeSpawnTests(unittest.TestCase):
         r = _make_runner(sim, controller)
         HybridSimulationRunner._spawn_arrivals(r, 2.0)
         self.assertEqual(len(sim.added), 1)
-        self.assertEqual(len(r.concordia_agents), 1)
+        self.assertEqual(len(r.agents), 1)
 
     def test_failed_insertion_does_not_register(self):
         # Force the first-built agent id to fail physical insertion.
@@ -131,7 +131,7 @@ class RuntimeSpawnTests(unittest.TestCase):
         sim = _FakeMultiSim(fail_ids={"calib_entrance_0"})
         r = _make_runner(sim, controller)
         HybridSimulationRunner._spawn_arrivals(r, 2.0)
-        self.assertEqual(r.concordia_agents, {})
+        self.assertEqual(r.agents, {})
         self.assertEqual(r.decision_processor.registered, [])
         self.assertEqual(r.spawn_log, [])
 
