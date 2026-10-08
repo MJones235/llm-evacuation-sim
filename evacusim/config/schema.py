@@ -581,19 +581,40 @@ class RunConfig(Section):
         description="Master random seed; every random component's seed is derived from it "
         "(see evacusim.utils.seeding). Same seed and config, same run.",
     )
-    simulation: SimulationConfig
-    agents: AgentsConfig
-    events: list[Event] = Field(default_factory=list)
-    systems: dict[str, StaffSystemConfig] = Field(default_factory=dict)
-    station: StationConfig
-    decision: DecisionConfig = Field(default_factory=LLMDecisionConfig)
-    llm: LLMConfig = Field(default_factory=LLMConfig)
-    calibration: CalibrationConfig | None = None
-    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
-    performance: PerformanceConfig = Field(default_factory=PerformanceConfig)
-    output: OutputConfig = Field(default_factory=OutputConfig)
-    video: VideoConfig = Field(default_factory=VideoConfig)
-    prompts: PromptsConfig = Field(default_factory=PromptsConfig)
+    simulation: SimulationConfig = Field(description="Time step, duration, geometry, escalators.")
+    agents: AgentsConfig = Field(description="Initial population: size, personalities, roles.")
+    events: list[Event] = Field(
+        default_factory=list,
+        description="Timed scenario events: alarm, PA announcements, trains, blocked exits.",
+    )
+    systems: dict[str, StaffSystemConfig] = Field(
+        default_factory=dict,
+        description="Staff agents (e.g. RCIs, fire brigade) that direct others, by name.",
+    )
+    station: StationConfig = Field(description="Station knowledge given to agents.")
+    decision: DecisionConfig = Field(
+        default_factory=LLMDecisionConfig,
+        description="Which decision engine chooses agents' actions (``engine: llm`` or "
+        "``engine: rule_based``).",
+    )
+    llm: LLMConfig = Field(
+        default_factory=LLMConfig, description="Language-model settings (LLM engine only)."
+    )
+    calibration: CalibrationConfig | None = Field(
+        None, description="Normal-operations runs: arrivals from usage data."
+    )
+    monitoring: MonitoringConfig = Field(
+        default_factory=MonitoringConfig, description="Zone population time series."
+    )
+    performance: PerformanceConfig = Field(
+        default_factory=PerformanceConfig,
+        description="Decision scheduling, concurrency and logging.",
+    )
+    output: OutputConfig = Field(default_factory=OutputConfig, description="Where results go.")
+    video: VideoConfig = Field(default_factory=VideoConfig, description="MP4 rendering.")
+    prompts: PromptsConfig = Field(
+        default_factory=PromptsConfig, description="Prompt template overrides (LLM engine only)."
+    )
 
     @model_validator(mode="after")
     def _cross_section_rules(self) -> RunConfig:
