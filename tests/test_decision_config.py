@@ -1,56 +1,12 @@
-"""Validation and factory-selection tests for the optional ``decision`` config section."""
+"""Factory-selection tests for the ``decision`` config section.
+
+Schema validation of the section is tested in test_config_schema.py.
+"""
 
 import unittest
 
-from evacusim.config.config_loader import ConfigLoader
 from evacusim.decision.rule_based_decision_engine import RuleBasedDecisionEngine
 from evacusim.setup.simulation_runner_factory import SimulationRunnerFactory
-
-
-class DecisionSectionValidationTests(unittest.TestCase):
-    """`ConfigLoader._validate_decision_section` accepts valid shapes, rejects bad ones."""
-
-    def test_absent_section_is_ok(self):
-        ConfigLoader._validate_decision_section({})
-
-    def test_llm_engine_ok(self):
-        ConfigLoader._validate_decision_section({"decision": {"engine": "llm"}})
-
-    def test_rule_based_with_weights_ok(self):
-        ConfigLoader._validate_decision_section(
-            {
-                "decision": {
-                    "engine": "rule_based",
-                    "crowd_radius_m": 4.0,
-                    "rule_weights": {
-                        "proximity": 0.35,
-                        "visibility": 0.5,
-                        "busyness": 0.05,
-                        "familiarity": 0.1,
-                    },
-                }
-            }
-        )
-
-    def test_non_dict_section_rejected(self):
-        with self.assertRaises(ValueError):
-            ConfigLoader._validate_decision_section({"decision": "rule_based"})
-
-    def test_unknown_engine_rejected(self):
-        with self.assertRaises(ValueError):
-            ConfigLoader._validate_decision_section({"decision": {"engine": "telepathy"}})
-
-    def test_negative_weight_rejected(self):
-        with self.assertRaises(ValueError):
-            ConfigLoader._validate_decision_section(
-                {"decision": {"engine": "rule_based", "rule_weights": {"proximity": -1}}}
-            )
-
-    def test_nonpositive_crowd_radius_rejected(self):
-        with self.assertRaises(ValueError):
-            ConfigLoader._validate_decision_section(
-                {"decision": {"engine": "rule_based", "crowd_radius_m": 0}}
-            )
 
 
 class DecisionEngineFactoryTests(unittest.TestCase):

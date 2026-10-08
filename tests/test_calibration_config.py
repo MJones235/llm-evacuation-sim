@@ -1,10 +1,12 @@
-"""Feature A: calibration config validation + factory wiring."""
+"""Calibration factory wiring.
+
+Schema validation of the section is tested in test_config_schema.py.
+"""
 
 import tempfile
 import unittest
 from pathlib import Path
 
-from evacusim.config.config_loader import ConfigLoader
 from evacusim.setup.simulation_runner_factory import SimulationRunnerFactory
 
 
@@ -26,69 +28,6 @@ def _base_calibration(**over):
     }
     cfg["calibration"].update(over)
     return cfg
-
-
-class CalibrationValidationTests(unittest.TestCase):
-    def test_valid_passes(self):
-        ConfigLoader._validate_calibration_section(_base_calibration())
-
-    def test_disabled_or_absent_is_ignored(self):
-        ConfigLoader._validate_calibration_section({})
-        ConfigLoader._validate_calibration_section(
-            {"calibration": {"enabled": False, "spawn_points": {}}}
-        )
-
-    def test_requires_rule_based_engine(self):
-        cfg = _base_calibration()
-        cfg["decision"] = {"engine": "llm"}
-        with self.assertRaises(ValueError):
-            ConfigLoader._validate_calibration_section(cfg)
-
-    def test_missing_usage_csv_raises(self):
-        cfg = _base_calibration()
-        del cfg["calibration"]["entrance_usage_csv"]
-        with self.assertRaises(ValueError):
-            ConfigLoader._validate_calibration_section(cfg)
-
-    def test_bad_spawn_points_raise(self):
-        with self.assertRaises(ValueError):
-            ConfigLoader._validate_calibration_section(_base_calibration(spawn_points={}))
-        with self.assertRaises(ValueError):
-            ConfigLoader._validate_calibration_section(
-                _base_calibration(spawn_points={"e": {"level": "0", "xy": [1.0]}})
-            )
-
-    def test_bad_seed_and_dest_exits_raise(self):
-        with self.assertRaises(ValueError):
-            ConfigLoader._validate_calibration_section(_base_calibration(seed="seven"))
-        with self.assertRaises(ValueError):
-            ConfigLoader._validate_calibration_section(_base_calibration(entrance_dest_exits="x"))
-
-    def test_simulation_start_time_range(self):
-        base = {
-            "agents": {"count": 0, "knowledge_profiles": {"test": 1}},
-            "simulation": {"network_path": "network", "start_time_s": 27000},
-            "station": {
-                "knowledge": {
-                    "base_memories": ["Test station."],
-                    "profiles": {"test": ["Test knowledge."]},
-                }
-            },
-        }
-        ConfigLoader.validate_config(base)
-        for invalid in (-1, 86400, "07:30", True):
-            cfg = {
-                "agents": {"count": 0, "knowledge_profiles": {"test": 1}},
-                "simulation": {"network_path": "network", "start_time_s": invalid},
-                "station": {
-                    "knowledge": {
-                        "base_memories": ["Test station."],
-                        "profiles": {"test": ["Test knowledge."]},
-                    }
-                },
-            }
-            with self.assertRaises(ValueError):
-                ConfigLoader.validate_config(cfg)
 
 
 class FactoryWiringTests(unittest.TestCase):
