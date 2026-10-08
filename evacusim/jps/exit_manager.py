@@ -7,9 +7,9 @@ to exits in the station environment.
 
 from typing import Any
 
-from evacusim.utils.logger import get_logger
-from evacusim.jps.stage_manager import StageManager
 from evacusim.jps.geometry_processor import GeometryProcessor
+from evacusim.jps.stage_manager import StageManager
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -127,8 +127,7 @@ class ExitManager:
             evacuation_journeys[entrance_name] = journey_id
 
             logger.info(
-                f"Created evacuation exit '{entrance_name}' "
-                f"(exit={exit_id}, journey={journey_id})"
+                f"Created evacuation exit '{entrance_name}' (exit={exit_id}, journey={journey_id})"
             )
 
         if not evacuation_exits and self.entrance_areas:
@@ -161,7 +160,9 @@ class ExitManager:
         for exit_name, polygon in self.train_entrance_areas.items():
             coords = list(polygon.exterior.coords)[:-1]
             if len(coords) < 3:
-                logger.warning(f"Train entrance '{exit_name}' has invalid polygon (<3 points), skipping.")
+                logger.warning(
+                    f"Train entrance '{exit_name}' has invalid polygon (<3 points), skipping."
+                )
                 continue
             try:
                 exit_id = self.stage_manager.create_exit_at_coordinates(
@@ -265,7 +266,7 @@ class ExitManager:
 
         exit_id = self.stage_manager.create_exit_at_coordinates(exit_name, exit_coords)
         logger.info(
-            f"Created {exit_size}m x {exit_size}m exit '{exit_name}' " f"at {centroid.coords[0]}"
+            f"Created {exit_size}m x {exit_size}m exit '{exit_name}' at {centroid.coords[0]}"
         )
         return exit_id
 

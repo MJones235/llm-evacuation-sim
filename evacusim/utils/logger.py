@@ -10,12 +10,11 @@ Provides centralized logging setup with multiple handlers:
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
 
 
 def setup_logger(
     name: str = "station_jupedsim",
-    log_file: Optional[Path] = None,
+    log_file: Path | None = None,
     console_level: int = logging.INFO,
     file_level: int = logging.DEBUG,
 ) -> logging.Logger:

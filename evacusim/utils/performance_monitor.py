@@ -13,8 +13,8 @@ class PerformanceTimer:
     """Simple performance timer for profiling simulation bottlenecks."""
 
     def __init__(self):
-        self.timings = {}       # name -> total wall-clock seconds (sequential) OR max (parallel)
-        self.counts = {}        # name -> number of calls
+        self.timings = {}  # name -> total wall-clock seconds (sequential) OR max (parallel)
+        self.counts = {}  # name -> number of calls
         self.parallel_operations = set()  # Track which operations run in parallel
         # For parallel ops we track sum (total CPU across threads) and max (longest single call)
         self._parallel_sum: dict[str, float] = {}
@@ -30,7 +30,7 @@ class PerformanceTimer:
             # For parallel operations track both the max (wall-clock proxy) and
             # cumulative sum (total CPU time across all threads/coroutines).
             self.parallel_operations.add(name)
-            self.timings[name] = max(self.timings[name], duration)   # max = wall-clock proxy
+            self.timings[name] = max(self.timings[name], duration)  # max = wall-clock proxy
             self.counts[name] += 1
             self._parallel_sum[name] = self._parallel_sum.get(name, 0.0) + duration
             prev_min = self._parallel_min.get(name, float("inf"))

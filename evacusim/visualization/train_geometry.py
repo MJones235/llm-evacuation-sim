@@ -23,9 +23,7 @@ def compute_train_polygons(
         return {}
     level = geometry.get("levels", {}).get("level_-1", geometry)
     walkable = level.get("walkable_areas", {})
-    floor_polygons = [
-        Polygon(coords).buffer(0) for coords in walkable.values() if len(coords) >= 3
-    ]
+    floor_polygons = [Polygon(coords).buffer(0) for coords in walkable.values() if len(coords) >= 3]
     floor = unary_union(floor_polygons) if floor_polygons else None
 
     trains: dict[str, list[tuple[float, float]]] = {}

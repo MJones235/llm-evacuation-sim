@@ -10,7 +10,7 @@ This module is responsible for:
 import random
 
 from evacusim.utils.logger import get_logger
-from evacusim.utils.station_agent import OCEAN_ANCHORS, build_personality_anchor
+from evacusim.utils.station_agent import build_personality_anchor
 
 logger = get_logger(__name__)
 

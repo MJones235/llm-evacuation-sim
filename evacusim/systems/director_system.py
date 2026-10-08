@@ -102,6 +102,7 @@ logger = get_logger(__name__)
 # Phase normalisation helper (module-level so it can be unit-tested)
 # ---------------------------------------------------------------------------
 
+
 def _normalize_phases(system_config: dict) -> list[dict]:
     """
     Convert either a flat config or a ``phases`` list into a normalised list
@@ -161,6 +162,7 @@ def _normalize_phases(system_config: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 # DirectorSystem
 # ---------------------------------------------------------------------------
+
 
 class DirectorSystem:
     """
@@ -392,13 +394,18 @@ class DirectorSystem:
                 continue
 
             # Periodic debug log so phase/level/position can be verified in logs
-            if int(current_sim_time) % 10 == 0 and (current_sim_time % 1.0) < self.dt if hasattr(self, 'dt') else int(current_sim_time) % 10 == 0:
+            if (
+                int(current_sim_time) % 10 == 0 and (current_sim_time % 1.0) < self.dt
+                if hasattr(self, "dt")
+                else int(current_sim_time) % 10 == 0
+            ):
                 current_level = (
-                    jps_sim.agent_levels.get(agent_id)
-                    if hasattr(jps_sim, "agent_levels") else "?"
+                    jps_sim.agent_levels.get(agent_id) if hasattr(jps_sim, "agent_levels") else "?"
                 )
                 grace_until = self._phase_transition_grace_until.get(agent_id, 0.0)
-                grace_note = f" [grace until t={grace_until:.0f}s]" if grace_until > current_sim_time else ""
+                grace_note = (
+                    f" [grace until t={grace_until:.0f}s]" if grace_until > current_sim_time else ""
+                )
                 logger.debug(
                     f"[{self.system_name}] {agent_id} t={current_sim_time:.1f}s "
                     f"phase={current_idx} movement={phase['movement']} "
@@ -409,9 +416,7 @@ class DirectorSystem:
             if phase["movement"] == "zone_patrol":
                 self._step_patrol(agent_id, phase, current_sim_time, jps_sim, position)
             elif phase["movement"] == "hold":
-                self._step_hold_agent(
-                    agent_id, phase, position, current_sim_time, jps_sim
-                )
+                self._step_hold_agent(agent_id, phase, position, current_sim_time, jps_sim)
 
             # Broadcast directive
             if not phase["message"] and not phase["messages_by_zone"]:
@@ -569,7 +574,10 @@ class DirectorSystem:
             return
 
         # Periodic refresh to resist crowd-pressure drift
-        if current_sim_time - self._last_hold_refresh.get(agent_id, 0.0) >= self._HOLD_REFRESH_INTERVAL:
+        if (
+            current_sim_time - self._last_hold_refresh.get(agent_id, 0.0)
+            >= self._HOLD_REFRESH_INTERVAL
+        ):
             try:
                 jps_sim.set_agent_target(agent_id, hold_target)
             except Exception:
@@ -688,7 +696,8 @@ class DirectorSystem:
         candidates = [
             (math.dist(position, e.landing_point), name)
             for name, e in escalators.escalators.items()
-            if e.spec.from_level == str(current_level) and e.spec.to_level == str(target_level)
+            if e.spec.from_level == str(current_level)
+            and e.spec.to_level == str(target_level)
             and not e.conveyor.closed
         ]
         if not candidates:

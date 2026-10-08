@@ -11,10 +11,10 @@ Handles:
 import re
 from typing import Any
 
-from evacusim.utils.logger import get_logger
 from evacusim.systems.messaging.conversation_tracker import ConversationTracker
 from evacusim.systems.messaging.message_memory import MessageMemory
 from evacusim.systems.messaging.message_parser import MessageParser
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -297,9 +297,7 @@ class MessageSystem:
         effective_radius = radius if radius is not None else self.default_radius
         nearby_agents = state_queries.get_nearby_agents(sender_id, effective_radius)
         recipient_ids = [
-            a["id"]
-            for a in nearby_agents
-            if a["id"] != sender_id and a["id"] not in exited_agents
+            a["id"] for a in nearby_agents if a["id"] != sender_id and a["id"] not in exited_agents
         ]
 
         if not recipient_ids:
@@ -332,9 +330,7 @@ class MessageSystem:
                     "message_type": "directive",
                 }
             )
-            self.conversation_tracker.track_message(
-                sender_id, recipient_id, text, current_sim_time
-            )
+            self.conversation_tracker.track_message(sender_id, recipient_id, text, current_sim_time)
             delivered += 1
 
         if delivered:

@@ -190,7 +190,11 @@ class SpatialAnalyzer:
                             )
                             if m:
                                 letter, location, role = m.groups()
-                                direction = "down" if (location == "concourse" and role == "departure") else "up"
+                                direction = (
+                                    "down"
+                                    if (location == "concourse" and role == "departure")
+                                    else "up"
+                                )
                                 if esc_id == f"{letter.lower()}_{direction}":
                                     level_exits[exit_name] = (
                                         zone_poly.centroid.x,
@@ -300,7 +304,8 @@ class SpatialAnalyzer:
         # Filter out exits that are not yet active (e.g. train exits before train arrives).
         if inactive_exits:
             exits_to_check = {
-                name: pos for name, pos in exits_to_check.items()
+                name: pos
+                for name, pos in exits_to_check.items()
                 if self._canonical_visible_exit_key(name) not in inactive_exits
             }
 
@@ -323,11 +328,10 @@ class SpatialAnalyzer:
                 # When close enough to discover the barrier, remove from normal
                 # visible exits so it only appears in blocked observations.
                 dist_sq = (position[0] - pos[0]) ** 2 + (position[1] - pos[1]) ** 2
-                return dist_sq > _DISCOVERY_RADIUS ** 2
+                return dist_sq > _DISCOVERY_RADIUS**2
 
             exits_to_check = {
-                name: pos for name, pos in exits_to_check.items()
-                if _keep_exit(name, pos)
+                name: pos for name, pos in exits_to_check.items() if _keep_exit(name, pos)
             }
 
         # Prefer level-specific obstacles for line-of-sight checks.
@@ -352,9 +356,8 @@ class SpatialAnalyzer:
                 if agent_level not in self._walkable_union_cache:
                     try:
                         from shapely.ops import unary_union
-                        polys = list(
-                            level_sim.geometry_manager.walkable_areas.values()
-                        )
+
+                        polys = list(level_sim.geometry_manager.walkable_areas.values())
                         self._walkable_union_cache[agent_level] = (
                             unary_union(polys) if polys else None
                         )
@@ -401,7 +404,9 @@ class SpatialAnalyzer:
             else:
                 dist_cat = "visible in distance"
 
-            visible_exits.append({"id": canonical_key, "name": exit_info["name"], "distance": dist_cat})
+            visible_exits.append(
+                {"id": canonical_key, "name": exit_info["name"], "distance": dist_cat}
+            )
 
         return visible_exits
 
@@ -537,6 +542,7 @@ class SpatialAnalyzer:
                     if agent_level not in self._walkable_union_cache:
                         try:
                             from shapely.ops import unary_union
+
                             polys = list(level_sim.geometry_manager.walkable_areas.values())
                             self._walkable_union_cache[agent_level] = (
                                 unary_union(polys) if polys else None
@@ -574,9 +580,7 @@ class SpatialAnalyzer:
             if exit_pos is None:
                 continue
 
-            distance = (
-                (position[0] - exit_pos[0]) ** 2 + (position[1] - exit_pos[1]) ** 2
-            ) ** 0.5
+            distance = ((position[0] - exit_pos[0]) ** 2 + (position[1] - exit_pos[1]) ** 2) ** 0.5
 
             if is_pre_blocked:
                 # Obstacle-based LOS cannot work for pre-blocked exits (the shaft
@@ -595,7 +599,9 @@ class SpatialAnalyzer:
                 _RUNTIME_DISCOVERY_RADIUS = 12.0
                 if distance > _RUNTIME_DISCOVERY_RADIUS:
                     continue
-                if not self._has_line_of_sight(position, exit_pos, level_obstacles, level_walkable_geom):
+                if not self._has_line_of_sight(
+                    position, exit_pos, level_obstacles, level_walkable_geom
+                ):
                     continue
 
             if distance < 5:
@@ -606,9 +612,7 @@ class SpatialAnalyzer:
                 dist_cat = "visible in the distance"
 
             display_name = (
-                self.exit_registry.get_display_name(exit_name)
-                if self.exit_registry
-                else exit_name
+                self.exit_registry.get_display_name(exit_name) if self.exit_registry else exit_name
             )
             visible_blocked.append({"name": display_name, "distance": dist_cat})
 

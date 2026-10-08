@@ -28,10 +28,10 @@ _PASSENGER_COLOURS: tuple[str, str] = ("red", "darkred")
 # Any role not listed here falls through to the fallback palette below.
 # ---------------------------------------------------------------------------
 _ROLE_COLOURS: dict[str, tuple[str, str]] = {
-    "Fire Marshal":              ("#FFE000", "#B8A000"),   # yellow
-    "Fire Brigade Officer":      ("#FF6600", "#993300"),   # orange
-    "Revenue Control Inspector": ("#0080FF", "#004C99"),   # bright blue
-    "Station Controller":        ("#00CC66", "#007A3D"),   # green
+    "Fire Marshal": ("#FFE000", "#B8A000"),  # yellow
+    "Fire Brigade Officer": ("#FF6600", "#993300"),  # orange
+    "Revenue Control Inspector": ("#0080FF", "#004C99"),  # bright blue
+    "Station Controller": ("#00CC66", "#007A3D"),  # green
 }
 
 # Fallback palette for any role not in _ROLE_COLOURS.
@@ -221,7 +221,8 @@ class VideoGenerationHelper:
             # in the main decisions file (older runs that pre-date the final-save fix).
             if not decisions_data.get("agent_roles"):
                 positions_sidecar = decisions_file.parent / (
-                    decisions_file.stem.replace("agent_decisions", "agent_decisions_positions") + ".json"
+                    decisions_file.stem.replace("agent_decisions", "agent_decisions_positions")
+                    + ".json"
                 )
                 if not positions_sidecar.exists():
                     # Generic fallback name
@@ -232,9 +233,7 @@ class VideoGenerationHelper:
                     roles = sidecar.get("agent_roles", {})
                     if roles:
                         decisions_data["agent_roles"] = roles
-                        logger.info(
-                            f"Loaded {len(roles)} agent role(s) from positions sidecar"
-                        )
+                        logger.info(f"Loaded {len(roles)} agent role(s) from positions sidecar")
 
             # Save merged data temporarily
             merged_file = decisions_file.parent / f"{decisions_file.stem}_merged.json"

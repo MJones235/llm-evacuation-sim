@@ -52,16 +52,16 @@ logger = get_logger(__name__)
 
 Point2 = tuple[float, float]
 
-DEFAULT_TIME_GAP = 1.0        # JuPedSim CollisionFreeSpeedModel default
-MIN_AGENT_SEP = 0.45          # JuPedSim rejects centres closer than ~0.4 m
+DEFAULT_TIME_GAP = 1.0  # JuPedSim CollisionFreeSpeedModel default
+MIN_AGENT_SEP = 0.45  # JuPedSim rejects centres closer than ~0.4 m
 SLOT_CLEARANCE = 0.25
 MAX_OVERFLOW_SLOTS = 300
-STRIP_NEAR = 0.05             # boarding strip extends 0.05–0.45 m out from the comb
+STRIP_NEAR = 0.05  # boarding strip extends 0.05–0.45 m out from the comb
 STRIP_FAR = 0.45
-ADMIT_RADIUS = 1.0            # lane head must be this close to the strip to be admitted
-ADMITTED_CLEAR = 0.35         # previous admission counts as "boarding" until this close
-AT_COMB = 0.3                 # a waiting agent this close to the strip simply steps on
-ADMIT_TIMEOUT_S = 20.0        # admitted but still not on after this: back into the queue
+ADMIT_RADIUS = 1.0  # lane head must be this close to the strip to be admitted
+ADMITTED_CLEAR = 0.35  # previous admission counts as "boarding" until this close
+AT_COMB = 0.3  # a waiting agent this close to the strip simply steps on
+ADMIT_TIMEOUT_S = 20.0  # admitted but still not on after this: back into the queue
 
 
 @dataclass
@@ -98,14 +98,19 @@ class _Entry:
 
 
 class EscalatorSystem:
-    def __init__(self, ml: "MultiLevelJuPedSimulation", specs: list[EscalatorSpec],
-                 seed: int = 0, closed_exits: set[str] | None = None):
+    def __init__(
+        self,
+        ml: MultiLevelJuPedSimulation,
+        specs: list[EscalatorSpec],
+        seed: int = 0,
+        closed_exits: set[str] | None = None,
+    ):
         self.ml = ml
         self.seed = int(seed)
         self.escalators: dict[str, _Entry] = {}
         self.queue: dict[str, dict[str, QueueEntry]] = {}
-        self.queued_on: dict[str, str] = {}          # agent -> exit_name (waiting/admitted)
-        self.riding: dict[str, str] = {}             # agent -> exit_name (on a conveyor)
+        self.queued_on: dict[str, str] = {}  # agent -> exit_name (waiting/admitted)
+        self.riding: dict[str, str] = {}  # agent -> exit_name (on a conveyor)
         self.boarding_hold: dict[str, list[tuple[str, str, float]]] = {}
         self.admitted_walking: dict[str, dict[str, str | None]] = {}
         # Last time each escalator admitted or boarded someone (stall diagnostics).
@@ -156,8 +161,14 @@ class EscalatorSystem:
     def _offset_band(spec_comb, near: float, far: float) -> Polygon:
         (ax, ay), (bx, by) = spec_comb.a, spec_comb.b
         nx, ny = spec_comb.floor_normal
-        return Polygon([(ax + nx * near, ay + ny * near), (bx + nx * near, by + ny * near),
-                        (bx + nx * far, by + ny * far), (ax + nx * far, ay + ny * far)])
+        return Polygon(
+            [
+                (ax + nx * near, ay + ny * near),
+                (bx + nx * near, by + ny * near),
+                (bx + nx * far, by + ny * far),
+                (ax + nx * far, ay + ny * far),
+            ]
+        )
 
     def _build_entry(self, spec: EscalatorSpec, index: int, offered: bool = True) -> _Entry:
         level_sim = self.ml.simulations[spec.from_level]
@@ -175,7 +186,9 @@ class EscalatorSystem:
         if offered:
             # Pre-blocked escalators are never offered as exits (as before);
             # their landing position is recorded by GeometryManager instead.
-            level_sim.exit_manager.register_exit(spec.exit_name, stage_id, journey_id, landing_point)
+            level_sim.exit_manager.register_exit(
+                spec.exit_name, stage_id, journey_id, landing_point
+            )
 
         heading = spec.boarding_heading
         line_slots: dict[str, list[Point2]] = {}
@@ -231,21 +244,33 @@ class EscalatorSystem:
                     d = _route_length(to_router, landing, q)
                     if d is not None and d <= out + 3.0:
                         egress_points.append(q)
-        egress = egress_points[0] if egress_points else (
-            spec.egress_target or spec.exit.lane_point("stand", 0.6, heading_out))
+        egress = (
+            egress_points[0]
+            if egress_points
+            else (spec.egress_target or spec.exit.lane_point("stand", 0.6, heading_out))
+        )
         if not egress_points:
             egress_points = [egress]
 
         conveyor = Conveyor(
-            ConveyorParams(spec.length_m, spec.belt_speed, spec.step_depth, spec.stander_step_gap_prob),
+            ConveyorParams(
+                spec.length_m, spec.belt_speed, spec.step_depth, spec.stander_step_gap_prob
+            ),
             rng=random.Random(self.seed * 1000 + index),
         )
         return _Entry(
-            spec=spec, conveyor=conveyor, strip=strip,
+            spec=spec,
+            conveyor=conveyor,
+            strip=strip,
             strip_target=(strip.centroid.x, strip.centroid.y),
-            stage_id=stage_id, journey_id=journey_id, landing_point=landing_point,
-            line_slots=line_slots, apron=apron, join_radius=apron_depth + 1.5,
-            overflow_slots=[], discharge_candidates=candidates,
+            stage_id=stage_id,
+            journey_id=journey_id,
+            landing_point=landing_point,
+            line_slots=line_slots,
+            apron=apron,
+            join_radius=apron_depth + 1.5,
+            overflow_slots=[],
+            discharge_candidates=candidates,
             discharge_area=self._offset_band(spec.exit, 0.0, 0.35 + depth + 0.6).buffer(0.3),
             egress=egress,
             egress_points=egress_points,
@@ -273,8 +298,11 @@ class EscalatorSystem:
                     gy = y0
                     while gy <= y1:
                         p = Point(gx, gy)
-                        if (clear.contains(p) and not keep_clear.contains(p)
-                                and origin.distance(p) <= spec.queue_max_route_m):
+                        if (
+                            clear.contains(p)
+                            and not keep_clear.contains(p)
+                            and origin.distance(p) <= spec.queue_max_route_m
+                        ):
                             d = _route_length(router, (gx, gy), entry.landing_point)
                             if d is not None and d <= spec.queue_max_route_m:
                                 scored.append((d, (round(gx, 3), round(gy, 3))))
@@ -297,7 +325,8 @@ class EscalatorSystem:
 
     def is_in_transit(self, agent_id: str) -> bool:
         return agent_id in self.riding or any(
-            agent_id == held[0] for hold in self.boarding_hold.values() for held in hold)
+            agent_id == held[0] for hold in self.boarding_hold.values() for held in hold
+        )
 
     def is_riding(self, agent_id: str) -> bool:
         return self.is_in_transit(agent_id)
@@ -318,7 +347,11 @@ class EscalatorSystem:
         entry = self.escalators.get(exit_name)
         if entry is None:
             return 0
-        return len(self.queue[exit_name]) + entry.conveyor.rider_count() + len(self.boarding_hold[exit_name])
+        return (
+            len(self.queue[exit_name])
+            + entry.conveyor.rider_count()
+            + len(self.boarding_hold[exit_name])
+        )
 
     def lane_for(self, agent_id: str, exit_name: str) -> str:
         spec = self.escalators[exit_name].spec
@@ -331,8 +364,10 @@ class EscalatorSystem:
         if entry is None:
             return False
         if self.ml.agent_levels.get(agent_id) != entry.spec.from_level:
-            logger.error(f"[ESCALATOR] {agent_id} cannot use {exit_name}: not on level "
-                         f"{entry.spec.from_level}")
+            logger.error(
+                f"[ESCALATOR] {agent_id} cannot use {exit_name}: not on level "
+                f"{entry.spec.from_level}"
+            )
             return False
         current = self.queued_on.get(agent_id)
         if entry.conveyor.closed:
@@ -348,8 +383,9 @@ class EscalatorSystem:
             return True
         if current is not None:
             self.unassign(agent_id)
-        self.queue[exit_name][agent_id] = QueueEntry(lane=self.lane_for(agent_id, exit_name),
-                                                     assigned_s=time_s)
+        self.queue[exit_name][agent_id] = QueueEntry(
+            lane=self.lane_for(agent_id, exit_name), assigned_s=time_s
+        )
         self.queued_on[agent_id] = exit_name
         self._assign_slots(entry.spec.from_level)
         return True
@@ -418,8 +454,9 @@ class EscalatorSystem:
             self.boarding_hold[exit_name].append((agent_id, lane, time_s))
 
     def step(self, dt: float, time_s: float) -> None:
-        positions = {lvl: sim.agent_tracker.get_all_positions()
-                     for lvl, sim in self.ml.simulations.items()}
+        positions = {
+            lvl: sim.agent_tracker.get_all_positions() for lvl, sim in self.ml.simulations.items()
+        }
         pending: dict[str, list[Point2]] = {lvl: [] for lvl in self.ml.simulations}
         for exit_name, entry in self.escalators.items():
             conveyor = entry.conveyor
@@ -490,7 +527,9 @@ class EscalatorSystem:
 
     def _strip_length(self, level: str, letter: str) -> float:
         corridors = self.ml.simulations[level].geometry_manager.escalator_corridors
-        poly = next((p for n, p in corridors.items() if n.startswith(f"esc.{letter}.corridor.")), None)
+        poly = next(
+            (p for n, p in corridors.items() if n.startswith(f"esc.{letter}.corridor.")), None
+        )
         if poly is None:
             return 0.0
         r = list(poly.minimum_rotated_rectangle.exterior.coords)
@@ -528,17 +567,25 @@ class EscalatorSystem:
         spec = entry.spec
         level = spec.to_level
         rider.discharge_attempts += 1
-        nearby = [p for p in positions[level].values()
-                  if entry.discharge_area.contains(Point(p))] + pending[level]
-        spot = next((c for c in entry.discharge_candidates[rider.lane]
-                     if all(math.dist(c, p) >= MIN_AGENT_SEP for p in nearby)), None)
+        nearby = [
+            p for p in positions[level].values() if entry.discharge_area.contains(Point(p))
+        ] + pending[level]
+        spot = next(
+            (
+                c
+                for c in entry.discharge_candidates[rider.lane]
+                if all(math.dist(c, p) >= MIN_AGENT_SEP for p in nearby)
+            ),
+            None,
+        )
         if spot is None:
             return False
         to_sim = self.ml.simulations[level]
         base = self.ml.agent_base_speed.get(rider.agent_id, 1.34)
         try:
-            to_sim.add_agent(rider.agent_id, spot, walking_speed=base,
-                             assign_default_destination=False)
+            to_sim.add_agent(
+                rider.agent_id, spot, walking_speed=base, assign_default_destination=False
+            )
         except Exception as exc:  # JuPedSim clearance edge cases
             logger.warning(f"[ESCALATOR] could not place {rider.agent_id} at {spot}: {exc}")
             return False
@@ -552,19 +599,24 @@ class EscalatorSystem:
         to_sim.set_agent_target(rider.agent_id, egress)
         self.ml.transfer_escape_waypoints[rider.agent_id] = egress
         record = self._open_rides.pop(rider.agent_id, {})
-        record.update({
-            "alight_s": time_s,
-            "ride_s": round(time_s - rider.board_time, 2),
-            "stall_wait_s": round(rider.stall_wait_s, 2),
-            "discharge_attempts": rider.discharge_attempts,
-        })
+        record.update(
+            {
+                "alight_s": time_s,
+                "ride_s": round(time_s - rider.board_time, 2),
+                "stall_wait_s": round(rider.stall_wait_s, 2),
+                "discharge_attempts": rider.discharge_attempts,
+            }
+        )
         self.ride_log.append(record)
-        logger.info(f"[ESCALATOR] {rider.agent_id} rode {spec.exit_name} ({rider.lane}) "
-                    f"in {record['ride_s']:.1f}s → level {level} at {spot}")
+        logger.info(
+            f"[ESCALATOR] {rider.agent_id} rode {spec.exit_name} ({rider.lane}) "
+            f"in {record['ride_s']:.1f}s → level {level} at {spot}"
+        )
         return True
 
-    def _manage_queue(self, exit_name: str, entry: _Entry, positions: dict[str, Point2],
-                      time_s: float) -> None:
+    def _manage_queue(
+        self, exit_name: str, entry: _Entry, positions: dict[str, Point2], time_s: float
+    ) -> None:
         q = self.queue[exit_name]
         level_sim = self.ml.simulations[entry.spec.from_level]
         # Drop agents no longer on this floor (boarded a train, removed, …).
@@ -586,7 +638,11 @@ class EscalatorSystem:
         # Watchdog: an admission that has not boarded in time (boxed in) goes
         # back to the queue so it can never hold a lane indefinitely.
         for agent_id, qe in q.items():
-            if qe.admitted and qe.admitted_s is not None and time_s - qe.admitted_s > ADMIT_TIMEOUT_S:
+            if (
+                qe.admitted
+                and qe.admitted_s is not None
+                and time_s - qe.admitted_s > ADMIT_TIMEOUT_S
+            ):
                 qe.admitted, qe.admitted_s, qe.slot = False, None, None
                 if walking.get(qe.lane) == agent_id:
                     walking[qe.lane] = None
@@ -597,18 +653,28 @@ class EscalatorSystem:
         # free step (crowd pressure can push a waiting agent onto the strip,
         # where — not being routed there — they would block it).
         for agent_id, qe in q.items():
-            if qe.admitted or qe.join_s is None or not strip_zone.contains(Point(positions[agent_id])):
+            if (
+                qe.admitted
+                or qe.join_s is None
+                or not strip_zone.contains(Point(positions[agent_id]))
+            ):
                 continue
-            lane = qe.lane if entry.conveyor.can_admit(qe.lane) else next(
-                (other for other in LANES if entry.conveyor.can_admit(other)), None)
+            lane = (
+                qe.lane
+                if entry.conveyor.can_admit(qe.lane)
+                else next((other for other in LANES if entry.conveyor.can_admit(other)), None)
+            )
             if lane is not None:
                 qe.lane = lane
                 self._admit(exit_name, entry, agent_id, qe, time_s)
 
         for lane in LANES:
             prev = walking[lane]
-            if prev is not None and prev in positions and \
-                    math.dist(positions[prev], entry.strip_target) > ADMITTED_CLEAR:
+            if (
+                prev is not None
+                and prev in positions
+                and math.dist(positions[prev], entry.strip_target) > ADMITTED_CLEAR
+            ):
                 continue
             walking[lane] = None
             if not entry.conveyor.can_admit(lane):
@@ -621,7 +687,9 @@ class EscalatorSystem:
             candidates = [
                 (math.dist(positions[agent_id], entry.strip_target), qe.join_s, agent_id)
                 for agent_id, qe in q.items()
-                if qe.lane == lane and not qe.admitted and qe.join_s is not None
+                if qe.lane == lane
+                and not qe.admitted
+                and qe.join_s is not None
                 and (not line or qe.slot in line)
             ]
             candidates = [c for c in candidates if c[0] <= radius]
@@ -633,8 +701,9 @@ class EscalatorSystem:
 
         self._warn_if_stalled(exit_name, entry, positions, time_s)
 
-    def _warn_if_stalled(self, exit_name: str, entry: _Entry, positions: dict[str, Point2],
-                         time_s: float) -> None:
+    def _warn_if_stalled(
+        self, exit_name: str, entry: _Entry, positions: dict[str, Point2], time_s: float
+    ) -> None:
         """Log the queue state if people wait but nobody has boarded for a minute."""
         q = self.queue[exit_name]
         joined = [a for a, qe in q.items() if qe.join_s is not None]
@@ -651,18 +720,22 @@ class EscalatorSystem:
             f"d_strip={math.dist(positions[a], entry.strip_target):.2f}"
             for a in sorted(joined, key=lambda a: math.dist(positions[a], entry.strip_target))[:6]
         )
-        logger.warning(f"[ESCALATOR] {exit_name}: {len(joined)} queueing but no boarding for "
-                       f"{idle:.0f}s — {detail}; walking={self.admitted_walking[exit_name]}")
+        logger.warning(
+            f"[ESCALATOR] {exit_name}: {len(joined)} queueing but no boarding for "
+            f"{idle:.0f}s — {detail}; walking={self.admitted_walking[exit_name]}"
+        )
 
-    def _admit(self, exit_name: str, entry: _Entry, agent_id: str, qe: QueueEntry,
-               time_s: float) -> None:
+    def _admit(
+        self, exit_name: str, entry: _Entry, agent_id: str, qe: QueueEntry, time_s: float
+    ) -> None:
         """Switch a queued agent onto the boarding strip journey."""
         level_sim = self.ml.simulations[entry.spec.from_level]
         qe.admitted, qe.admitted_s = True, time_s
         self._last_activity[exit_name] = time_s
         jps_id = level_sim.agent_tracker.get_jps_id(agent_id)
         level_sim.simulation.switch_agent_journey(
-            agent_id=jps_id, journey_id=entry.journey_id, stage_id=entry.stage_id)
+            agent_id=jps_id, journey_id=entry.journey_id, stage_id=entry.stage_id
+        )
         level_sim.agent_assigned_exits[agent_id] = exit_name
 
     def _assign_slots(self, level: str, positions: dict[str, Point2] | None = None) -> None:
@@ -690,8 +763,12 @@ class EscalatorSystem:
                     here = math.dist(qe.slot, entry.strip_target)
                 return (0, here, qe.join_s)
 
-            waiting = [(None, None, agent_id) for agent_id, _ in
-                       sorted(((a, qe) for a, qe in q.items() if not qe.admitted), key=rank)]
+            waiting = [
+                (None, None, agent_id)
+                for agent_id, _ in sorted(
+                    ((a, qe) for a, qe in q.items() if not qe.admitted), key=rank
+                )
+            ]
             used = {lane: 0 for lane in LANES}
             overflow = iter(entry.overflow_slots)
             for _, _, agent_id in waiting:
@@ -707,7 +784,11 @@ class EscalatorSystem:
                             slot = candidate
                             break
                     if slot is None:
-                        slot = entry.overflow_slots[-1] if entry.overflow_slots else entry.landing_point
+                        slot = (
+                            entry.overflow_slots[-1]
+                            if entry.overflow_slots
+                            else entry.landing_point
+                        )
                 taken.add(slot)
                 in_line = slot in line
                 if in_line and not qe.tight:
@@ -728,10 +809,14 @@ class EscalatorSystem:
         key = (level, point)
         if key not in self._waypoint_cache:
             stage = level_sim.simulation.add_waypoint_stage(point, 0.25)
-            self._waypoint_cache[key] = (stage, level_sim.simulation.add_journey(
-                jps.JourneyDescription([stage])))
+            self._waypoint_cache[key] = (
+                stage,
+                level_sim.simulation.add_journey(jps.JourneyDescription([stage])),
+            )
         stage, journey = self._waypoint_cache[key]
-        level_sim.simulation.switch_agent_journey(agent_id=jps_id, journey_id=journey, stage_id=stage)
+        level_sim.simulation.switch_agent_journey(
+            agent_id=jps_id, journey_id=journey, stage_id=stage
+        )
         level_sim.agent_tracker.set_target(agent_id, point)
 
     def _hold_in_place(self, level_sim, agent_id: str, pos: Point2) -> None:
@@ -740,7 +825,9 @@ class EscalatorSystem:
             return
         stage = level_sim.simulation.add_waypoint_stage(pos, 0.5)
         journey = level_sim.simulation.add_journey(jps.JourneyDescription([stage]))
-        level_sim.simulation.switch_agent_journey(agent_id=jps_id, journey_id=journey, stage_id=stage)
+        level_sim.simulation.switch_agent_journey(
+            agent_id=jps_id, journey_id=journey, stage_id=stage
+        )
 
     @staticmethod
     def _set_time_gap(level_sim, agent_id: str, value: float) -> None:

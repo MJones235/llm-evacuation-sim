@@ -85,9 +85,7 @@ class ActionExecutorPaceTests(unittest.TestCase):
             agent_configs=[{"id": "agent_1", "goal_state": "Board a train at Platform 2."}],
         )
 
-        executor._handle_wait_action(
-            "agent_1", {"wait_reason": "awaiting_information"}, 10.0
-        )
+        executor._handle_wait_action("agent_1", {"wait_reason": "awaiting_information"}, 10.0)
 
         self.assertEqual(destinations["agent_1"], "escalator_d_down")
         self.assertEqual(executor.agent_action["agent_1"], "moving")

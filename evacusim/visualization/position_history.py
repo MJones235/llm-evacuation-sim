@@ -108,7 +108,9 @@ class PositionHistoryTracker:
             "positions": dict(agent_positions),  # Copy to avoid mutation
             "agent_states": agent_states,
             "blocked_exits": list(blocked_exits),
-            "active_train_exits": list(active_train_exits) if active_train_exits is not None else [],
+            "active_train_exits": list(active_train_exits)
+            if active_train_exits is not None
+            else [],
         }
         if agent_levels is not None:
             frame["agent_levels"] = dict(agent_levels)
@@ -162,6 +164,7 @@ class PositionHistoryTracker:
             # Streaming mode: data already written; move/copy to requested path.
             if output_path.resolve() != self._streaming_path.resolve():
                 import shutil
+
                 shutil.copy2(self._streaming_path, output_path)
             logger.info(
                 f"Position history stream closed: {len(self.position_history)} in-memory "

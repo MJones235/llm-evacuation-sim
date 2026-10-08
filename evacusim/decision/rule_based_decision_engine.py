@@ -119,7 +119,11 @@ class RuleBasedDecisionEngine:
                         reason="Advancing toward the target platform: " + why,
                         ctx=ctx,
                     )
-            include = (prefer | self._DEFAULT_TRAIN_PREFER_TAGS) if prefer else self._DEFAULT_TRAIN_PREFER_TAGS
+            include = (
+                (prefer | self._DEFAULT_TRAIN_PREFER_TAGS)
+                if prefer
+                else self._DEFAULT_TRAIN_PREFER_TAGS
+            )
             preferred = self._filter_by_tags(candidates, include)
             if "evacuate" in actions and preferred:
                 best, why = self._pick_best_exit(preferred)
@@ -192,7 +196,7 @@ class RuleBasedDecisionEngine:
 
     @staticmethod
     def _filter_by_tags(
-        options: list[ExitOption], include: "frozenset[str] | set[str]"
+        options: list[ExitOption], include: frozenset[str] | set[str]
     ) -> list[ExitOption]:
         """Options carrying at least one of the ``include`` semantic tags."""
         inc = set(include)

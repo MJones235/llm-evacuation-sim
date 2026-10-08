@@ -23,7 +23,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 class LLMDecisionEngine:
     """Default engine: produce a decision via the Concordia/LLM pipeline."""
 
-    def __init__(self, processor: "DecisionProcessor") -> None:
+    def __init__(self, processor: DecisionProcessor) -> None:
         self._processor = processor
 
     async def decide(self, ctx: DecisionContext) -> DecisionResult:

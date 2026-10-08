@@ -13,8 +13,8 @@ from concordia.associative_memory import basic_associative_memory
 from concordia.language_model import language_model
 from concordia.typing import entity as entity_lib
 
-from evacusim.utils.logger import get_logger
 from evacusim.concordia.evacuation_agent import EvacuationAgent
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

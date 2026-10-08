@@ -13,18 +13,19 @@ Features:
 """
 
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import jupedsim as jps
 from shapely.geometry import Point
 from shapely.ops import nearest_points
 
-from evacusim.utils.logger import get_logger
 from evacusim.jps.agent_tracker import AgentTracker
 from evacusim.jps.exit_manager import ExitManager
 from evacusim.jps.geometry_manager import GeometryManager
 from evacusim.jps.stage_manager import StageManager
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -54,7 +55,9 @@ class ConcordiaJuPedSimulation:
         network_path: Path | None = None,
         dt: float = 0.05,
         exit_radius: float = 10.0,
-        level_id: int | str = 0,        initially_blocked_exits: set[str] | None = None,    ):
+        level_id: int | str = 0,
+        initially_blocked_exits: set[str] | None = None,
+    ):
         """
         Initialize JuPedSim simulation with station geometry.
 
@@ -74,8 +77,9 @@ class ConcordiaJuPedSimulation:
             raise ValueError("network_path required")
 
         self.network_path = network_path
-        self.geometry_manager = GeometryManager(network_path, dt, level_id,
-                                                initially_blocked_exits=initially_blocked_exits)
+        self.geometry_manager = GeometryManager(
+            network_path, dt, level_id, initially_blocked_exits=initially_blocked_exits
+        )
         self.simulation = self.geometry_manager.simulation
         self._routing_engine = jps.RoutingEngine(self.geometry_manager._combined_geometry)
         self.stage_manager = StageManager(self.simulation)
@@ -252,7 +256,7 @@ class ConcordiaJuPedSimulation:
         self.agent_assigned_exits.pop(nearest_agent_id, None)
         logger.warning(
             f"Removed agent {nearest_agent_id} (JPS id {jps_id}, "
-            f"~{nearest_dist_sq ** 0.5:.2f}m from the reported point) to recover "
+            f"~{nearest_dist_sq**0.5:.2f}m from the reported point) to recover "
             f"from a JuPedSim density-overflow step failure on level "
             f"{self.level_id}: {exc}"
         )
@@ -366,8 +370,7 @@ class ConcordiaJuPedSimulation:
             rp = inner.representative_point()
             snapped = (float(rp.x), float(rp.y))
             logger.debug(
-                f"Fallback-snapped target {target} -> {snapped} "
-                "(nearest-point projection failed)"
+                f"Fallback-snapped target {target} -> {snapped} (nearest-point projection failed)"
             )
             return snapped
 

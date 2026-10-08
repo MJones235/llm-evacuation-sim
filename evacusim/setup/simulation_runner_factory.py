@@ -8,11 +8,11 @@ This module is responsible for:
 - Configuring runner parameters
 """
 
-from pathlib import Path
 import logging
+from pathlib import Path
 
-from evacusim.utils.logger import get_logger, setup_logger
 from evacusim.coordination.hybrid_simulation import HybridSimulationRunner
+from evacusim.utils.logger import get_logger, setup_logger
 
 logger = get_logger(__name__)
 
@@ -78,9 +78,7 @@ class SimulationRunnerFactory:
 
         # Feature A: optional runtime passenger spawning driven by usage +
         # timetable CSVs (calibration under non-evacuation conditions).
-        spawn_controller, calibration_timetable = (
-            SimulationRunnerFactory._build_calibration(config)
-        )
+        spawn_controller, calibration_timetable = SimulationRunnerFactory._build_calibration(config)
 
         logger.info("Creating HybridSimulationRunner...")
 
@@ -104,7 +102,9 @@ class SimulationRunnerFactory:
             console_level=logging.INFO,
             file_level=file_log_level,
         )
-        logger.info(f"Per-run log file: {log_file} (file_level={logging.getLevelName(file_log_level)})")
+        logger.info(
+            f"Per-run log file: {log_file} (file_level={logging.getLevelName(file_log_level)})"
+        )
 
         try:
             runner = HybridSimulationRunner(
@@ -146,9 +146,7 @@ class SimulationRunnerFactory:
         if start_time_s > 0:
             runner.event_manager.prepare_for_start_time(start_time_s)
             if runner._bootstrap_initial_decisions_enabled:
-                runner.last_decision_time = (
-                    start_time_s - runner._group_decision_interval
-                )
+                runner.last_decision_time = start_time_s - runner._group_decision_interval
                 runner._bootstrap_initial_decisions()
             logger.info(
                 "Simulation starts at %.1fs; discarded %d earlier passenger arrivals",
@@ -206,18 +204,16 @@ class SimulationRunnerFactory:
         if not calibration.get("enabled", False):
             return None, []
 
+        from evacusim.calibration.poisson_scheduler import build_arrival_schedule
+        from evacusim.calibration.spawn_controller import RuntimeSpawnController
         from evacusim.calibration.usage_data import (
             load_entrance_usage,
             load_timetable,
         )
-        from evacusim.calibration.poisson_scheduler import build_arrival_schedule
-        from evacusim.calibration.spawn_controller import RuntimeSpawnController
 
         intervals = load_entrance_usage(calibration["entrance_usage_csv"])
         timetable = (
-            load_timetable(calibration["timetable_csv"])
-            if calibration.get("timetable_csv")
-            else []
+            load_timetable(calibration["timetable_csv"]) if calibration.get("timetable_csv") else []
         )
 
         spawn_points = calibration["spawn_points"]
@@ -231,9 +227,7 @@ class SimulationRunnerFactory:
                 for platform, point in spawn_points.items()
                 if str(platform).isdigit() and point.get("door_points")
             },
-            "train_alighting_duration_s": calibration.get(
-                "train_alighting_duration_s", 12.0
-            ),
+            "train_alighting_duration_s": calibration.get("train_alighting_duration_s", 12.0),
         }
         seed = int(calibration.get("seed", 0))
         schedule = build_arrival_schedule(intervals, timetable, spawn_cfg, seed=seed)
@@ -256,7 +250,10 @@ class SimulationRunnerFactory:
         logger.info(
             "Calibration enabled: %d scheduled arrivals "
             "(%d entrance intervals, %d trains); seed=%d",
-            len(schedule), len(intervals), len(timetable), seed,
+            len(schedule),
+            len(intervals),
+            len(timetable),
+            seed,
         )
         return controller, timetable
 

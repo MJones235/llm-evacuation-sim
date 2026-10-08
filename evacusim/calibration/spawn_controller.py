@@ -144,9 +144,7 @@ class RuntimeSpawnController:
         base_x, base_y = float(base_xy[0]), float(base_xy[1])
         level = str(sp.get("level", event.level))
         base_jitter = (
-            self._train_door_jitter_m
-            if event.source == "train" and door_points
-            else self._jitter_m
+            self._train_door_jitter_m if event.source == "train" and door_points else self._jitter_m
         )
         radius = base_jitter * (1.0 + float(attempt))
         r = radius * math.sqrt(self._rng.random())

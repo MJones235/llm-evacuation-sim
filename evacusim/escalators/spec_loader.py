@@ -55,7 +55,7 @@ class Comb:
         on the right of travel, walk on the left.
         """
         tx, ty = direction_of_travel
-        rx, ry = ty, -tx                       # right of travel
+        rx, ry = ty, -tx  # right of travel
         side = 1.0 if lane == "stand" else -1.0
         off = side * self.width / 4
         mx, my = self.mid
@@ -67,7 +67,7 @@ class Comb:
 class EscalatorSpec:
     exit_name: str
     letter: str
-    direction: str            # "up" | "down"
+    direction: str  # "up" | "down"
     entry: Comb
     exit: Comb
     egress_target: Point2 | None
@@ -152,33 +152,38 @@ def build_specs(
     specs = []
     for exit_name, sides in sorted(records.items()):
         if "entry" not in sides or "exit" not in sides:
-            raise ValueError(f"escalator {exit_name}: needs one entry and one exit comb, "
-                             f"got {sorted(sides)}")
+            raise ValueError(
+                f"escalator {exit_name}: needs one entry and one exit comb, got {sorted(sides)}"
+            )
         entry, exit_ = sides["entry"], sides["exit"]
         direction = entry["direction"]
         params = {**defaults, **(overrides.get(exit_name) or {})}
         length = float(params.get("length_m", entry["length_m"]))
-        specs.append(EscalatorSpec(
-            exit_name=exit_name,
-            letter=entry["letter"],
-            direction=direction,
-            entry=Comb(entry["level"], entry["a"], entry["b"], entry["floor_normal"]),
-            exit=Comb(exit_["level"], exit_["a"], exit_["b"], exit_["floor_normal"]),
-            egress_target=exit_.get("egress"),
-            length_m=length,
-            belt_speed=float(params["belt_speed"]),
-            step_depth=float(params["step_depth"]),
-            walk_share=float(_pick(params["walk_share"], direction)),
-            stander_step_gap_prob=float(params["stander_step_gap_prob"]),
-            walk_speed_factor=float(_pick(params["walk_speed_factor"], direction)),
-            queue_line_slots=int(params["queue_line_slots"]),
-            queue_line_spacing=float(params["queue_line_spacing"]),
-            queue_slot_grid=float(params["queue_slot_grid"]),
-            queue_max_route_m=float(params["queue_max_route_m"]),
-            queue_time_gap=float(params["queue_time_gap"]),
-            landing_search_depth=float(params["landing_search_depth"]),
-        ))
+        specs.append(
+            EscalatorSpec(
+                exit_name=exit_name,
+                letter=entry["letter"],
+                direction=direction,
+                entry=Comb(entry["level"], entry["a"], entry["b"], entry["floor_normal"]),
+                exit=Comb(exit_["level"], exit_["a"], exit_["b"], exit_["floor_normal"]),
+                egress_target=exit_.get("egress"),
+                length_m=length,
+                belt_speed=float(params["belt_speed"]),
+                step_depth=float(params["step_depth"]),
+                walk_share=float(_pick(params["walk_share"], direction)),
+                stander_step_gap_prob=float(params["stander_step_gap_prob"]),
+                walk_speed_factor=float(_pick(params["walk_speed_factor"], direction)),
+                queue_line_slots=int(params["queue_line_slots"]),
+                queue_line_spacing=float(params["queue_line_spacing"]),
+                queue_slot_grid=float(params["queue_slot_grid"]),
+                queue_max_route_m=float(params["queue_max_route_m"]),
+                queue_time_gap=float(params["queue_time_gap"]),
+                landing_search_depth=float(params["landing_search_depth"]),
+            )
+        )
     unknown = set(overrides) - {s.exit_name for s in specs}
     if unknown:
-        raise ValueError(f"simulation.escalators.overrides for unknown escalators: {sorted(unknown)}")
+        raise ValueError(
+            f"simulation.escalators.overrides for unknown escalators: {sorted(unknown)}"
+        )
     return specs

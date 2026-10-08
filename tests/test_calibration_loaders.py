@@ -44,21 +44,24 @@ class UsageLoaderTests(unittest.TestCase):
     def test_bad_interval_and_values_raise(self):
         with tempfile.TemporaryDirectory() as tmp:
             bad_order = _write(
-                tmp, "b1.csv",
+                tmp,
+                "b1.csv",
                 "interval_start_s,interval_end_s,entrance_id,arrivals\n60,60,e,1\n",
             )
             with self.assertRaises(CalibrationDataError):
                 load_entrance_usage(bad_order)
 
             neg = _write(
-                tmp, "b2.csv",
+                tmp,
+                "b2.csv",
                 "interval_start_s,interval_end_s,entrance_id,arrivals\n0,60,e,-3\n",
             )
             with self.assertRaises(CalibrationDataError):
                 load_entrance_usage(neg)
 
             empty_ent = _write(
-                tmp, "b3.csv",
+                tmp,
+                "b3.csv",
                 "interval_start_s,interval_end_s,entrance_id,arrivals\n0,60,,3\n",
             )
             with self.assertRaises(CalibrationDataError):
@@ -75,10 +78,9 @@ class TimetableLoaderTests(unittest.TestCase):
     def test_valid_timetable_parses(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = _write(
-                tmp, "tt.csv",
-                "arrival_s,platform,alighting,dwell_s\n"
-                "30,1,20,25\n"
-                "90,2,0,30\n",
+                tmp,
+                "tt.csv",
+                "arrival_s,platform,alighting,dwell_s\n30,1,20,25\n90,2,0,30\n",
             )
             rows = load_timetable(p)
         self.assertEqual(rows[0], TrainArrival(30.0, "1", 20, 25.0))

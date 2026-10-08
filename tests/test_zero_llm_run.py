@@ -21,11 +21,11 @@ import unittest
 
 from shapely.geometry import box
 
+from evacusim.coordination.noop_agent import NoOpAgent
 from evacusim.decision.decision_processor import DecisionProcessor
 from evacusim.decision.rule_based_decision_engine import RuleBasedDecisionEngine
-from evacusim.coordination.noop_agent import NoOpAgent
-from evacusim.translation.action_translator import ActionTranslator
 from evacusim.metrics.llm_cost_reporter import FinancialReporter
+from evacusim.translation.action_translator import ActionTranslator
 
 
 # --- physics-boundary fakes ------------------------------------------------
@@ -165,7 +165,9 @@ class ZeroLLMFullCycleTests(unittest.TestCase):
 
         # (6) With a leave-the-station goal and a known exit, the rule engine
         # routes to evacuate — proving the translate/execute path ran LLM-free.
-        actions = [d["decisions"][-1]["decision_payload"]["action"] for d in dp.agent_decisions.values()]
+        actions = [
+            d["decisions"][-1]["decision_payload"]["action"] for d in dp.agent_decisions.values()
+        ]
         self.assertIn("evacuate", actions)
         self.assertTrue(executor.executed, "no actions were executed")
 

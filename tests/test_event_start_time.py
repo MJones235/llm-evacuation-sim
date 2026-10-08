@@ -64,9 +64,7 @@ class EventStartTimeTests(unittest.TestCase):
         )
         seen = []
         runner.decision_processor = SimpleNamespace(
-            process_all_agents=lambda observations, time: seen.append(
-                (observations, time)
-            ) or time
+            process_all_agents=lambda observations, time: seen.append((observations, time)) or time
         )
 
         runner._bootstrap_initial_decisions()

@@ -94,9 +94,7 @@ class CrowdAnalyzer:
         moving_count = len(moving_agents)
         total_count = len(independent_agents)
         moving_pct = (moving_count / total_count * 100) if total_count else 0.0
-        majority_moving = (
-            moving_pct > 70 and moving_count >= self.MIN_MAJORITY_MOVERS
-        )
+        majority_moving = moving_pct > 70 and moving_count >= self.MIN_MAJORITY_MOVERS
         waiting_count = len(independent_agents) - len(moving_agents)
 
         dest_counts: dict[str, int] = {}
@@ -208,9 +206,7 @@ class CrowdAnalyzer:
 
         moving_count = sum(1 for a in nearby_agents if a.get("is_moving", True))
         moving_pct = (moving_count / len(nearby_agents)) * 100
-        majority_moving = (
-            moving_pct > 70 and moving_count >= CrowdAnalyzer.MIN_MAJORITY_MOVERS
-        )
+        majority_moving = moving_pct > 70 and moving_count >= CrowdAnalyzer.MIN_MAJORITY_MOVERS
 
         dest_counts: dict[str, int] = {}
         for agent in nearby_agents:

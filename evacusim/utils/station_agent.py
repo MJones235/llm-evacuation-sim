@@ -28,28 +28,27 @@ logger = get_logger(__name__)
 # C: Deliberation (C6) and Dutifulness (C3) facets.
 OCEAN_ANCHORS: dict[str, dict[str, str]] = {
     "N": {
-        "high":   "You tend to feel anxious and unsettled in uncertain situations, "
-                  "and find it difficult to remain composed when outcomes are unclear.",
+        "high": "You tend to feel anxious and unsettled in uncertain situations, "
+        "and find it difficult to remain composed when outcomes are unclear.",
         "medium": "You experience some unease in uncertain situations but can generally "
-                  "keep it in check under moderate pressure.",
-        "low":    "You tend to remain calm and emotionally stable even in uncertain "
-                  "situations.",
+        "keep it in check under moderate pressure.",
+        "low": "You tend to remain calm and emotionally stable even in uncertain situations.",
     },
     "O": {
-        "high":   "You tend to question your initial assumptions about what is happening "
-                  "and are willing to consider that the situation may be different from what it first appears.",
+        "high": "You tend to question your initial assumptions about what is happening "
+        "and are willing to consider that the situation may be different from what it first appears.",
         "medium": "You generally accept your initial reading of a situation, but will "
-                  "reconsider if presented with clear evidence that it is wrong.",
-        "low":    "You tend to take situations at face value and are unlikely to question "
-                  "your initial interpretation of what is happening.",
+        "reconsider if presented with clear evidence that it is wrong.",
+        "low": "You tend to take situations at face value and are unlikely to question "
+        "your initial interpretation of what is happening.",
     },
     "C": {
-        "high":   "You prefer to think carefully before acting, value structure, "
-                  "and stay disciplined about following your own plan.",
+        "high": "You prefer to think carefully before acting, value structure, "
+        "and stay disciplined about following your own plan.",
         "medium": "You generally consider your options before acting, though you can also "
-                  "act on instinct when the situation seems to call for it.",
-        "low":    "You tend to act on instinct rather than deliberating, and are less "
-                  "likely to stick to structured routines.",
+        "act on instinct when the situation seems to call for it.",
+        "low": "You tend to act on instinct rather than deliberating, and are less "
+        "likely to stick to structured routines.",
     },
 }
 

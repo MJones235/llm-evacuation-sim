@@ -22,7 +22,9 @@ def test_targeted_cycle_formats_only_selected_agent_observations():
             get_agent_position=lambda agent_id: (0.0, 0.0),
             get_recent_events=lambda events, current_time: [],
         ),
-        event_manager=SimpleNamespace(event_history=[], active_train_exits=set(), blocked_exits=set()),
+        event_manager=SimpleNamespace(
+            event_history=[], active_train_exits=set(), blocked_exits=set()
+        ),
         message_system=SimpleNamespace(
             get_received_messages=lambda agent_id: [],
             get_conversation_history=lambda agent_id: [],

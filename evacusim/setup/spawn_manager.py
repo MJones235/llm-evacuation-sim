@@ -6,8 +6,8 @@ This module is responsible for:
 - Providing a simple interface for generating spawn positions
 """
 
-from evacusim.utils.logger import get_logger
 from evacusim.jps.simulation_interface import PedestrianSimulation
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

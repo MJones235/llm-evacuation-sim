@@ -67,9 +67,7 @@ class ViewerLauncher:
         """
         logger.info("Launching GUI viewer for live monitoring...")
         try:
-            viewer_path = (
-                Path(__file__).parent / "view_concordia_gui.py"
-            )
+            viewer_path = Path(__file__).parent / "view_concordia_gui.py"
             process = subprocess.Popen(
                 [
                     sys.executable,
@@ -103,9 +101,7 @@ class ViewerLauncher:
         """
         logger.info("Launching spatial matplotlib viewer...")
         try:
-            spatial_viewer_path = (
-                Path(__file__).parent / "view_concordia_spatial.py"
-            )
+            spatial_viewer_path = Path(__file__).parent / "view_concordia_spatial.py"
             process = subprocess.Popen(
                 [
                     sys.executable,

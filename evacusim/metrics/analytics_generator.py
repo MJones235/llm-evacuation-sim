@@ -151,9 +151,11 @@ class AnalyticsGenerator:
             # Count targeted vs broadcast
             targeted = sum(1 for m in message_history if m.get("target_agent"))
             broadcast = len(message_history) - targeted
-            f.write(f"\nTargeted messages: {targeted} ({targeted/len(message_history)*100:.1f}%)\n")
             f.write(
-                f"Broadcast messages: {broadcast} ({broadcast/len(message_history)*100:.1f}%)\n"
+                f"\nTargeted messages: {targeted} ({targeted / len(message_history) * 100:.1f}%)\n"
+            )
+            f.write(
+                f"Broadcast messages: {broadcast} ({broadcast / len(message_history) * 100:.1f}%)\n"
             )
 
             f.write("\nAll Messages:\n")
@@ -164,6 +166,6 @@ class AnalyticsGenerator:
                 target_indicator = f" → {target}" if target and target != "null" else ""
                 f.write(
                     f"  - t={msg['time']:.1f}s: {msg['sender']}{target_indicator} {type_indicator} to {msg['num_recipients']} "
-                    f"people: \"{msg['text']}\"\n"
+                    f'people: "{msg["text"]}"\n'
                 )
         logger.info(f"Message analytics saved to {message_analytics_path}")

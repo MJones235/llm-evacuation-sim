@@ -8,13 +8,13 @@ agents can reason about.
 import re
 from typing import Any
 
-from evacusim.utils.logger import get_logger
 from evacusim.translation.crowd_analyzer import CrowdAnalyzer
 from evacusim.translation.exit_name_registry import (
     build_registry_from_station_layout,
 )
 from evacusim.translation.observation_formatter import ObservationFormatter
 from evacusim.translation.spatial_analyzer import SpatialAnalyzer
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -277,7 +277,10 @@ class ObservationGenerator:
         #    Blocked exits remain in this list until they are discovered at close
         #    range; once discovered they move to blocked visual observations.
         visible_exits = self.spatial_analyzer.get_visible_exits(
-            position, agent_level=agent_level, agent_zone=zone, jps_sim=self.jps_sim,
+            position,
+            agent_level=agent_level,
+            agent_zone=zone,
+            jps_sim=self.jps_sim,
             inactive_exits=inactive_exits,
             blocked_exits=blocked_exits if blocked_exits else None,
         )
@@ -323,9 +326,7 @@ class ObservationGenerator:
                 level_exit_ids = set(level_sim.exit_manager.exit_coordinates.keys())
                 recalled = {c for c in recalled if c in level_exit_ids}
         if recalled:
-            recalled_names = sorted(
-                self._canonical_to_display.get(c, c) for c in recalled
-            )
+            recalled_names = sorted(self._canonical_to_display.get(c, c) for c in recalled)
             observations.append(
                 f"Exits you know about but cannot currently see: {', '.join(recalled_names)}."
             )
@@ -393,9 +394,7 @@ class ObservationGenerator:
                 getattr(self, "action_translator", None), "exit_registry", None
             )
             for cid in known_blocked_exits:
-                display = (
-                    registry.get_display_name(cid) if registry else cid
-                )
+                display = registry.get_display_name(cid) if registry else cid
                 if display not in visible_names:
                     visible_blocked.append({"name": display, "distance": "remembered"})
         blocked_lines = ObservationFormatter.format_blocked_exits(visible_blocked)
@@ -420,18 +419,19 @@ class ObservationGenerator:
         # Split messages: authority broadcasts (always fresh) vs regular chat
         _authority_types = {"directive", "pa"}
         authority_msgs = [
-            m for m in (received_messages or [])
+            m
+            for m in (received_messages or [])
             if m.get("message_type") in _authority_types and m.get("text", "").strip()
         ]
         regular_msgs = [
-            m for m in (received_messages or [])
+            m
+            for m in (received_messages or [])
             if m.get("message_type") not in _authority_types and m.get("text", "").strip()
         ]
 
         # Novelty filter applies only to regular chat messages.
         msg_sigs = {
-            f"{msg.get('from', 'unknown')}::{msg.get('text', '').strip()}"
-            for msg in regular_msgs
+            f"{msg.get('from', 'unknown')}::{msg.get('text', '').strip()}" for msg in regular_msgs
         }
 
         prev_events = self._last_event_signatures.get(agent_id, set())

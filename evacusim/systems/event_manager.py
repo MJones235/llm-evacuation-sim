@@ -10,8 +10,8 @@ Handles:
 
 from typing import Any
 
-from evacusim.utils.logger import get_logger
 from evacusim.jps.simulation_interface import PedestrianSimulation
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -90,9 +90,7 @@ class EventManager:
                 if departure_time > start_time_s:
                     active_event = dict(event)
                     active_event["dwell_seconds"] = departure_time - start_time_s
-                    self._fire_train_arrival(
-                        active_event, start_time_s, None, None, None, None
-                    )
+                    self._fire_train_arrival(active_event, start_time_s, None, None, None, None)
             event["_fired"] = True
 
     def check_and_trigger_events(
@@ -156,8 +154,9 @@ class EventManager:
 
         # Check whether any previously activated train exits have now departed.
         # This runs every step (not only when a scheduled event is due).
-        if self._check_train_departures(current_sim_time, agents, message_system,
-                                        exited_agents, zone_id_for_agent_fn):
+        if self._check_train_departures(
+            current_sim_time, agents, message_system, exited_agents, zone_id_for_agent_fn
+        ):
             fired = True
             self.last_fired_event_types.add("train_departure")
 
@@ -185,12 +184,24 @@ class EventManager:
                 self._fire_block_exit(event, current_sim_time)
                 self.last_fired_event_types.add("block_exit")
             elif is_train_arrival:
-                self._fire_train_arrival(event, current_sim_time, agents, message_system,
-                                         exited_agents, zone_id_for_agent_fn)
+                self._fire_train_arrival(
+                    event,
+                    current_sim_time,
+                    agents,
+                    message_system,
+                    exited_agents,
+                    zone_id_for_agent_fn,
+                )
                 self.last_fired_event_types.add("train_arrival")
             elif is_pa and message_system is not None:
-                self._fire_pa_announcement(event, current_sim_time, agents, message_system,
-                                            exited_agents, zone_id_for_agent_fn)
+                self._fire_pa_announcement(
+                    event,
+                    current_sim_time,
+                    agents,
+                    message_system,
+                    exited_agents,
+                    zone_id_for_agent_fn,
+                )
                 self.last_fired_event_types.add("pa_announcement")
             elif agents and event.get("message"):
                 self.broadcast_event(event["message"], current_sim_time, agents)
@@ -225,7 +236,9 @@ class EventManager:
         if isinstance(exits, str):
             exits = [exits]
         for exit_name in exits:
-            logger.info(f"⏰ block_exit event at t={current_sim_time:.1f}s — blocking '{exit_name}'")
+            logger.info(
+                f"⏰ block_exit event at t={current_sim_time:.1f}s — blocking '{exit_name}'"
+            )
             self.block_exit(exit_name)
 
     def _fire_pa_announcement(
@@ -240,7 +253,7 @@ class EventManager:
         """Deliver a PA announcement event via MessageSystem."""
         sender_label = event.get("sender_label", "PA system")
         default_msg = event.get("message", "")
-        zone_messages = event.get("zone_messages", None)
+        zone_messages = event.get("zone_messages")
         all_ids = list(agents.keys()) if agents else []
         message_system.deliver_pa(
             sender_label=sender_label,
@@ -332,8 +345,7 @@ class EventManager:
             True if at least one train departed this step.
         """
         now_departed = [
-            name for name, t in self._train_departure_times.items()
-            if current_sim_time >= t
+            name for name, t in self._train_departure_times.items() if current_sim_time >= t
         ]
         if not now_departed:
             return False
@@ -402,12 +414,14 @@ class EventManager:
         # A blocked escalator stops boarding: its queue is released to re-decide
         # and anyone already riding finishes the ride. (Pre-blocked escalators
         # were built closed at init.)
-        if is_known and exit_name.startswith("escalator_") and hasattr(self.jps_sim, "block_escalator"):
+        if (
+            is_known
+            and exit_name.startswith("escalator_")
+            and hasattr(self.jps_sim, "block_escalator")
+        ):
             self.jps_sim.block_escalator(exit_name)
 
-        logger.info(
-            f"🚧 Exit '{exit_name}' blocked"
-        )
+        logger.info(f"🚧 Exit '{exit_name}' blocked")
 
     @staticmethod
     def _format_elapsed_time_phrase(elapsed_seconds: float) -> str:

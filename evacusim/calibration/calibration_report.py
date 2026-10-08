@@ -128,13 +128,25 @@ def write_calibration_report(
     with open(csv_path, "w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow(
-            ["entrance_id", "interval_start_s", "interval_end_s",
-             "expected_arrivals", "realised_arrivals", "error"]
+            [
+                "entrance_id",
+                "interval_start_s",
+                "interval_end_s",
+                "expected_arrivals",
+                "realised_arrivals",
+                "error",
+            ]
         )
         for c in report["arrivals"]["cells"]:
             writer.writerow(
-                [c["entrance_id"], c["interval_start_s"], c["interval_end_s"],
-                 c["expected_arrivals"], c["realised_arrivals"], c["error"]]
+                [
+                    c["entrance_id"],
+                    c["interval_start_s"],
+                    c["interval_end_s"],
+                    c["expected_arrivals"],
+                    c["realised_arrivals"],
+                    c["error"],
+                ]
             )
 
     a = report["arrivals"]

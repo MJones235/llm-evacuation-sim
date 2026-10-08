@@ -256,8 +256,7 @@ class ObservationFormatter:
                 )
             else:
                 lines.append(
-                    f"The {blocked['name']} appears blocked or obstructed "
-                    f"(seen now: {dist})."
+                    f"The {blocked['name']} appears blocked or obstructed (seen now: {dist})."
                 )
 
         return lines

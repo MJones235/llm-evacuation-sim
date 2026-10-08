@@ -16,8 +16,8 @@ from matplotlib.animation import FFMpegWriter
 from matplotlib.patches import Polygon as MPLPolygon
 
 from evacusim.utils.logger import get_logger
-from evacusim.visualization.video_generation_helper import RoleColourMap
 from evacusim.visualization.train_geometry import compute_train_polygons
+from evacusim.visualization.video_generation_helper import RoleColourMap
 
 logger = get_logger(__name__)
 
@@ -94,9 +94,7 @@ class VideoGenerator:
         # Keyed by exit name, e.g. "train_platform_1".
         self.train_polygons = compute_train_polygons(self.geometry or {})
         if self.train_polygons:
-            logger.info(
-                f"Pre-computed train polygons for: {list(self.train_polygons.keys())}"
-            )
+            logger.info(f"Pre-computed train polygons for: {list(self.train_polygons.keys())}")
 
         logger.info(
             f"Loaded {len(self.time_series)} time steps "
@@ -296,8 +294,14 @@ class VideoGenerator:
             arrow = "↑" if g["direction"] == "up" else "↓"
             for lane, dy in self._LANE_ROW.items():
                 y = i + dy
-                ax.plot([0, g["length_m"]], [y, y], color="#C8CDD0", linewidth=6,
-                        solid_capstyle="butt", zorder=1)
+                ax.plot(
+                    [0, g["length_m"]],
+                    [y, y],
+                    color="#C8CDD0",
+                    linewidth=6,
+                    solid_capstyle="butt",
+                    zorder=1,
+                )
                 ticks.append(y)
                 labels.append(f"{g['letter']}{arrow} {lane}" if lane == "stand" else "walk")
             ax.plot([g["length_m"]] * 2, [i - 0.15, i + 0.57], color="#555555", linewidth=1)
@@ -306,7 +310,9 @@ class VideoGenerator:
         ax.set_ylim(len(names) - 0.4, -0.3)
         ax.set_xlim(-7.5, max_len + 4.5)
         ax.axvline(0, color="#555555", linewidth=1)
-        ax.set_xlabel("Distance along escalator from boarding comb (m)   ·   queue at left, alighting comb at right")
+        ax.set_xlabel(
+            "Distance along escalator from boarding comb (m)   ·   queue at left, alighting comb at right"
+        )
         ax.set_title("Escalators (conveyor model)", fontsize=12, fontweight="bold")
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
@@ -327,27 +333,60 @@ class VideoGenerator:
             for lane, colour in self.LANE_COLOURS.items():
                 riders = [r for r in esc.get("riders", []) if r[1] == lane]
                 if ax is not None and riders:
-                    ax.plot([r[2] for r in riders], [i + self._LANE_ROW[lane]] * len(riders),
-                            "o", color=colour, markersize=5, markeredgecolor="white",
-                            markeredgewidth=0.5, zorder=3, label="_agent")
+                    ax.plot(
+                        [r[2] for r in riders],
+                        [i + self._LANE_ROW[lane]] * len(riders),
+                        "o",
+                        color=colour,
+                        markersize=5,
+                        markeredgecolor="white",
+                        markeredgewidth=0.5,
+                        zorder=3,
+                        label="_agent",
+                    )
                 for agent_id, _, s in riders:
                     level, x, y = rider_floor_position(g, s, lane)
                     floor_ax = axes_dict.get(level)
                     if floor_ax is not None:
-                        floor_ax.plot(x, y, "s", color=colour, markersize=5,
-                                      markeredgecolor="white", markeredgewidth=0.5,
-                                      zorder=6, label="_agent")
+                        floor_ax.plot(
+                            x,
+                            y,
+                            "s",
+                            color=colour,
+                            markersize=5,
+                            markeredgecolor="white",
+                            markeredgewidth=0.5,
+                            zorder=6,
+                            label="_agent",
+                        )
             if ax is None:
                 continue
             queue = esc.get("queue", {})
             waiting = sum(queue.values())
             if waiting:
-                ax.text(-0.6, i + 0.21, f"{waiting} queueing", ha="right", va="center",
-                        fontsize=8, color="#333333", label="_agent")
+                ax.text(
+                    -0.6,
+                    i + 0.21,
+                    f"{waiting} queueing",
+                    ha="right",
+                    va="center",
+                    fontsize=8,
+                    color="#333333",
+                    label="_agent",
+                )
             status = "CLOSED" if esc.get("closed") else ("PAUSED" if esc.get("stalled") else "")
             if status:
-                ax.text(g["length_m"] + 0.6, i + 0.21, status, ha="left", va="center",
-                        fontsize=8, color="#B00020", fontweight="bold", label="_agent")
+                ax.text(
+                    g["length_m"] + 0.6,
+                    i + 0.21,
+                    status,
+                    ha="left",
+                    va="center",
+                    fontsize=8,
+                    color="#B00020",
+                    fontweight="bold",
+                    label="_agent",
+                )
 
     def _draw_geometry(self, ax, level_name: str = None):
         """Draw station geometry on axes for a specific level."""
@@ -432,9 +471,14 @@ class VideoGenerator:
                 ys = [c[1] for c in coords]
                 cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
                 ax.text(
-                    cx, cy, f"P{platform_num}",
-                    ha="center", va="center",
-                    fontsize=11, color="#994400", fontweight="bold",
+                    cx,
+                    cy,
+                    f"P{platform_num}",
+                    ha="center",
+                    va="center",
+                    fontsize=11,
+                    color="#994400",
+                    fontweight="bold",
                     clip_on=True,
                     zorder=6,
                 )
@@ -582,7 +626,9 @@ class VideoGenerator:
                 size = 10 if role else 8
 
                 ax.plot(
-                    x, y, "o",
+                    x,
+                    y,
+                    "o",
                     color=face,
                     markeredgecolor=edge,
                     markeredgewidth=1.5,
@@ -626,10 +672,14 @@ class VideoGenerator:
                     x_mid,
                     y_mid,
                     f"TRAIN P{exit_name.rsplit('_', 1)[-1]}",
-                    ha="center", va="center",
-                    fontsize=7, color="#222222", fontweight="bold",
+                    ha="center",
+                    va="center",
+                    fontsize=7,
+                    color="#222222",
+                    fontweight="bold",
                     rotation=label_rotation,
-                    zorder=8, clip_on=True,
+                    zorder=8,
+                    clip_on=True,
                     label="_agent",
                 )
 

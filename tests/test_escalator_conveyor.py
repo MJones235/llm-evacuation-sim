@@ -68,7 +68,7 @@ def test_walkers_keep_a_free_step_and_never_overtake():
         on_incline = [r for r in walkers if r.s < conv.params.length_m]
         for ahead, behind in zip(on_incline, on_incline[1:]):
             assert ahead.s - behind.s >= 2 * conv.params.step_depth - 1e-6
-        assert [r.agent_id for r in walkers] == order[len(order) - len(walkers):]
+        assert [r.agent_id for r in walkers] == order[len(order) - len(walkers) :]
         for rider in conv.arrived():
             conv.remove(rider.agent_id)
         t += DT

@@ -239,8 +239,7 @@ class ConfigLoader:
         known = {"llm", "concordia", "default", "rule_based", "rule", "rules"}
         if engine.lower() not in known:
             raise ValueError(
-                f"decision.engine '{engine}' is not recognised; "
-                f"expected one of {sorted(known)}"
+                f"decision.engine '{engine}' is not recognised; expected one of {sorted(known)}"
             )
 
         crowd_radius = decision.get("crowd_radius_m")
@@ -258,9 +257,7 @@ class ConfigLoader:
                     continue
                 value = weights[key]
                 if not isinstance(value, int | float) or value < 0:
-                    raise ValueError(
-                        f"decision.rule_weights.{key} must be a non-negative number"
-                    )
+                    raise ValueError(f"decision.rule_weights.{key} must be a non-negative number")
 
     @staticmethod
     def _validate_calibration_section(config: dict[str, Any]) -> None:
@@ -306,7 +303,9 @@ class ConfigLoader:
         if timetable_csv is not None and (
             not isinstance(timetable_csv, str) or not timetable_csv.strip()
         ):
-            raise ValueError("calibration.timetable_csv must be a non-empty path string when provided")
+            raise ValueError(
+                "calibration.timetable_csv must be a non-empty path string when provided"
+            )
 
         seed = calibration.get("seed", 0)
         if not isinstance(seed, int):
@@ -322,7 +321,9 @@ class ConfigLoader:
 
         spawn_points = calibration.get("spawn_points")
         if not isinstance(spawn_points, dict) or not spawn_points:
-            raise ValueError("calibration.spawn_points must be a non-empty mapping of location -> {level, xy}")
+            raise ValueError(
+                "calibration.spawn_points must be a non-empty mapping of location -> {level, xy}"
+            )
         for loc, spec in spawn_points.items():
             if not isinstance(spec, dict):
                 raise ValueError(f"calibration.spawn_points.{loc} must be a mapping")
@@ -437,9 +438,7 @@ class ConfigLoader:
                 raise ValueError("station.exit_semantic_tags must be a dictionary")
             for exit_id, tags in exit_tags.items():
                 if not isinstance(exit_id, str) or not exit_id.strip():
-                    raise ValueError(
-                        "station.exit_semantic_tags keys must be non-empty strings"
-                    )
+                    raise ValueError("station.exit_semantic_tags keys must be non-empty strings")
                 if not isinstance(tags, list) or not all(
                     isinstance(tag, str) and tag.strip() for tag in tags
                 ):
@@ -459,8 +458,10 @@ class ConfigLoader:
                 raise ValueError(f"{base} must be a dictionary")
 
             keywords = policy.get("when_goal_contains_any")
-            if not isinstance(keywords, list) or not keywords or not all(
-                isinstance(k, str) and k.strip() for k in keywords
+            if (
+                not isinstance(keywords, list)
+                or not keywords
+                or not all(isinstance(k, str) and k.strip() for k in keywords)
             ):
                 raise ValueError(
                     f"{base}.when_goal_contains_any must be a non-empty list of strings"

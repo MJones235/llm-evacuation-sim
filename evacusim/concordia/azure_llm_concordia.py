@@ -282,7 +282,9 @@ class AzureLLMConcordia:
                             pass
 
                         if not is_content_filter:
-                            logger.warning(f"Attempt {attempt}/{self.max_retries} failed: {error_msg}")
+                            logger.warning(
+                                f"Attempt {attempt}/{self.max_retries} failed: {error_msg}"
+                            )
                             last_error = Exception(error_msg)
                     else:
                         logger.warning(f"Attempt {attempt}/{self.max_retries} failed: {error_msg}")
@@ -396,8 +398,7 @@ class AzureLLMConcordia:
 
         if not endpoint or not api_key:
             raise ValueError(
-                "Missing required environment variables: "
-                "AZURE_LLM_ENDPOINT and AZURE_LLM_API_KEY"
+                "Missing required environment variables: AZURE_LLM_ENDPOINT and AZURE_LLM_API_KEY"
             )
 
         return cls(endpoint=endpoint, api_key=api_key, model=model, **kwargs)

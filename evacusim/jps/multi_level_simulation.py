@@ -10,10 +10,10 @@ from typing import Any
 
 from evacusim.escalators.spec_loader import build_specs
 from evacusim.escalators.system import EscalatorSystem
-from evacusim.utils.logger import get_logger
 from evacusim.jps.jupedsim_integration import (
     ConcordiaJuPedSimulation,
 )
+from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -492,9 +492,7 @@ class MultiLevelJuPedSimulation:
             boarded.append(concordia_id)
 
         if boarded:
-            logger.info(
-                f"🚂 {len(boarded)} agent(s) boarding '{exit_name}': {boarded}"
-            )
+            logger.info(f"🚂 {len(boarded)} agent(s) boarding '{exit_name}': {boarded}")
         return boarded
 
     def generate_spawn_positions(
