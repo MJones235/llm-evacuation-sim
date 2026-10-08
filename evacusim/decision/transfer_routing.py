@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import hashlib
 import random
-import re
 
 from shapely.geometry import Point
 from shapely.ops import nearest_points
 
+from evacusim.conventions import is_platform_zone, platform_zone
 from evacusim.decision.situation import GoalTracker, goal_is_train_oriented
 from evacusim.utils.logger import get_logger
 
@@ -41,12 +41,19 @@ class PostTransferRouting:
         zones_polygons: Named zone polygons (platform zones are used).
         agent_cfg: Per-agent records (the ``target`` platform is used).
         goals: Agents' current goals.
+        street_level: Level id of the street exits (``station.street_level``).
     """
 
     def __init__(
-        self, jps_sim, zones_polygons: dict, agent_cfg: dict[str, dict], goals: GoalTracker
+        self,
+        jps_sim,
+        zones_polygons: dict,
+        agent_cfg: dict[str, dict],
+        goals: GoalTracker,
+        street_level: str = "0",
     ):
         self._jps_sim = jps_sim
+        self._street_level = street_level
         self._zones_polygons = zones_polygons
         self._agent_cfg = agent_cfg
         self._goals = goals
@@ -79,7 +86,9 @@ class PostTransferRouting:
 
         # Someone arriving on the concourse to leave chooses a street exit now.
         level = self._jps_sim.get_agent_level(agent_id)
-        if level == "0" and not goal_is_train_oriented(self._goals.goals.get(agent_id, "")):
+        if level == self._street_level and not goal_is_train_oriented(
+            self._goals.goals.get(agent_id, "")
+        ):
             del escape_waypoints[agent_id]
             logger.debug(f"{agent_id}: transferred to concourse — choosing a street exit")
             return False
@@ -100,12 +109,11 @@ class PostTransferRouting:
         self, agent_id: str, position: tuple[float, float]
     ) -> tuple[float, float] | None:
         """A stable per-agent random point on the agent's target platform, if it has one."""
-        target = str(self._agent_cfg.get(agent_id, {}).get("target", "")).lower()
-        platform_zone = target[len("train_") :] if target.startswith("train_platform_") else target
-        if not re.fullmatch(r"platform_[1-4]", platform_zone):
+        zone = platform_zone(self._agent_cfg.get(agent_id, {}).get("target", ""))
+        if not is_platform_zone(zone):
             return None
 
-        polygon = self._zones_polygons.get(platform_zone)
+        polygon = self._zones_polygons.get(zone)
         if polygon is None or polygon.is_empty:
             return None
         safe_polygon = polygon.buffer(-0.3)
@@ -120,7 +128,7 @@ class PostTransferRouting:
             if not accessible.is_empty:
                 safe_polygon = accessible
 
-        seed_bytes = hashlib.sha256(f"{agent_id}:{platform_zone}".encode()).digest()[:8]
+        seed_bytes = hashlib.sha256(f"{agent_id}:{zone}".encode()).digest()[:8]
         rng = random.Random(int.from_bytes(seed_bytes, "big"))
         min_x, min_y, max_x, max_y = safe_polygon.bounds
         for _ in range(500):

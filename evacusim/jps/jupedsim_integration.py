@@ -22,6 +22,7 @@ import jupedsim as jps
 from shapely.geometry import Point
 from shapely.ops import nearest_points
 
+from evacusim.conventions import is_train_exit
 from evacusim.jps.agent_tracker import AgentTracker
 from evacusim.jps.exit_manager import ExitManager
 from evacusim.jps.geometry_manager import GeometryManager
@@ -540,8 +541,7 @@ class ConcordiaJuPedSimulation:
             # otherwise nearest-exit fallback misclassifies the boarded agent as
             # using an escalator and the multi-level wrapper transfers them up.
             if assigned_exit and (
-                assigned_exit in self.exit_manager.exit_coordinates
-                or assigned_exit.startswith("train_platform_")
+                assigned_exit in self.exit_manager.exit_coordinates or is_train_exit(assigned_exit)
             ):
                 exited[agent_id] = assigned_exit
                 logger.info(f"Agent {agent_id} exited through assigned exit {assigned_exit}")

@@ -10,6 +10,7 @@ import math
 import re
 from typing import Any
 
+from evacusim.conventions import is_train_exit
 from evacusim.translation.exit_name_registry import (
     build_registry_from_station_layout,
 )
@@ -245,12 +246,12 @@ class ActionTranslator:
             level_sim = self.jps_sim.simulations.get(agent_level)
             if level_sim and hasattr(level_sim, "exit_manager"):
                 for name, coords in level_sim.exit_manager.exit_coordinates.items():
-                    if str(name).startswith("train_platform_"):
+                    if is_train_exit(name):
                         candidates[name] = coords
 
         if not candidates:
             for name, coords in self.exits.items():
-                if str(name).startswith("train_platform_"):
+                if is_train_exit(name):
                     candidates[name] = coords
 
         if not candidates:

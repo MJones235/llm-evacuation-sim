@@ -110,6 +110,7 @@ class DecisionProcessor:
             getattr(action_translator, "zones_polygons", {}),
             self._agent_cfg,
             self.situation.goals,
+            street_level=station_layout.get("street_level", "0"),
         )
 
         # How each agent asked to be re-assessed: "next_interval" or "new_cue_only".

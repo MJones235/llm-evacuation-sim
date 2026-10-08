@@ -229,6 +229,8 @@ What agents know about the station, and how zones and exits are named.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `knowledge` | StationKnowledge | **required** |  |
+| `street_level` | str | `"0"` | Level id of the street exits (concourse). |
+| `platform_level` | str | `"-1"` | Level id of the train platforms. |
 | `zone_labels` | map[str → str] | `{}` | Human-readable names of zones and levels. |
 | `zone_boundaries` | map[str → map[str → ZoneBoundary]] | `{}` | Per level, rules that assign spawn zones. |
 | `arrival_exits_by_zone` | map[str → list[str]] | `{}` | Exits that lead *into* a zone and so are not ways out of it. |

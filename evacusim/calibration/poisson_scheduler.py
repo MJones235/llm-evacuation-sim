@@ -24,6 +24,8 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
+from evacusim.conventions import train_exit
+
 PLATFORM_OPEN_LEAD_S = 10 * 60
 DEFAULT_ALIGHTING_DURATION_S = 12.0
 ALIGHTING_START_DELAY_S = 1.0
@@ -57,7 +59,7 @@ def _train_service_windows(timetable) -> dict[str, tuple[float, float]]:
     """Return train-exit service windows, opening ten minutes before service."""
     windows: dict[str, tuple[float, float]] = {}
     for train in timetable:
-        exit_id = f"train_platform_{train.platform}"
+        exit_id = train_exit(train.platform)
         start, end = windows.get(exit_id, (float("inf"), float("-inf")))
         windows[exit_id] = (
             min(start, max(0.0, float(train.arrival_s) - PLATFORM_OPEN_LEAD_S)),

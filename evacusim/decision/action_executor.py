@@ -11,7 +11,9 @@ import math
 import random
 from typing import Any
 
+from evacusim.conventions import is_train_exit
 from evacusim.decision.action_utils import extract_exit_name
+from evacusim.decision.situation import goal_is_train_oriented
 from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -541,11 +543,11 @@ class ActionExecutor:
             current_dest = self.agent_destinations.get(agent_id, "")
             agent_config = next((c for c in self.agent_configs if c["id"] == agent_id), {})
             goal = str(agent_config.get("goal_state") or agent_config.get("initial_goal") or "")
-            train_oriented = any(word in goal.lower() for word in ("train", "platform", "board"))
+            train_oriented = goal_is_train_oriented(goal)
             preserve_boarding_route = (
                 train_oriented
                 and wait_reason != "route_blocked"
-                and (current_dest.startswith("train_platform_") or current_dest.endswith("_down"))
+                and (is_train_exit(current_dest) or current_dest.endswith("_down"))
             )
             if preserve_boarding_route:
                 self.agent_action[agent_id] = "moving"

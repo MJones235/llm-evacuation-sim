@@ -30,6 +30,7 @@ from rich.progress import (
 )
 
 from evacusim.concordia.agent_builder import AgentBuilder
+from evacusim.conventions import is_train_exit
 from evacusim.coordination.observation_coordinator import ObservationCoordinator
 from evacusim.coordination.simulation_state_queries import SimulationStateQueries
 from evacusim.decision.action_executor import ActionExecutor
@@ -769,9 +770,7 @@ class HybridSimulationRunner:
                             and goal_is_train_oriented(goal)
                             and (
                                 not self.agent_destinations.get(aid, "")
-                                or self.agent_destinations.get(aid, "").startswith(
-                                    "train_platform_"
-                                )
+                                or is_train_exit(self.agent_destinations.get(aid, ""))
                             )
                         }
                         for _exit_name in sorted(self.event_manager.active_train_exits):
@@ -791,7 +790,7 @@ class HybridSimulationRunner:
                                             "intended_exit": _exit_name,
                                             "exit_distance_m": "",
                                             "time_s": round(self.current_sim_time, 2),
-                                            "level": "-1",
+                                            "level": getattr(self.jps_sim, "platform_level", "-1"),
                                             "x": "",
                                             "y": "",
                                             "validated": True,
@@ -886,7 +885,7 @@ class HybridSimulationRunner:
                     stranded = [
                         aid
                         for aid, dest in self.agent_destinations.items()
-                        if dest.startswith("train_platform_")
+                        if is_train_exit(dest)
                         and dest not in active_train_exits
                         and aid not in self.exited_agents
                     ]

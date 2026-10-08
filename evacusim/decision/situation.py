@@ -24,6 +24,7 @@ from typing import Any
 
 from shapely.geometry import Point
 
+from evacusim.conventions import is_train_exit, platform_zone
 from evacusim.core.decision_engine import DecisionContext, ExitOption
 from evacusim.utils.logger import get_logger
 
@@ -449,10 +450,7 @@ class SituationAssembler:
     def _has_train_service(self) -> bool:
         """True if the station has train exits (boarding is possible at all)."""
         try:
-            return any(
-                str(exit_id).startswith("train_platform_")
-                for exit_id in self._translator.exit_registry.get_all_ids()
-            )
+            return any(is_train_exit(e) for e in self._translator.exit_registry.get_all_ids())
         except Exception:
             return False
 
@@ -465,12 +463,11 @@ class SituationAssembler:
         """
         if not self._platform_down_exits:
             return ()
-        t = str(target or "").strip().lower()
-        if not t:
+        zone = platform_zone(target)
+        if not zone:
             return ()
-        platform_zone = t[len("train_") :] if t.startswith("train_platform_") else t
         offered = set(offered_exit_ids)
-        return tuple(c for c in self._platform_down_exits.get(platform_zone, []) if c in offered)
+        return tuple(c for c in self._platform_down_exits.get(zone, []) if c in offered)
 
     def _exit_options(
         self,

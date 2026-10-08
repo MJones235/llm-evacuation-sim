@@ -397,6 +397,8 @@ class StationConfig(Section):
     """What agents know about the station, and how zones and exits are named."""
 
     knowledge: StationKnowledge
+    street_level: LevelId = Field("0", description="Level id of the street exits (concourse).")
+    platform_level: LevelId = Field("-1", description="Level id of the train platforms.")
     zone_labels: dict[str, str] = Field(
         default_factory=dict, description="Human-readable names of zones and levels."
     )
