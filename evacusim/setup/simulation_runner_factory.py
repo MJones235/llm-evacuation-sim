@@ -1,18 +1,26 @@
-"""
-Simulation runner factory for Station Concordia simulations.
+"""Build the simulation runner from a run's parameters.
 
 This module is responsible for:
-- Creating and configuring HybridSimulationRunner instances
-- Loading events from configuration
-- Setting up test scenarios (blocked exits, etc.)
-- Configuring runner parameters
+- Creating and configuring the HybridSimulationRunner
+- Selecting the decision engine
+- Building runtime passenger spawning for calibration runs
+- Scheduling the scenario's events
 """
 
 import logging
 from pathlib import Path
 
+from evacusim.config.schema import (
+    CalibrationConfig,
+    DecisionConfig,
+    Event,
+    RuleBasedDecisionConfig,
+    RunConfig,
+    as_dict,
+)
 from evacusim.coordination.hybrid_simulation import HybridSimulationRunner
 from evacusim.utils.logger import get_logger, setup_logger
+from evacusim.utils.seeding import derive_seed
 
 logger = get_logger(__name__)
 
@@ -28,7 +36,7 @@ class SimulationRunnerFactory:
         model,
         embedder,
         decisions_file: Path,
-        config: dict,
+        params: RunConfig,
         pace_to_realtime: bool = False,
         pre_built_systems: list | None = None,
         pre_built_agent_roles: dict | None = None,
@@ -43,7 +51,7 @@ class SimulationRunnerFactory:
             model: Language model instance
             embedder: Sentence embedder function
             decisions_file: Path to decisions output file
-            config: Full configuration dictionary
+            params: The run's parameters
 
         Returns:
             Configured HybridSimulationRunner ready to run
@@ -51,34 +59,17 @@ class SimulationRunnerFactory:
         Raises:
             Exception: If runner initialization fails
         """
-        sim_config = config.get("simulation", {})
-        max_steps = sim_config.get("max_iterations", 200)
-        decision_interval = sim_config.get("decision_interval", 5.0)
-        start_time_s = float(sim_config.get("start_time_s", 0.0))
+        start_time_s = params.simulation.start_time_s
 
-        # Video generation settings
-        video_config = config.get("video", {})
-        enable_video = video_config.get("enabled", False)
+        # The LLM engine is the default; a rule-based (LLM-free) engine builds
+        # no Concordia agents or embedder.
+        decision_engine = SimulationRunnerFactory._build_decision_engine(params.decision)
 
-        # Monitoring settings
-        monitoring_config = config.get("monitoring", {})
-
-        # Performance settings
-        performance_config = config.get("performance", {})
-
-        # Rule-based director systems (staff, firefighters, etc.)
-        systems_config = config.get("systems", {})
-        prompts_config = config.get("prompts", {})
-        decision_prompt_template_path = prompts_config.get("decision_prompt_template_path")
-
-        # Select the decision engine. Default is the Concordia/LLM engine; a
-        # rule-based (LLM-free) engine can be requested via the ``decision``
-        # config section, in which case no Concordia agents or embedder are built.
-        decision_engine = SimulationRunnerFactory._build_decision_engine(config)
-
-        # Feature A: optional runtime passenger spawning driven by usage +
-        # timetable CSVs (calibration under non-evacuation conditions).
-        spawn_controller, calibration_timetable = SimulationRunnerFactory._build_calibration(config)
+        # Calibration runs spawn passengers at runtime from usage and timetable
+        # data (normal operations, no evacuation).
+        spawn_controller, calibration_timetable = SimulationRunnerFactory._build_calibration(
+            params.calibration, seed=derive_seed(params.seed, "calibration")
+        )
 
         logger.info("Creating HybridSimulationRunner...")
 
@@ -90,13 +81,7 @@ class SimulationRunnerFactory:
         # run. Default to INFO; opt back into DEBUG via
         # performance.file_log_level in the experiment config when needed.
         log_file = decisions_file.parent / "simulation.log"
-        file_log_level_name = str(performance_config.get("file_log_level", "INFO")).upper()
-        file_log_level = logging.getLevelName(file_log_level_name)
-        if not isinstance(file_log_level, int):
-            logger.warning(
-                f"Invalid performance.file_log_level {file_log_level_name!r}; defaulting to INFO"
-            )
-            file_log_level = logging.INFO
+        file_log_level = logging.getLevelName(params.performance.file_log_level)
         setup_logger(
             log_file=log_file,
             console_level=logging.INFO,
@@ -113,15 +98,15 @@ class SimulationRunnerFactory:
                 station_layout=station_layout,
                 language_model=model,
                 embedder=embedder,
-                decision_interval=decision_interval,
-                max_steps=max_steps,
+                decision_interval=params.simulation.decision_interval,
+                max_steps=params.simulation.max_iterations,
                 start_time_s=start_time_s,
                 output_file=decisions_file,
-                enable_video=enable_video,
-                monitoring_config=monitoring_config,
-                performance_config=performance_config,
-                systems_config=systems_config,
-                decision_prompt_template_path=decision_prompt_template_path,
+                enable_video=params.video.enabled,
+                monitoring_config=as_dict(params.monitoring),
+                performance_config=as_dict(params.performance),
+                systems_config={name: as_dict(cfg) for name, cfg in params.systems.items()},
+                decision_prompt_template_path=params.prompts.decision_prompt_template_path,
                 pace_to_realtime=pace_to_realtime,
                 pre_built_systems=pre_built_systems,
                 pre_built_agent_roles=pre_built_agent_roles,
@@ -138,7 +123,7 @@ class SimulationRunnerFactory:
             raise
 
         # Configure events
-        SimulationRunnerFactory._load_events(runner, config)
+        SimulationRunnerFactory._load_events(runner, params.events)
         SimulationRunnerFactory._load_calibration_train_events(runner, calibration_timetable)
         discarded = 0
         if runner.spawn_controller is not None and start_time_s > 0:
@@ -157,92 +142,73 @@ class SimulationRunnerFactory:
         return runner
 
     @staticmethod
-    def _build_decision_engine(config: dict):
-        """Construct the decision engine named by ``config["decision"]``.
+    def _build_decision_engine(decision: DecisionConfig):
+        """Construct the decision engine selected by the ``decision`` section.
 
-        Returns ``None`` for the default LLM engine (the DecisionProcessor then
-        builds its own LLMDecisionEngine), or a RuleBasedDecisionEngine for an
+        Returns ``None`` for the LLM engine (the DecisionProcessor then builds
+        its own LLMDecisionEngine), or a RuleBasedDecisionEngine for an
         LLM-free run.
         """
-        decision_config = config.get("decision", {}) or {}
-        engine_name = str(decision_config.get("engine", "llm")).lower()
-        if engine_name in ("rule_based", "rule", "rules"):
-            from evacusim.decision.rule_based_decision_engine import (
-                RuleBasedDecisionEngine,
-            )
+        if not isinstance(decision, RuleBasedDecisionConfig):
+            return None
 
-            weights = decision_config.get("rule_weights", {}) or {}
-            engine = RuleBasedDecisionEngine(
-                w_proximity=float(weights.get("proximity", 0.5)),
-                w_busyness=float(weights.get("busyness", 0.3)),
-                w_familiarity=float(weights.get("familiarity", 0.2)),
-                w_visibility=float(weights.get("visibility", 0.0)),
-                crowd_radius_m=float(decision_config.get("crowd_radius_m", 5.0)),
-            )
-            logger.info(
-                "Decision engine: rule_based (LLM-free); weights=%s",
-                weights or "defaults",
-            )
-            return engine
-        if engine_name not in ("llm", "concordia", "default"):
-            logger.warning(
-                "Unknown decision.engine '%s'; defaulting to the LLM engine.",
-                engine_name,
-            )
-        return None
+        from evacusim.decision.rule_based_decision_engine import RuleBasedDecisionEngine
+
+        weights = decision.rule_weights
+        logger.info("Decision engine: rule_based (LLM-free); weights=%s", as_dict(weights))
+        return RuleBasedDecisionEngine(
+            w_proximity=weights.proximity,
+            w_busyness=weights.busyness,
+            w_familiarity=weights.familiarity,
+            w_visibility=weights.visibility,
+            crowd_radius_m=decision.crowd_radius_m,
+        )
 
     @staticmethod
-    def _build_calibration(config: dict):
+    def _build_calibration(calibration: CalibrationConfig | None, seed: int = 0):
         """Build the runtime spawn controller for a calibration run.
 
-        Returns ``(spawn_controller, timetable)``.  When ``calibration.enabled``
-        is false/absent, returns ``(None, [])`` and the run behaves normally.
-        Loads the usage + timetable CSVs, builds a seeded Poisson arrival
+        Returns ``(spawn_controller, timetable)``. When calibration is absent
+        or disabled, returns ``(None, [])`` and the run behaves normally.
+        Loads the usage and timetable CSVs, builds a seeded Poisson arrival
         schedule, and wraps it in a :class:`RuntimeSpawnController`.
         """
-        calibration = config.get("calibration") or {}
-        if not calibration.get("enabled", False):
+        if calibration is None or not calibration.enabled:
             return None, []
 
         from evacusim.calibration.poisson_scheduler import build_arrival_schedule
         from evacusim.calibration.spawn_controller import RuntimeSpawnController
-        from evacusim.calibration.usage_data import (
-            load_entrance_usage,
-            load_timetable,
-        )
+        from evacusim.calibration.usage_data import load_entrance_usage, load_timetable
 
-        intervals = load_entrance_usage(calibration["entrance_usage_csv"])
-        timetable = (
-            load_timetable(calibration["timetable_csv"]) if calibration.get("timetable_csv") else []
-        )
+        intervals = load_entrance_usage(calibration.entrance_usage_csv)
+        timetable = load_timetable(calibration.timetable_csv) if calibration.timetable_csv else []
 
-        spawn_points = calibration["spawn_points"]
+        spawn_points = {name: as_dict(point) for name, point in calibration.spawn_points.items()}
         spawn_cfg = {
-            "entrance_level": str(calibration.get("entrance_level", "0")),
-            "entrance_dest_exits": calibration.get("entrance_dest_exits", []),
-            "platform_level": str(calibration.get("platform_level", "-1")),
-            "platform_exit": calibration.get("platform_exit", ""),
+            "entrance_level": calibration.entrance_level,
+            "entrance_dest_exits": calibration.entrance_dest_exits,
+            "platform_level": calibration.platform_level,
+            "platform_exit": calibration.platform_exit,
             "train_door_counts": {
-                str(platform): len(point.get("door_points", []))
-                for platform, point in spawn_points.items()
-                if str(platform).isdigit() and point.get("door_points")
+                platform: len(point.door_points)
+                for platform, point in calibration.spawn_points.items()
+                if platform.isdigit() and point.door_points
             },
-            "train_alighting_duration_s": calibration.get("train_alighting_duration_s", 12.0),
+            "train_alighting_duration_s": calibration.train_alighting_duration_s,
         }
-        seed = int(calibration.get("seed", 0))
         schedule = build_arrival_schedule(intervals, timetable, spawn_cfg, seed=seed)
 
         controller = RuntimeSpawnController(
             schedule,
             spawn_points,
             seed=seed,
-            jitter_m=float(calibration.get("spawn_jitter_m", 0.5)),
-            train_door_jitter_m=float(calibration.get("train_door_jitter_m", 0.3)),
-            walking_speed_mean=float(calibration.get("walking_speed_mean", 1.34)),
-            walking_speed_std=float(calibration.get("walking_speed_std", 0.0)),
-            walking_speed_min=float(calibration.get("walking_speed_min", 0.3)),
-            walking_speed_max=float(calibration.get("walking_speed_max", 2.2)),
-            knowledge_profile=calibration.get("knowledge_profile", "novice"),
+            jitter_m=calibration.spawn_jitter_m,
+            train_door_jitter_m=calibration.train_door_jitter_m,
+            walking_speed_mean=calibration.walking_speed_mean,
+            walking_speed_std=calibration.walking_speed_std,
+            walking_speed_min=calibration.walking_speed_min,
+            walking_speed_max=calibration.walking_speed_max,
+            knowledge_profile=calibration.knowledge_profile,
         )
         # Retained for the end-of-run calibration report (expected vs realised).
         controller.expected_intervals = intervals
@@ -282,31 +248,12 @@ class SimulationRunnerFactory:
             )
 
     @staticmethod
-    def _load_events(runner: HybridSimulationRunner, config: dict) -> None:
-        """
-        Load events from configuration into the runner.
+    def _load_events(runner: HybridSimulationRunner, events: list[Event]) -> None:
+        """Schedule the scenario's events on the runner's EventManager."""
+        for event in events:
+            runner.event_manager.scheduled_events.append({**as_dict(event), "_fired": False})
 
-        Args:
-            runner: Simulation runner instance
-            config: Configuration dictionary
-        """
-        events_config = config.get("events", [])
-        if events_config is None:
-            events_config = []
-        elif not isinstance(events_config, list):
-            logger.warning(
-                "Invalid 'events' config type %s; expected list. Ignoring events.",
-                type(events_config).__name__,
-            )
-            events_config = []
-        for event in events_config:
-            # Preserve all event fields (type, pa_announcement, zone_messages, etc.)
-            # so that the EventManager can handle PA announcements, zone routing, etc.
-            record = {k: v for k, v in event.items() if k != "_fired"}
-            record.setdefault("_fired", False)
-            runner.event_manager.scheduled_events.append(record)
-
-        if events_config:
-            logger.info(f"Loaded {len(events_config)} events from configuration")
+        if events:
+            logger.info(f"Loaded {len(events)} events from configuration")
         else:
             logger.warning("No events defined in configuration")

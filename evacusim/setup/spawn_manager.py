@@ -19,7 +19,7 @@ class SpawnManager:
     def generate_spawn_positions(
         jps_sim: PedestrianSimulation,
         num_agents: int,
-        seed: int = 42,
+        seed: int,
     ) -> list[tuple[float, float]]:
         """
         Generate spawn positions for agents within the geometry.

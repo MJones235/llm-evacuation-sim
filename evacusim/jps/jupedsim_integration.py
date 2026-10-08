@@ -523,10 +523,14 @@ class ConcordiaJuPedSimulation:
         current_positions = self.agent_tracker.get_all_positions()
         self.last_known_positions.update(current_positions)
 
-        # Get list of all agents that were registered but are no longer in simulation
-        current_registered = set(self.agent_tracker.agent_ids.keys())
-        still_active = set(current_positions.keys())
-        exited_agent_ids = current_registered - still_active
+        # Agents that were registered but are no longer in the simulation, in
+        # registration order (a set difference here made the processing order,
+        # and so escalator boarding order, depend on PYTHONHASHSEED).
+        exited_agent_ids = [
+            agent_id
+            for agent_id in self.agent_tracker.agent_ids
+            if agent_id not in current_positions
+        ]
 
         if len(exited_agent_ids) > 0:
             logger.info(f"Detected {len(exited_agent_ids)} exited agents on level {self.level_id}")

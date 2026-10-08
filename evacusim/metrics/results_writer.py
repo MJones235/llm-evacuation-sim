@@ -64,7 +64,7 @@ class ResultsWriter:
             "agent_positions": agent_positions,
             "current_time": current_sim_time,
             "events": event_history,
-            "blocked_exits": list(blocked_exits),
+            "blocked_exits": sorted(blocked_exits),
             "messages": message_history,
             "decision_telemetry": build_decision_telemetry(agent_decisions),
             "config": {
@@ -125,11 +125,11 @@ class ResultsWriter:
         if agent_levels:
             payload["agent_levels"] = agent_levels
         if blocked_exits is not None:
-            payload["blocked_exits"] = list(blocked_exits)
+            payload["blocked_exits"] = sorted(blocked_exits)
         if agent_roles:
             payload["agent_roles"] = agent_roles
         if active_train_exits is not None:
-            payload["active_train_exits"] = list(active_train_exits)
+            payload["active_train_exits"] = sorted(active_train_exits)
 
         try:
             output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -267,7 +267,7 @@ class ResultsWriter:
             "agent_positions": agent_positions,
             "final_time": final_sim_time,
             "events": event_history,
-            "blocked_exits": list(blocked_exits),
+            "blocked_exits": sorted(blocked_exits),
             "route_changes": route_changes,
             "messages": message_history,
             "decision_telemetry": build_decision_telemetry(agent_decisions, wait_events),

@@ -11,6 +11,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from evacusim.config.schema import OutputConfig
 from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -20,7 +21,7 @@ class OutputManager:
     """Handles output directory and file management for simulation runs."""
 
     @staticmethod
-    def setup_output_directory(config: dict) -> tuple[str, Path, Path]:
+    def setup_output_directory(output: OutputConfig) -> tuple[str, Path, Path]:
         """
         Setup output directory structure for a simulation run.
 
@@ -28,7 +29,7 @@ class OutputManager:
         Also configures environment variables for LLM logging.
 
         Args:
-            config: Configuration dictionary containing output settings
+            output: Output settings (the ``output`` section)
 
         Returns:
             Tuple of (run_id, output_dir, decisions_file)
@@ -40,9 +41,7 @@ class OutputManager:
         run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
 
         # Setup directory structure
-        output_config = config.get("output", {})
-        base_output_dir = Path(output_config.get("directory", "scenarios/station_concordia/output"))
-        output_dir = base_output_dir / run_id
+        output_dir = Path(output.directory) / run_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Setup file paths

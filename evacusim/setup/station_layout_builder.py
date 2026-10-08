@@ -12,6 +12,7 @@ from typing import Any
 
 from shapely.geometry import Point
 
+from evacusim.config.schema import StationConfig, as_dict
 from evacusim.jps.simulation_interface import PedestrianSimulation
 from evacusim.utils.logger import get_logger
 
@@ -22,13 +23,13 @@ class StationLayoutBuilder:
     """Handles creation of station layout from simulation geometry."""
 
     @staticmethod
-    def build_layout(jps_sim: PedestrianSimulation, config: dict) -> dict[str, Any]:
+    def build_layout(jps_sim: PedestrianSimulation, station: StationConfig) -> dict[str, Any]:
         """
         Build station layout dictionary from pedestrian simulation geometry.
 
         Args:
             jps_sim: Pedestrian simulation instance (implements PedestrianSimulation)
-            config: Configuration dictionary
+            station: Station knowledge and naming (the ``station`` section)
 
         Returns:
             Dictionary containing station layout information including:
@@ -48,7 +49,7 @@ class StationLayoutBuilder:
             all_exit_polygons = {}
             all_zones = {}
             all_zone_polygons = {}
-            zone_labels_cfg: dict[str, str] = config.get("station", {}).get("zone_labels", {})
+            zone_labels_cfg = station.zone_labels
 
             # Collect exits from each level
             for level_id in sorted(jps_sim.simulations.keys()):
@@ -113,9 +114,7 @@ class StationLayoutBuilder:
 
         down_access_exits: dict[str, tuple[float, float]] = {}
         custom_exit_display_names: dict[str, str] = {}
-        platform_down_cfg: dict[str, list[str]] = config.get("station", {}).get(
-            "platform_down_exits", {}
-        )
+        platform_down_cfg = station.platform_down_exits
         if platform_down_cfg and hasattr(jps_sim, "simulations"):
             # Invert config: esc_zone_name -> [platform names it serves]
             esc_to_platforms: dict[str, list[str]] = {}
@@ -171,7 +170,7 @@ class StationLayoutBuilder:
                     all_zone_polygons[zone_key] = Point(pos).buffer(0.3)
 
         station_layout = {
-            **config.get("station", {}),
+            **as_dict(station),
             "exits": all_exits,
             "exits_polygons": all_exit_polygons,
             "walkable_areas": jps_sim.geometry_manager.walkable_areas_with_obstacles,
@@ -187,7 +186,7 @@ class StationLayoutBuilder:
             # YAML config entries (e.g. train platform names) take the base, then
             # code-generated escalator labels (more specific) override on top.
             "custom_exit_display_names": {
-                **config.get("station", {}).get("custom_exit_display_names", {}),
+                **station.custom_exit_display_names,
                 **custom_exit_display_names,
             },
         }

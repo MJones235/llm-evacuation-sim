@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from dotenv import load_dotenv
 
+from evacusim.config.schema import LLMConfig
 from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -21,12 +22,12 @@ class LLMSetup:
     """Handles language model and embedder initialization."""
 
     @staticmethod
-    def setup_language_model(config: dict) -> tuple[object, Callable]:
+    def setup_language_model(llm: LLMConfig) -> tuple[object, Callable]:
         """
         Setup the language model and embedder.
 
         Args:
-            config: Configuration dictionary containing LLM settings
+            llm: Language-model settings (the ``llm`` section)
 
         Returns:
             Tuple of (model, embedder_function)
@@ -59,21 +60,20 @@ class LLMSetup:
 
             # Create Azure LLM client designed for Concordia
             # Uses synchronous REST API calls to avoid async/sync conflicts
-            llm_config = config.get("llm", {})
             model = AzureLLMConcordia(
                 endpoint=azure_endpoint,
                 api_key=azure_key,
                 model=azure_model,
-                temperature=llm_config.get("temperature", 0.7),
-                max_retries=llm_config.get("max_retries", 3),
-                max_completion_tokens=llm_config.get("max_completion_tokens", 8000),
-                timeout=llm_config.get("timeout", 90.0),
-                reasoning_effort=llm_config.get("reasoning_effort", None),
-                response_format=llm_config.get("response_format", "json_object"),
+                temperature=llm.temperature,
+                max_retries=llm.max_retries,
+                max_completion_tokens=llm.max_completion_tokens,
+                timeout=llm.timeout,
+                reasoning_effort=llm.reasoning_effort,
+                response_format=llm.response_format,
             )
 
             # Setup embedder (force CPU to avoid GPU compatibility issues)
-            embedder_name = llm_config.get("embedder", "sentence-transformers/all-mpnet-base-v2")
+            embedder_name = llm.embedder
             logger.info(f"Loading embedder: {embedder_name}...")
             st_model = sentence_transformers.SentenceTransformer(embedder_name, device="cpu")
 
