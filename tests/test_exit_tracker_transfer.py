@@ -15,7 +15,7 @@ class ExitTrackerTransferTests(unittest.TestCase):
     def test_temporarily_absent_tracked_agent_is_not_marked_exited(self):
         exited = set()
         tracker = ExitTracker(
-            concordia_agents={"transferring": object()},
+            agents={"transferring": object()},
             exited_agents=exited,
             agent_destinations={},
             jps_sim=_MultiLevelSimulation({"transferring"}),
@@ -28,7 +28,7 @@ class ExitTrackerTransferTests(unittest.TestCase):
     def test_untracked_missing_agent_is_still_classified_as_exited(self):
         exited = set()
         tracker = ExitTracker(
-            concordia_agents={"gone": object()},
+            agents={"gone": object()},
             exited_agents=exited,
             agent_destinations={},
             jps_sim=_MultiLevelSimulation(),

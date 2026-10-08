@@ -15,7 +15,7 @@ class _ObservationGenerator:
 def test_targeted_cycle_formats_only_selected_agent_observations():
     generator = _ObservationGenerator()
     coordinator = ObservationCoordinator(
-        concordia_agents={"selected": object(), "other": object()},
+        agents={"selected": object(), "other": object()},
         exited_agents=set(),
         observation_generator=generator,
         state_queries=SimpleNamespace(

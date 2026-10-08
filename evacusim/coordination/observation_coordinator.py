@@ -23,7 +23,7 @@ class ObservationCoordinator:
 
     def __init__(
         self,
-        concordia_agents: dict[str, Any],
+        agents: dict[str, Any],
         exited_agents: set[str],
         observation_generator,
         state_queries,
@@ -40,7 +40,7 @@ class ObservationCoordinator:
         Initialize observation coordinator.
 
         Args:
-            concordia_agents: Dict of agent_id -> Concordia entity
+            agents: Dict of agent_id -> Concordia entity
             exited_agents: Set of agent IDs who have exited
             observation_generator: ObservationGenerator for formatting observations
             state_queries: Simulation state query interface
@@ -54,7 +54,7 @@ class ObservationCoordinator:
             agent_roles: Optional dict of agent_id -> role label (e.g. "staff member").
                 Used to surface non-LLM director agents in observations.
         """
-        self.concordia_agents = concordia_agents
+        self.agents = agents
         self.exited_agents = exited_agents
         self.observation_generator = observation_generator
         self.state_queries = state_queries
@@ -129,9 +129,9 @@ class ObservationCoordinator:
         else:
             bulk_nearby = None  # Fallback: per-agent queries
 
-        candidates = agent_ids if agent_ids is not None else self.concordia_agents.keys()
+        candidates = agent_ids if agent_ids is not None else self.agents.keys()
         for agent_id in candidates:
-            if agent_id not in self.concordia_agents:
+            if agent_id not in self.agents:
                 continue
             # Skip exited agents
             if agent_id in self.exited_agents:

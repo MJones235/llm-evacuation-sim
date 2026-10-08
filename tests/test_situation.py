@@ -113,3 +113,15 @@ class PayloadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ZoneLookupTests(unittest.TestCase):
+    def test_smallest_containing_zone_wins(self):
+        from shapely.geometry import box
+
+        from evacusim.decision.situation import zone_containing
+
+        zones = {"level_-1": box(0, 0, 100, 100), "platform_1": box(10, 10, 20, 20)}
+        self.assertEqual(zone_containing((15, 15), zones), "platform_1")
+        self.assertEqual(zone_containing((50, 50), zones), "level_-1")
+        self.assertIsNone(zone_containing((500, 500), zones))

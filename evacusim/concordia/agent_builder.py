@@ -50,7 +50,7 @@ class AgentBuilder:
             agents_config: List of agent configuration dictionaries
 
         Returns:
-            Tuple of (concordia_agents dict, injured_agents set)
+            Tuple of (agents dict, injured_agents set)
         """
         logger.info(f"Building {len(agents_config)} Concordia agents in parallel...")
 
@@ -67,7 +67,7 @@ class AgentBuilder:
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Collect results
-        concordia_agents: dict[str, entity_lib.Entity] = {}
+        agents: dict[str, entity_lib.Entity] = {}
         injured_agents: set[str] = set()
 
         for i, result in enumerate(results):
@@ -76,14 +76,12 @@ class AgentBuilder:
                 continue
 
             agent, agent_id, is_injured = result
-            concordia_agents[agent_id] = agent
+            agents[agent_id] = agent
             if is_injured:
                 injured_agents.add(agent_id)
 
-        logger.info(
-            f"Built {len(concordia_agents)} Concordia agents ({len(injured_agents)} injured)"
-        )
-        return concordia_agents, injured_agents
+        logger.info(f"Built {len(agents)} Concordia agents ({len(injured_agents)} injured)")
+        return agents, injured_agents
 
     async def _build_single_agent(
         self, agent_config: dict[str, Any], executor: ThreadPoolExecutor

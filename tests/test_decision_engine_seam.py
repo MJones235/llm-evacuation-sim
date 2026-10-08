@@ -138,7 +138,7 @@ class LLMEngineTests(unittest.TestCase):
 class EngineInjectionTests(unittest.TestCase):
     def _processor(self, engine=None):
         return DecisionProcessor(
-            concordia_agents={},
+            agents={},
             exited_agents=set(),
             action_translator=_Translator(),
             action_executor=object(),
