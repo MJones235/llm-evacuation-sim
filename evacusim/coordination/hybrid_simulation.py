@@ -52,6 +52,13 @@ from evacusim.visualization.position_history import PositionHistoryTracker
 logger = get_logger(__name__)
 
 
+FRAME_INTERVAL_S = 0.5
+"""Simulated seconds between position frames (video, live viewer)."""
+
+RESULTS_WRITE_INTERVAL_S = 10.0
+"""Simulated seconds between incremental writes of the results file."""
+
+
 class SimulationError(RuntimeError):
     """The simulation failed; partial outputs were written before raising."""
 
@@ -393,9 +400,10 @@ class HybridSimulationRunner:
         self._pending_write: Future | None = None
         self._last_step_error: str | None = None
 
-        # Write every 200 steps (10 s at dt=0.05 s) instead of every 10 steps (0.5 s).
-        # This reduces I/O traffic by 20× while keeping the live viewer reasonably fresh.
-        self._write_interval_steps: int = 200
+        # Output cadence in simulated time, whatever the physics step.
+        dt = self.jps_sim.dt
+        self._frame_interval_steps = max(1, round(FRAME_INTERVAL_S / dt))
+        self._write_interval_steps = max(1, round(RESULTS_WRITE_INTERVAL_S / dt))
 
         # Staggered decision groups (Opt 9c).
         # Agents are divided into N_GROUPS groups; only one group is processed each
@@ -1022,7 +1030,7 @@ class HybridSimulationRunner:
         agent_levels = (
             dict(self.jps_sim.agent_levels) if hasattr(self.jps_sim, "agent_levels") else None
         )
-        if self.position_tracker and step % 10 == 0:
+        if self.position_tracker and step % self._frame_interval_steps == 0:
             self.position_tracker.save_frame(
                 self.current_sim_time,
                 self.jps_sim.get_all_agent_positions(),
@@ -1038,7 +1046,7 @@ class HybridSimulationRunner:
             )
 
         # Lightweight positions sidecar for the live viewer.
-        if self.output_file and step % 10 == 0:
+        if self.output_file and step % self._frame_interval_steps == 0:
             with self.perf_timer.measure("file_io"):
                 ResultsWriter.save_positions_only(
                     self.output_file,
