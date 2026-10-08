@@ -118,6 +118,8 @@ class DecisionProcessor:
         # Agents deferred this cycle (clearing an escalator landing or queueing);
         # the runner reads and clears this.
         self._deferred_escalator_agents: set[str] = set()
+        # Agents whose per-agent state has been released after they left.
+        self._released: set[str] = set()
 
         if decision_engine is None:
             from evacusim.decision.llm_decision_engine import LLMDecisionEngine
@@ -220,6 +222,10 @@ class DecisionProcessor:
         self, observations: dict[str, str], current_sim_time: float, agent_ids: list[str] | None
     ) -> None:
         self._deferred_escalator_agents.clear()
+        self._released &= self.exited_agents  # agents recovered after a level change
+        for agent_id in sorted(self.exited_agents - self._released):
+            self.on_agent_exit(agent_id)
+            self._released.add(agent_id)
         candidates = agent_ids if agent_ids is not None else list(self.concordia_agents)
         deciding = [
             a for a in candidates if a in self.concordia_agents and a not in self.exited_agents
