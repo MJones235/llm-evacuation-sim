@@ -40,7 +40,7 @@ from evacusim.jps.exit_tracker import ExitTracker
 from evacusim.jps.simulation_interface import PedestrianSimulation
 from evacusim.metrics.llm_cost_reporter import FinancialReporter
 from evacusim.metrics.population_monitor import PopulationMonitor
-from evacusim.metrics.results_writer import ResultsWriter
+from evacusim.metrics.results_writer import ResultsWriter, RunRecord
 from evacusim.systems.director_system import DirectorSystem
 from evacusim.systems.event_manager import EventManager
 from evacusim.systems.messaging import MessageSystem
@@ -699,6 +699,7 @@ class HybridSimulationRunner:
                     self._pace_to_realtime(step_start)
         except KeyboardInterrupt:
             logger.info("Simulation interrupted by user")
+            results["interrupted"] = True
         except Exception as e:
             logger.error(f"Simulation error: {e}", exc_info=True)
             self._failure = e
@@ -1141,32 +1142,30 @@ class HybridSimulationRunner:
 
         # Save partial decision results
         if self.output_file:
-            # Get agent levels for multi-level simulations
-            agent_levels = None
-            if hasattr(self.jps_sim, "agent_levels"):
-                agent_levels = self.jps_sim.agent_levels
-
-            ResultsWriter.save_final_results(
-                self.output_file,
-                self.agent_decisions,
-                self.jps_sim.get_all_agent_positions(),
-                self.current_sim_time,
-                self.event_manager.event_history,
-                self.event_manager.blocked_exits,
-                self.message_system.message_history,
-                self.wait_events,
-                self.decision_interval,
-                self.max_steps,
-                len(self.agents),
-                self.perf_timer.report(),
-                self.llm_provider,
-                agent_levels,
-                self.agent_roles if self.agent_roles else None,
-                exit_log=self.exit_log,
-                spawn_log=self.spawn_log,
-                escalator_system=getattr(self.jps_sim, "escalator_system", None),
-            )
+            ResultsWriter.save_final_results(self.output_file, self.run_record())
             logger.info(f"Partial results saved to {self.output_file}")
+
+    def run_record(self) -> RunRecord:
+        """The run's state, as written out by :meth:`ResultsWriter.save_final_results`."""
+        return RunRecord(
+            agent_decisions=self.agent_decisions,
+            agent_positions=self.jps_sim.get_all_agent_positions(),
+            final_sim_time=self.current_sim_time,
+            event_history=self.event_manager.event_history,
+            blocked_exits=self.event_manager.blocked_exits,
+            message_history=self.message_system.message_history,
+            wait_events=self.wait_events,
+            decision_interval=self.decision_interval,
+            max_steps=self.max_steps,
+            num_agents=len(self.agents),
+            performance_report=self.perf_timer.report(),
+            llm_provider=self.llm_provider,
+            agent_levels=getattr(self.jps_sim, "agent_levels", None),
+            agent_roles=self.agent_roles or None,
+            exit_log=self.exit_log,
+            spawn_log=self.spawn_log,
+            escalator_system=getattr(self.jps_sim, "escalator_system", None),
+        )
 
     def _step_jupedsim(self) -> bool:
         """
