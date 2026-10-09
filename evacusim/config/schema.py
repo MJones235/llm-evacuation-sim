@@ -237,6 +237,11 @@ class Cue(Section):
 
     strength: Literal["weak", "medium", "strong"]
     instruction: Literal["none", "leave_station", "board_train"] = "none"
+    route: list[str] = Field(
+        default_factory=list,
+        description="Exits the message names (e.g. ``[escalator_b_up]``). Agents who hear "
+        "it learn them, and are offered them wherever they can reach them.",
+    )
 
 
 class _TimedEvent(Section):

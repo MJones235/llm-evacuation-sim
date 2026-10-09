@@ -139,6 +139,7 @@ What a message conveys, for the rule-based decision engine.
 |---|---|---|---|
 | `strength` | `"weak"` \| `"medium"` \| `"strong"` | **required** |  |
 | `instruction` | `"none"` \| `"leave_station"` \| `"board_train"` | `"none"` |  |
+| `route` | list[str] | `[]` | Exits the message names (e.g. ``[escalator_b_up]``). Agents who hear it learn them, and are offered them wherever they can reach them. |
 
 ## `events[]` — PAAnnouncementEvent
 
@@ -163,6 +164,7 @@ What a message conveys, for the rule-based decision engine.
 |---|---|---|---|
 | `strength` | `"weak"` \| `"medium"` \| `"strong"` | **required** |  |
 | `instruction` | `"none"` \| `"leave_station"` \| `"board_train"` | `"none"` |  |
+| `route` | list[str] | `[]` | Exits the message names (e.g. ``[escalator_b_up]``). Agents who hear it learn them, and are offered them wherever they can reach them. |
 
 ## `events[]` — TrainArrivalEvent
 
@@ -253,6 +255,7 @@ What a message conveys, for the rule-based decision engine.
 |---|---|---|---|
 | `strength` | `"weak"` \| `"medium"` \| `"strong"` | **required** |  |
 | `instruction` | `"none"` \| `"leave_station"` \| `"board_train"` | `"none"` |  |
+| `route` | list[str] | `[]` | Exits the message names (e.g. ``[escalator_b_up]``). Agents who hear it learn them, and are offered them wherever they can reach them. |
 
 ## `systems.<name>.phases[].cues_by_zone.<name>` — Cue
 
@@ -262,6 +265,7 @@ What a message conveys, for the rule-based decision engine.
 |---|---|---|---|
 | `strength` | `"weak"` \| `"medium"` \| `"strong"` | **required** |  |
 | `instruction` | `"none"` \| `"leave_station"` \| `"board_train"` | `"none"` |  |
+| `route` | list[str] | `[]` | Exits the message names (e.g. ``[escalator_b_up]``). Agents who hear it learn them, and are offered them wherever they can reach them. |
 
 ## `station` — StationConfig
 

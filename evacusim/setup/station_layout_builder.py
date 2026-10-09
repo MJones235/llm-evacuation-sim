@@ -157,9 +157,12 @@ class StationLayoutBuilder:
                         custom_exit_display_names[esc_zone] = display
 
         # Escalator entrance positions (1.5 m out from each comb onto its
-        # landing) as zones, so director agent spawn_positions can reference
-        # them by name (e.g. zone: "escalator_d_entrance_L0"). Keys are
-        # level-scoped: each escalator has a comb on both levels.
+        # landing) as named landmarks, so staff spawn_positions and patrols can
+        # reference them (e.g. zone: "escalator_d_entrance_L0"). Keys are
+        # level-scoped: each escalator has a comb on both levels. They are kept
+        # out of the zones: an agent at an escalator mouth is still on the
+        # concourse (or platform), not in a zone of its own.
+        landmarks: dict[str, Any] = {}
         if hasattr(jps_sim, "simulations"):
             for level_id, level_sim in jps_sim.simulations.items():
                 for comb in getattr(level_sim.geometry_manager, "escalator_combs", []):
@@ -167,7 +170,7 @@ class StationLayoutBuilder:
                     nx, ny = comb["floor_normal"]
                     pos = ((ax + bx) / 2 + nx * 1.5, (ay + by) / 2 + ny * 1.5)
                     zone_key = f"escalator_{comb['letter'].lower()}_entrance_L{level_id}"
-                    all_zone_polygons[zone_key] = Point(pos).buffer(0.3)
+                    landmarks[zone_key] = Point(pos).buffer(0.3)
 
         station_layout = {
             **as_dict(station),
@@ -179,6 +182,7 @@ class StationLayoutBuilder:
             ),
             "zones": all_zones,
             "zones_polygons": all_zone_polygons,
+            "landmarks": landmarks,
             "obstacles": jps_sim.geometry_manager.obstacles,
             # Concourse-level escalator zones leading to platforms (zone_name -> centroid)
             "down_access_exits": down_access_exits,
