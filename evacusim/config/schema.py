@@ -331,7 +331,9 @@ class StaffPhase(Section):
     """One behaviour phase of a staff agent; phases run in order."""
 
     trigger: Literal["immediate", "on_event", "on_reach_zone", "after_seconds"] = Field(
-        "immediate", description="What starts this phase."
+        "immediate",
+        description="What starts this phase: ``on_event`` is the first warning event "
+        "(an event with a cue, e.g. the alarm).",
     )
     trigger_zone: str | None = Field(None, description="Zone for ``on_reach_zone``.")
     trigger_level_id: LevelId | None = None

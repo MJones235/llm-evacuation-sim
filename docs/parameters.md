@@ -219,7 +219,7 @@ One behaviour phase of a staff agent; phases run in order.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `trigger` | `"immediate"` \| `"on_event"` \| `"on_reach_zone"` \| `"after_seconds"` | `"immediate"` | What starts this phase. |
+| `trigger` | `"immediate"` \| `"on_event"` \| `"on_reach_zone"` \| `"after_seconds"` | `"immediate"` | What starts this phase: ``on_event`` is the first warning event (an event with a cue, e.g. the alarm). |
 | `trigger_zone` | str \| null | null | Zone for ``on_reach_zone``. |
 | `trigger_level_id` | str \| null | null |  |
 | `after_seconds` | float \| null | null | Delay for ``after_seconds``. (≥ 0) |
