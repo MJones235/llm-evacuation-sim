@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 from evacusim.utils.logger import get_logger
+from evacusim.visualization.position_history import FRAMES_FILENAME, LEGACY_FRAMES_FILENAMES
 
 logger = get_logger(__name__)
 
@@ -281,9 +282,10 @@ class VideoGenerationHelper:
 
         # Check for position history — prefer the streaming .jsonl format produced
         # by the position tracker, fall back to the legacy .json wrapper.
-        history_file = decisions_file.parent / f"{decisions_file.stem}_history.jsonl"
-        if not history_file.exists():
-            history_file = decisions_file.parent / f"{decisions_file.stem}_history.json"
+        history_file = decisions_file.parent / FRAMES_FILENAME
+        for legacy in LEGACY_FRAMES_FILENAMES:
+            if not history_file.exists():
+                history_file = decisions_file.parent / legacy
         if not history_file.exists():
             logger.warning(
                 "No position history found. Enable video generation in config "

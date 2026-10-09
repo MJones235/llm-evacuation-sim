@@ -12,7 +12,7 @@ that start at a time of day (`simulation.start_time_s`, calibration runs).
 | `exit_log.csv` | One row per person who left the station or boarded a train. |
 | `population_timeseries.csv` / `.json` / `.png` | People per monitored zone over time (`monitoring`). |
 | `escalator_log.csv`, `escalators.json` | One row per escalator ride; escalator geometry. |
-| `agent_decisions_history.jsonl` | Position frames every 0.5 s (video and frame-based analysis). |
+| `frames.jsonl` | Position frames every 0.5 s (video and frame-based analysis). Runs before October 2026: `agent_decisions_history.jsonl`. |
 | `agent_decisions.json` | Full results: every decision record, events, messages, telemetry. |
 | `agent_decisions_positions.json` | Latest positions, refreshed during the run for the live viewer. |
 | `calibration_arrivals.csv`, `calibration_report.json` | Calibration runs: realised arrivals; expected vs realised. |
@@ -92,7 +92,7 @@ One row per decision, ordered by time then agent.
 | `stall_wait_s` | Time the belt was paused with the agent on it. |
 | `discharge_attempts` | Tries needed to step off onto a free landing. |
 
-## `agent_decisions_history.jsonl`
+## `frames.jsonl`
 
 One JSON object per line, every 0.5 s of simulated time: `time`, `positions`
 (agent → `[x, y]`), `agent_states`, `agent_levels`, `blocked_exits`,
