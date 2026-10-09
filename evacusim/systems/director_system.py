@@ -95,9 +95,18 @@ import contextlib
 import math
 from typing import Any
 
+from shapely.geometry import Point
+from shapely.ops import nearest_points
+
 from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+WAYPOINT_CLEARANCE_M = 0.5
+"""How far inside the walkable area a snapped patrol waypoint is placed."""
+
+PATROL_LEG_TIMEOUT_S = 90.0
+"""A patrol waypoint not reached within this time counts as reached."""
 
 # ---------------------------------------------------------------------------
 # Phase normalisation helper (module-level so it can be unit-tested)
@@ -205,6 +214,8 @@ class DirectorSystem:
 
         # Per-agent patrol state
         self._patrol_index: dict[str, int] = {}
+        # When each agent started walking to its current patrol waypoint.
+        self._leg_started_at: dict[str, float] = {}
         self._patrol_arrived_at: dict[str, float] = {}
 
         # Per-agent hold state
@@ -255,14 +266,19 @@ class DirectorSystem:
         Returns:
             List of director agent IDs.
         """
-        zones_polygons: dict[str, Any] = station_layout.get("zones_polygons", {})
+        # Staff positions may name zones or landmarks (escalator entrances).
+        zones_polygons: dict[str, Any] = {
+            **station_layout.get("zones_polygons", {}),
+            **station_layout.get("landmarks", {}),
+        }
         self._zones_polygons_ref = zones_polygons
 
         # Resolve patrol waypoints for every phase up front
         for phase in self._phases:
-            phase["patrol_waypoints"] = self._resolve_patrol_waypoints(
-                phase["patrol_zones"], zones_polygons
-            )
+            phase["patrol_waypoints"] = [
+                {**wp, "pos": self._walkable_point(jps_sim, wp["pos"], wp["level_id"])}
+                for wp in self._resolve_patrol_waypoints(phase["patrol_zones"], zones_polygons)
+            ]
             if phase["movement"] == "zone_patrol" and not phase["patrol_waypoints"]:
                 logger.warning(
                     f"[{self.system_name}] A phase has movement=zone_patrol but no "
@@ -628,6 +644,7 @@ class DirectorSystem:
         if self._cross_level_routing.get(agent_id) is not None:
             self._cross_level_routing[agent_id] = None
             self._patrol_arrived_at[agent_id] = -phase["patrol_dwell_time"]
+            self._leg_started_at[agent_id] = current_sim_time
             grace_until = current_sim_time + self._TRANSFER_GRACE_PERIOD
             self._phase_transition_grace_until[agent_id] = grace_until
             logger.debug(
@@ -641,13 +658,17 @@ class DirectorSystem:
         dy = position[1] - target_pos[1]
         dist = (dx * dx + dy * dy) ** 0.5
         arrival_threshold = 2.0
+        # Count as arrived if a crowd keeps the agent from getting closer.
+        leg_started = self._leg_started_at.setdefault(agent_id, current_sim_time)
+        timed_out = current_sim_time - leg_started >= PATROL_LEG_TIMEOUT_S
 
-        if dist < arrival_threshold:
+        if dist < arrival_threshold or timed_out:
             if arrived_at < 0 or current_sim_time - arrived_at < 0:
                 self._patrol_arrived_at[agent_id] = current_sim_time
             elif current_sim_time - arrived_at >= phase["patrol_dwell_time"]:
                 next_idx = (current_idx + 1) % len(waypoints)
                 self._patrol_index[agent_id] = next_idx
+                self._leg_started_at[agent_id] = current_sim_time
                 next_wp = waypoints[next_idx]
                 # Clear cross-level state so the next leg issues a fresh route
                 self._cross_level_routing[agent_id] = None
@@ -712,6 +733,24 @@ class DirectorSystem:
                 f"[{self.system_name}] {agent_id}: could not route to escalator "
                 f"'{exit_name}': {exc}"
             )
+
+    @staticmethod
+    def _walkable_point(
+        jps_sim: Any, pos: tuple[float, float], level_id: str
+    ) -> tuple[float, float]:
+        """``pos``, moved inside the walkable area if it lies outside it.
+
+        A zone's centroid can fall in a wall or obstacle (the concourse's
+        does), where staff could never arrive.
+        """
+        level = getattr(jps_sim, "simulations", {}).get(str(level_id))
+        walkable = getattr(getattr(level, "geometry_manager", None), "_combined_geometry", None)
+        if walkable is None or walkable.is_empty or walkable.contains(Point(pos)):
+            return pos
+        inner = walkable.buffer(-WAYPOINT_CLEARANCE_M)
+        target = inner if not inner.is_empty else walkable
+        snapped = nearest_points(target, Point(pos))[0]
+        return (float(snapped.x), float(snapped.y))
 
     def _resolve_patrol_waypoints(
         self,

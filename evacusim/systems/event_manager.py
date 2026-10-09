@@ -47,6 +47,9 @@ class EventManager:
         # Used by the simulation loop to decide whether an immediate all-agent
         # re-decision is required (critical events) or can be staggered.
         self.last_fired_event_types: set[str] = set()
+        # True when an event fired in the last check carried a warning cue
+        # (the alarm, a PA); staff activated "on_event" respond to these.
+        self.warning_fired = False
         # Exits that were newly blocked during the most recent check_and_trigger_events
         # call (cleared each call). Used by hybrid_simulation to cancel destinations
         # for agents already en route to an exit that just became blocked.
@@ -151,6 +154,7 @@ class EventManager:
         """
         fired = False
         self.last_fired_event_types.clear()
+        self.warning_fired = False
         self.last_newly_blocked_exits.clear()
 
         # Check whether any previously activated train exits have now departed.
@@ -210,6 +214,8 @@ class EventManager:
                     message_system.broadcast_cue(event["cue"], "alarm", current_sim_time)
                 self.last_fired_event_types.add("message")
 
+            if event.get("cue") or event.get("zone_cues"):
+                self.warning_fired = True
             if repeat_interval:
                 event["_last_fired"] = current_sim_time
             else:

@@ -930,8 +930,9 @@ class HybridSimulationRunner:
                 f"{len(stranded)} stranded agent(s); forced decision cycle."
             )
 
-        # Staff systems activated "on_event" start acting once any event fires.
-        if new_event_fired:
+        # Staff activated "on_event" start acting when a warning (the alarm, a
+        # PA) fires, not on routine events such as a train arriving.
+        if self.event_manager.warning_fired:
             for system in self.staff:
                 system.notify_event_fired()
         return new_event_fired, critical_event_fired, fired_event_types

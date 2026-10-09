@@ -48,11 +48,19 @@ def goal_is_train_oriented(goal: str) -> bool:
 
 
 def visible_exit_names(observation: str) -> set[str]:
-    """Display names of exits the observation says are visible."""
+    """Display names of exits the observation says are visible.
+
+    The line reads ``Exits visible right now: A (nearby); B (visible in distance).``
+    """
     match = _RE_VISIBLE_EXITS_LINE.search(observation)
     if not match:
         return set()
-    return {m.group(1).strip() for m in _RE_EXITS_LINE_ENTRY.finditer(match.group(1))}
+    names = set()
+    for entry in match.group(1).split(";"):
+        m = _RE_EXITS_LINE_ENTRY.fullmatch(entry.strip())
+        if m:
+            names.add(m.group(1).strip())
+    return names
 
 
 def blocked_exit_names(observation: str) -> list[str]:
@@ -325,10 +333,11 @@ class SituationAssembler:
     def _usable_exit_ids(self, agent_id: str, observation: str, zone_id: str | None) -> list[str]:
         """Exits the agent can choose now, in offer order.
 
-        Commuters recall the exits they know in this zone; everyone can choose
-        exits they see. If neither yields any, the profile's known exits are a
-        fallback. Exits that lead *into* this zone, and exits the agent has
-        seen are blocked, are excluded.
+        In order: the exits the agent's knowledge profile knows in this zone
+        (``station.zone_known_exits_by_profile``), the exits it can see, and
+        exits it was told about by a warning (a cue's ``route``) that it can
+        reach from its level. Exits that lead *into* this zone, and exits the
+        agent has seen are blocked, are excluded.
         """
         registry = self._translator.exit_registry
         valid_ids = set(registry.get_all_ids())
@@ -347,17 +356,32 @@ class SituationAssembler:
                 and registry.get_display_name(eid) not in blocked_display
             )
 
-        candidates: list[str] = []
-        if profile == "commuter":
-            candidates += [eid for eid in known.get("commuter", []) if usable(eid)]
+        candidates = [eid for eid in known.get(profile, []) if usable(eid)]
         candidates += [
             eid
             for eid in sorted(valid_ids)
             if usable(eid) and registry.get_display_name(eid) in visible_names
         ]
-        if not candidates:
-            candidates = [eid for eid in known.get(profile, []) if usable(eid)]
+        candidates += [
+            eid
+            for eid in self._told_route(agent_id)
+            if usable(eid) and self._reachable_from_level(agent_id, eid)
+        ]
         return list(dict.fromkeys(candidates))
+
+    def _told_route(self, agent_id: str) -> list[str]:
+        """Exits named by the warnings the agent has heard (cue ``route``)."""
+        return [eid for cue in self._warnings(agent_id) for eid in cue.get("route", [])]
+
+    def _reachable_from_level(self, agent_id: str, exit_id: str) -> bool:
+        """True if the exit can be located from the agent's current level."""
+        level = None
+        if self._jps_sim is not None and hasattr(self._jps_sim, "get_agent_level"):
+            level = self._jps_sim.get_agent_level(agent_id)
+        try:
+            return self._translator._get_exit_coordinates(exit_id, level) is not None
+        except Exception:
+            return False
 
     def _is_route_blocked(self, agent_id: str, observation: str) -> bool:
         """True if the agent's current target exit is reported blocked."""

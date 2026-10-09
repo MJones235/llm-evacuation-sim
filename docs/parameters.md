@@ -92,7 +92,7 @@ Per-escalator overrides: any subset of :class:`EscalatorParams`.
 | `count` | int | **required** | Number of agents in the initial population. (≥ 0) |
 | `snapshot_load_path` | str \| null | null | Load the population from this snapshot instead of sampling it. |
 | `snapshot_save_path` | str \| null | null | Save the sampled population to this snapshot. |
-| `spawn_min_separation` | float | `0.35` | Minimum distance between spawned agents (m). (> 0) |
+| `spawn_min_separation` | float | `0.5` | Minimum distance between spawned agents (m); JuPedSim rejects closer pairs. (> 0) |
 | `knowledge_profiles` | map[str → float] | **required** | Relative weights of station-knowledge profiles; keys must exist in ``station.knowledge.profiles``. |
 | `personalities` | map[`"N"` \| `"O"` \| `"C"` → map[`"high"` \| `"medium"` \| `"low"` → float]] | `{}` | OCEAN level weights per dimension (Neuroticism, Openness, Conscientiousness); a missing dimension is sampled uniformly. |
 | `age` | AgeRange | *(see below)* | Uniform age range (years). |
@@ -139,6 +139,7 @@ What a message conveys, for the rule-based decision engine.
 |---|---|---|---|
 | `strength` | `"weak"` \| `"medium"` \| `"strong"` | **required** |  |
 | `instruction` | `"none"` \| `"leave_station"` \| `"board_train"` | `"none"` |  |
+| `route` | list[str] | `[]` | Exits the message names (e.g. ``[escalator_b_up]``). Agents who hear it learn them, and are offered them wherever they can reach them. |
 
 ## `events[]` — PAAnnouncementEvent
 
@@ -163,6 +164,7 @@ What a message conveys, for the rule-based decision engine.
 |---|---|---|---|
 | `strength` | `"weak"` \| `"medium"` \| `"strong"` | **required** |  |
 | `instruction` | `"none"` \| `"leave_station"` \| `"board_train"` | `"none"` |  |
+| `route` | list[str] | `[]` | Exits the message names (e.g. ``[escalator_b_up]``). Agents who hear it learn them, and are offered them wherever they can reach them. |
 
 ## `events[]` — TrainArrivalEvent
 
@@ -219,7 +221,7 @@ One behaviour phase of a staff agent; phases run in order.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `trigger` | `"immediate"` \| `"on_event"` \| `"on_reach_zone"` \| `"after_seconds"` | `"immediate"` | What starts this phase. |
+| `trigger` | `"immediate"` \| `"on_event"` \| `"on_reach_zone"` \| `"after_seconds"` | `"immediate"` | What starts this phase: ``on_event`` is the first warning event (an event with a cue, e.g. the alarm). |
 | `trigger_zone` | str \| null | null | Zone for ``on_reach_zone``. |
 | `trigger_level_id` | str \| null | null |  |
 | `after_seconds` | float \| null | null | Delay for ``after_seconds``. (≥ 0) |
@@ -253,6 +255,7 @@ What a message conveys, for the rule-based decision engine.
 |---|---|---|---|
 | `strength` | `"weak"` \| `"medium"` \| `"strong"` | **required** |  |
 | `instruction` | `"none"` \| `"leave_station"` \| `"board_train"` | `"none"` |  |
+| `route` | list[str] | `[]` | Exits the message names (e.g. ``[escalator_b_up]``). Agents who hear it learn them, and are offered them wherever they can reach them. |
 
 ## `systems.<name>.phases[].cues_by_zone.<name>` — Cue
 
@@ -262,6 +265,7 @@ What a message conveys, for the rule-based decision engine.
 |---|---|---|---|
 | `strength` | `"weak"` \| `"medium"` \| `"strong"` | **required** |  |
 | `instruction` | `"none"` \| `"leave_station"` \| `"board_train"` | `"none"` |  |
+| `route` | list[str] | `[]` | Exits the message names (e.g. ``[escalator_b_up]``). Agents who hear it learn them, and are offered them wherever they can reach them. |
 
 ## `station` — StationConfig
 

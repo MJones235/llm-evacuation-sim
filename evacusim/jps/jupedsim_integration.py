@@ -41,6 +41,10 @@ _OUTSIDE_ACCESSIBLE_AREA_RE = re.compile(
 )
 
 
+MIN_SPAWN_AREA_M2 = 1.0
+"""Walkable fragments smaller than this get no spawned agents."""
+
+
 class ConcordiaJuPedSimulation:
     """
     Real JuPedSim simulation wrapper for Concordia integration.
@@ -654,7 +658,16 @@ class ConcordiaJuPedSimulation:
             raise RuntimeError("Cannot spawn agents without geometry")
 
         spawn_positions = []
-        area_list = list(walkable_areas.items())
+        # JuPedSim distributes agents over single polygons only. Areas with
+        # obstacles cut out of them are MultiPolygons: spread over their parts.
+        area_list = []
+        for name, poly in walkable_areas.items():
+            if poly.geom_type == "MultiPolygon":
+                area_list += [(f"{name}[{k}]", part) for k, part in enumerate(poly.geoms)]
+            else:
+                area_list.append((name, poly))
+        # Slivers left by cutting out obstacles cannot hold anyone.
+        area_list = [(name, poly) for name, poly in area_list if poly.area >= MIN_SPAWN_AREA_M2]
         total_area = sum(poly.area for _, poly in area_list)
 
         logger.info(f"Distributing {num_agents} agents across {len(area_list)} walkable areas")

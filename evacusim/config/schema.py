@@ -192,7 +192,9 @@ class AgentsConfig(Section):
         None, description="Save the sampled population to this snapshot."
     )
     spawn_min_separation: float = Field(
-        0.35, gt=0, description="Minimum distance between spawned agents (m)."
+        0.5,
+        gt=0,
+        description="Minimum distance between spawned agents (m); JuPedSim rejects closer pairs.",
     )
     knowledge_profiles: dict[str, float] = Field(
         min_length=1,
@@ -235,6 +237,11 @@ class Cue(Section):
 
     strength: Literal["weak", "medium", "strong"]
     instruction: Literal["none", "leave_station", "board_train"] = "none"
+    route: list[str] = Field(
+        default_factory=list,
+        description="Exits the message names (e.g. ``[escalator_b_up]``). Agents who hear "
+        "it learn them, and are offered them wherever they can reach them.",
+    )
 
 
 class _TimedEvent(Section):
@@ -329,7 +336,9 @@ class StaffPhase(Section):
     """One behaviour phase of a staff agent; phases run in order."""
 
     trigger: Literal["immediate", "on_event", "on_reach_zone", "after_seconds"] = Field(
-        "immediate", description="What starts this phase."
+        "immediate",
+        description="What starts this phase: ``on_event`` is the first warning event "
+        "(an event with a cue, e.g. the alarm).",
     )
     trigger_zone: str | None = Field(None, description="Zone for ``on_reach_zone``.")
     trigger_level_id: LevelId | None = None

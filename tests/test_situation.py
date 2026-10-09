@@ -56,6 +56,42 @@ class UsableExitTests(unittest.TestCase):
             ["escalator_a_down", "grey_street"],
         )
 
+    def test_known_exits_are_offered_even_when_others_are_visible(self):
+        obs = "Exits visible right now: Escalator A (nearby)."
+        self.assertEqual(
+            _assembler()._usable_exit_ids("a", obs, "concourse"),
+            ["grey_street", "escalator_a_down"],
+        )
+
+    def test_exits_named_in_a_warning_are_offered_where_reachable(self):
+        class Messages:
+            def cues_for(self, agent_id):
+                return [
+                    {
+                        "time": 1.0,
+                        "source": "staff",
+                        "strength": "strong",
+                        "route": ["escalator_a_down", "esc_up"],
+                    }
+                ]
+
+        class Translator(_Translator):
+            def _get_exit_coordinates(self, exit_id, level):
+                return (0.0, 0.0) if exit_id != "esc_up" else None  # esc_up: other level
+
+        assembler = _assembler()
+        assembler._message_system = Messages()
+        assembler._translator = Translator()
+        self.assertEqual(assembler._usable_exit_ids("a", "", "platform"), ["escalator_a_down"])
+
+    def test_every_visible_exit_is_recognised(self):
+        from evacusim.decision.situation import visible_exit_names
+
+        obs = "Exits visible right now: Escalator A (down to platforms) (nearby); Grey Street (visible in distance)."
+        self.assertEqual(
+            visible_exit_names(obs), {"Escalator A (down to platforms)", "Grey Street"}
+        )
+
     def test_exits_seen_blocked_are_excluded(self):
         obs = "Exits visible right now: Grey Street (nearby). The Grey Street appears blocked or obstructed"
         self.assertEqual(_assembler()._usable_exit_ids("a", obs, "concourse"), [])
