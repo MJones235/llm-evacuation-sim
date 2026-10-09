@@ -21,30 +21,43 @@ class OutputManager:
     """Handles output directory and file management for simulation runs."""
 
     @staticmethod
-    def setup_output_directory(output: OutputConfig) -> tuple[str, Path, Path]:
+    def setup_output_directory(
+        output: OutputConfig, engine: str = "", seed: int | None = None
+    ) -> tuple[str, Path, Path]:
         """
-        Setup output directory structure for a simulation run.
+        Create a new, uniquely named directory for this run.
 
-        Creates a unique run directory with timestamp and sets up file paths.
-        Also configures environment variables for LLM logging.
+        The name is ``run_<YYYYmmdd_HHMMSS>[_<engine>][_s<seed>]``, with a
+        ``_2``, ``_3``... suffix if a run started in the same second already
+        took it. Also points the LLM prompt log at the directory.
 
         Args:
             output: Output settings (the ``output`` section)
+            engine: Decision engine name, included in the directory name.
+            seed: Run seed, included in the directory name.
 
         Returns:
             Tuple of (run_id, output_dir, decisions_file)
-            - run_id: Unique identifier string (e.g., "run_20260209_143022")
+            - run_id: The directory name, e.g. "run_20261009_143022_rule_based_s0"
             - output_dir: Path to the run's output directory
             - decisions_file: Path to the agent decisions JSON file
         """
-        # Generate unique run ID
-        run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
-
-        # Setup directory structure
-        output_dir = Path(output.directory) / run_id
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Setup file paths
+        base_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+        if engine:
+            base_id += f"_{engine}"
+        if seed is not None:
+            base_id += f"_s{seed}"
+        root = Path(output.directory)
+        root.mkdir(parents=True, exist_ok=True)
+        run_id, n = base_id, 1
+        while True:
+            try:
+                (root / run_id).mkdir()
+                break
+            except FileExistsError:
+                n += 1
+                run_id = f"{base_id}_{n}"
+        output_dir = root / run_id
         decisions_file = output_dir / "agent_decisions.json"
 
         # Configure LLM logging environment variable

@@ -7,6 +7,7 @@ during simulation (for live viewing) and final results at completion.
 
 import csv
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,52 @@ from evacusim.metrics.llm_cost_reporter import FinancialReporter
 from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+DECISIONS_COLUMNS = [
+    "time_s",
+    "agent_id",
+    "stage",
+    "action",
+    "wait_reason",
+    "exit_id",
+    "pace",
+    "reassess_when",
+    "zone",
+    "cues",
+    "repair_status",
+    "llm_called",
+    "prompt_hash",
+    "route_changed_to",
+    "rationale",
+]
+"""Columns of decisions.csv (documented in docs/outputs.md)."""
+
+
+@dataclass
+class RunRecord:
+    """Everything a finished (or interrupted) run writes out.
+
+    Built by :meth:`HybridSimulationRunner.run_record`.
+    """
+
+    agent_decisions: dict[str, Any]
+    agent_positions: dict[str, tuple[float, float]]
+    final_sim_time: float
+    event_history: list[dict[str, Any]]
+    blocked_exits: set[str]
+    message_history: list[dict[str, Any]]
+    wait_events: list[dict[str, Any]]
+    decision_interval: float
+    max_steps: int
+    num_agents: int
+    performance_report: str
+    llm_provider: Any
+    agent_levels: dict[str, str] | None = None
+    agent_roles: dict[str, str] | None = None
+    exit_log: list[dict[str, Any]] | None = None
+    spawn_log: list[dict[str, Any]] | None = None
+    escalator_system: Any = None
 
 
 class ResultsWriter:
@@ -176,6 +223,43 @@ class ResultsWriter:
         logger.info(f"Exit log ({len(exit_log)} records) saved to {path}")
 
     @staticmethod
+    def _save_decisions_csv(path: Path, agent_decisions: dict[str, Any]) -> None:
+        """Write decisions.csv: one row per decision, in time order."""
+        rows = []
+        for agent_id, data in agent_decisions.items():
+            for d in data.get("decisions", []):
+                payload = d.get("decision_payload") or {}
+                assessment = payload.get("assessment") or {}
+                route_change = d.get("route_change") or {}
+                rows.append(
+                    {
+                        "time_s": d.get("time"),
+                        "agent_id": agent_id,
+                        "stage": d.get("stage") or "",
+                        "action": payload.get("action", ""),
+                        "wait_reason": payload.get("wait_reason") or "",
+                        "exit_id": payload.get("exit_id") or "",
+                        "pace": payload.get("pace") or "",
+                        "reassess_when": payload.get("reassess_when") or "",
+                        "zone": d.get("zone") or "",
+                        "cues": "|".join(d.get("cue_types") or []),
+                        "repair_status": d.get("repair_status", ""),
+                        "llm_called": d.get("prompt") not in (None, "cached"),
+                        "prompt_hash": d.get("prompt_hash") or "",
+                        "route_changed_to": route_change.get("to_exit", ""),
+                        "rationale": assessment.get("option_chosen_because", "")
+                        if isinstance(assessment, dict)
+                        else "",
+                    }
+                )
+        rows.sort(key=lambda r: (r["time_s"] or 0.0, r["agent_id"]))
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=DECISIONS_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+        logger.info(f"Decisions ({len(rows)}) saved to {path}")
+
+    @staticmethod
     def _save_escalator_log(path: Path, ride_log: list[dict[str, Any]]) -> None:
         """Write escalator_log.csv: one row per completed ride."""
         fields = [
@@ -200,52 +284,18 @@ class ResultsWriter:
         logger.info(f"Escalator log ({len(ride_log)} rides) saved to {path}")
 
     @staticmethod
-    def save_final_results(
-        output_path: Path,
-        agent_decisions: dict[str, Any],
-        agent_positions: dict[str, tuple[float, float]],
-        final_sim_time: float,
-        event_history: list[dict[str, Any]],
-        blocked_exits: set[str],
-        message_history: list[dict[str, Any]],
-        wait_events: list[dict[str, Any]],
-        decision_interval: float,
-        max_steps: int,
-        num_agents: int,
-        performance_report: str,
-        llm_provider: Any,
-        agent_levels: dict[str, str] | None = None,
-        agent_roles: dict[str, str] | None = None,
-        *,
-        exit_log: list[dict[str, Any]] | None = None,
-        spawn_log: list[dict[str, Any]] | None = None,
-        escalator_system: Any = None,
-    ) -> None:
-        """
-        Save final simulation results with all reports.
+    def save_final_results(output_path: Path, record: RunRecord) -> None:
+        """Write a run's final results and reports next to ``output_path``.
 
-        Args:
-            output_path: Path to main results JSON file
-            agent_decisions: Complete agent decision history
-            agent_positions: Final agent positions
-            final_sim_time: Final simulation time
-            event_history: All events that occurred
-            blocked_exits: Set of blocked exits
-            message_history: All messages sent
-            wait_events: All waiting behavior events
-            decision_interval: Time between decisions
-            max_steps: Maximum simulation steps
-            num_agents: Number of agents
-            performance_report: Performance timing report
-            llm_provider: LLM provider instance for cost tracking
-            agent_levels: Final level for each agent (multi-level simulations)
-            exit_log: Per-agent evacuation records, written as exit_log.csv
-            spawn_log: Runtime spawn records, joined onto exit_log for provenance
-
-        Note:
-            exit_log/spawn_log are keyword-only because the existing call sites
-            pass every other argument positionally.
+        Writes ``agent_decisions.json`` (``output_path``), ``decisions.csv``,
+        ``performance_report.txt``, ``financial_report.txt``, ``exit_log.csv``,
+        ``escalator_log.csv`` / ``escalators.json`` and the analytics text files.
         """
+        agent_decisions = record.agent_decisions
+        wait_events = record.wait_events
+        message_history = record.message_history
+        num_agents = record.num_agents
+
         # Extract route changes for analytics
         route_changes = []
         for agent_id, data in agent_decisions.items():
@@ -264,57 +314,61 @@ class ResultsWriter:
         # Main results JSON
         results = {
             "agent_decisions": agent_decisions,
-            "agent_positions": agent_positions,
-            "final_time": final_sim_time,
-            "events": event_history,
-            "blocked_exits": sorted(blocked_exits),
+            "agent_positions": record.agent_positions,
+            "final_time": record.final_sim_time,
+            "events": record.event_history,
+            "blocked_exits": sorted(record.blocked_exits),
             "route_changes": route_changes,
             "messages": message_history,
             "decision_telemetry": build_decision_telemetry(agent_decisions, wait_events),
             "config": {
-                "decision_interval": decision_interval,
-                "max_steps": max_steps,
+                "decision_interval": record.decision_interval,
+                "max_steps": record.max_steps,
                 "num_agents": num_agents,
             },
         }
 
         # Add agent levels and roles for multi-level visualization
-        if agent_levels:
-            results["agent_levels"] = agent_levels
-        if agent_roles:
-            results["agent_roles"] = agent_roles
+        if record.agent_levels:
+            results["agent_levels"] = record.agent_levels
+        if record.agent_roles:
+            results["agent_roles"] = record.agent_roles
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
             json.dump(results, f, indent=2)
         logger.info(f"Results saved to {output_path}")
+        ResultsWriter._save_decisions_csv(output_path.parent / "decisions.csv", agent_decisions)
 
         # Save performance report
         perf_report_path = output_path.parent / "performance_report.txt"
         with open(perf_report_path, "w") as f:
-            f.write(performance_report)
+            f.write(record.performance_report)
         logger.info(f"Performance report saved to {perf_report_path}")
 
         # Save financial report
         financial_report_path = output_path.parent / "financial_report.txt"
-        financial_report = FinancialReporter.generate_report(llm_provider, num_agents)
+        financial_report = FinancialReporter.generate_report(record.llm_provider, num_agents)
         with open(financial_report_path, "w") as f:
             f.write(financial_report)
         logger.info(f"Financial report saved to {financial_report_path}")
 
         # Per-agent exit log, joined with spawn provenance so each row says
         # where the person came from as well as where they left.
-        if exit_log is not None:
-            ResultsWriter._save_exit_log(output_path.parent / "exit_log.csv", exit_log, spawn_log)
+        if record.exit_log is not None:
+            ResultsWriter._save_exit_log(
+                output_path.parent / "exit_log.csv", record.exit_log, record.spawn_log
+            )
 
         # One row per completed escalator ride, plus static escalator
         # geometry so plots can draw the conveyors on their own axes.
-        if escalator_system is not None:
+        escalators = record.escalator_system
+        if escalators is not None:
             ResultsWriter._save_escalator_log(
-                output_path.parent / "escalator_log.csv", escalator_system.ride_log
+                output_path.parent / "escalator_log.csv", escalators.ride_log
             )
             with open(output_path.parent / "escalators.json", "w") as f:
-                json.dump(escalator_system.geometry(), f, indent=2)
+                json.dump(escalators.geometry(), f, indent=2)
 
         # Save all analytics
         AnalyticsGenerator.save_all_analytics(
