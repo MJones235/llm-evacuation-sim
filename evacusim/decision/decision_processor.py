@@ -117,6 +117,9 @@ class DecisionProcessor:
             agent_destinations=agent_destinations,
             jps_sim=jps_sim,
             wait_nudge_enabled=wait_nudge_enabled,
+            message_system=message_system,
+            state_queries=state_queries,
+            neighbour_radius_m=getattr(decision_engine, "neighbour_radius_m", None),
         )
         self.transfers = PostTransferRouting(
             jps_sim,
@@ -383,6 +386,7 @@ class DecisionProcessor:
             "model_id": run_meta.get("model_id"),
             "seed": run_meta.get("seed"),
             "cue_types": ctx.cues,
+            "stage": result.stage,
         }
 
         old_exit = self.agent_destinations.get(agent_id)

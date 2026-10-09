@@ -225,6 +225,18 @@ class AgentsConfig(Section):
 # ---------------------------------------------------------------------------
 
 
+class Cue(Section):
+    """What a message conveys, for the rule-based decision engine.
+
+    The LLM engine reads the message text; the rule-based engine reads this
+    annotation instead. ``strength`` sets how quickly people respond (see
+    ``decision.response``); ``instruction`` is what they are told to do.
+    """
+
+    strength: Literal["weak", "medium", "strong"]
+    instruction: Literal["none", "leave_station", "board_train"] = "none"
+
+
 class _TimedEvent(Section):
     time: float = Field(ge=0, description="Simulation time the event fires (s).")
 
@@ -240,6 +252,7 @@ class MessageEvent(_TimedEvent):
     repeat_interval: float | None = Field(
         None, gt=0, description="Re-deliver every this many seconds."
     )
+    cue: Cue | None = Field(None, description="Warning conveyed to everyone (rule engine).")
 
 
 class PAAnnouncementEvent(_TimedEvent):
@@ -252,6 +265,10 @@ class PAAnnouncementEvent(_TimedEvent):
     )
     sender_label: str = Field("PA system", description="Who agents hear the announcement from.")
     repeat_interval: float | None = Field(None, gt=0, description="Repeat every this many seconds.")
+    cue: Cue | None = Field(None, description="Warning conveyed by ``message`` (rule engine).")
+    zone_cues: dict[str, Cue] = Field(
+        default_factory=dict, description="Warning conveyed by each zone's message."
+    )
 
 
 class TrainArrivalEvent(_TimedEvent):
@@ -329,6 +346,10 @@ class StaffPhase(Section):
     message: str = Field("", description="Directive spoken to nearby agents.")
     messages_by_zone: dict[str, str] = Field(
         default_factory=dict, description="Zone-specific directives."
+    )
+    cue: Cue | None = Field(None, description="Warning conveyed by ``message`` (rule engine).")
+    cues_by_zone: dict[str, Cue] = Field(
+        default_factory=dict, description="Warning conveyed by each zone's directive."
     )
 
 
@@ -449,13 +470,50 @@ class RuleWeights(Section):
     visibility: float = Field(0.0, ge=0)
 
 
+class ResponseDelays(Section):
+    """Median delay (s) from perceiving a cue to starting to evacuate, by cue strength.
+
+    Starting values follow Proulx (1991) "time to start to move" (bell only
+    ~8 min, minimal PA ~1:15, directive PA ~0:40); fitted in the comparison study.
+    """
+
+    weak: float = Field(450.0, gt=0)
+    medium: float = Field(75.0, gt=0)
+    strong: float = Field(40.0, gt=0)
+
+
+class SocialCue(Section):
+    """Seeing others leave: a cue when enough neighbours are evacuating."""
+
+    enabled: bool = True
+    radius_m: float = Field(5.0, gt=0, description="Who counts as a neighbour (m).")
+    threshold: float = Field(
+        0.5, gt=0, le=1, description="Fraction of neighbours evacuating that is a cue."
+    )
+    min_neighbours: int = Field(2, ge=1, description="Fewer neighbours never make a cue.")
+    strength: Literal["weak", "medium", "strong"] = "medium"
+
+
 class RuleBasedDecisionConfig(Section):
-    """Agents decide with deterministic rules; no language model is used."""
+    """Agents decide with deterministic rules; no language model is used.
+
+    Agents go from unaware (normal journey) to aware (investigating) on a
+    warning cue, then evacuate after a delay set by the strongest cue
+    (see ``evacusim.decision.rule_based_decision_engine``).
+    """
 
     engine: Literal["rule_based"]
     rule_weights: RuleWeights = Field(default_factory=RuleWeights)
     crowd_radius_m: float = Field(
         5.0, gt=0, description="Radius for counting the crowd at an exit (m)."
+    )
+    response_median_s: ResponseDelays = Field(default_factory=ResponseDelays)
+    response_sigma: float = Field(
+        0.6, ge=0, description="Lognormal shape of response delays (0: always the median)."
+    )
+    social: SocialCue = Field(default_factory=SocialCue)
+    evacuation_pace: Literal["normal_pace", "hurrying", "running"] = Field(
+        "normal_pace", description="Pace once evacuating."
     )
 
 

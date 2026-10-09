@@ -106,6 +106,14 @@ class DecisionContext:
     # instruction.
     goal_policy: dict[str, Any] | None = None
 
+    # Every warning cue the agent has perceived, oldest first:
+    # ``{time, source, strength, instruction}``, source alarm / pa / staff.
+    # Read by the rule-based engine; the LLM reads the observation text.
+    warnings: tuple[dict[str, Any], ...] = ()
+
+    # Agents within the rule engine's social-cue radius.
+    nearby_agent_ids: tuple[str, ...] = ()
+
 
 @dataclass
 class DecisionResult:
@@ -125,6 +133,8 @@ class DecisionResult:
         skip_downstream: When True the engine has determined there is nothing to
             translate/execute this cycle (e.g. an LLM cache hit for an agent that
             is already moving to its committed destination).
+        stage: The agent's response stage, for engines that model one
+            (rule-based: ``unaware``, ``aware``, ``evacuating``).
     """
 
     payload: dict[str, Any] | None
@@ -133,6 +143,7 @@ class DecisionResult:
     llm_was_called: bool = False
     repair_status: str = "ok"
     skip_downstream: bool = False
+    stage: str | None = None
 
 
 class DecisionEngine:

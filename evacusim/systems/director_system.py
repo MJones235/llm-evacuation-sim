@@ -155,6 +155,9 @@ def _normalize_phases(system_config: dict) -> list[dict]:
             "directive_interval": float(raw.get("directive_interval", 10.0)),
             "message": raw.get("message", ""),
             "messages_by_zone": raw.get("messages_by_zone", {}),
+            # Warning conveyed, for the rule-based engine.
+            "cue": raw.get("cue"),
+            "cues_by_zone": raw.get("cues_by_zone", {}),
         }
         normalized.append(phase)
     return normalized
@@ -427,6 +430,8 @@ class DirectorSystem:
                 sender_id=agent_id,
                 message_text=phase["message"],
                 messages_by_zone=phase["messages_by_zone"],
+                cue=phase.get("cue"),
+                cues_by_zone=phase.get("cues_by_zone"),
                 sender_position=position,
                 current_sim_time=current_sim_time,
                 state_queries=state_queries,

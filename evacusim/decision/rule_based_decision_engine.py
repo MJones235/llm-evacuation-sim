@@ -1,26 +1,43 @@
-"""Deterministic, LLM-free decision engine.
+"""Rule-based decision engine: a cue-driven response, then exit routing.
 
-Implements the :class:`~evacusim.core.decision_engine.DecisionEngine` protocol
-without any model call.  Each agent has a goal — reach a train/platform or leave
-the station — and picks a route by scoring the offered exits on a weighted
-combination of three signals carried on each
+Each agent passes through three stages:
+
+==============  ==============================================================
+UNAWARE         No warning yet: the agent pursues its journey (catch a train,
+                leave the station) using the routing policy below.
+AWARE           A warning cue has been perceived: the agent stops its journey
+                and investigates (seeks information where it can, otherwise
+                waits).
+EVACUATING      The agent acts: it follows the most recent instruction
+                (``board_train``), or leaves the station by the best route.
+==============  ==============================================================
+
+Cues are the alarm, PA announcements and staff directives an agent has
+perceived (annotated with a ``strength`` and an ``instruction`` in the scenario
+config), plus a *social* cue when enough people nearby are already
+evacuating. Each cue schedules evacuation at ``cue time + delay``, the delay
+drawn from a lognormal whose median depends on the cue's strength; the
+earliest scheduled time wins, so a stronger later cue can bring evacuation
+forward but never delay it.
+
+Routing (UNAWARE journeys and EVACUATING agents) scores the offered exits on
+a weighted combination of signals carried on each
 :class:`~evacusim.core.decision_engine.ExitOption`:
 
-* **proximity** — shorter navigable routes score higher,
-* **visibility** — exits in direct line of sight score higher,
-* **busyness** — less crowded exits score higher,
-* **familiarity** — exits the agent already knows score higher.
+* **proximity** - shorter navigable routes score higher,
+* **visibility** - exits in direct line of sight score higher,
+* **busyness** - less crowded exits score higher,
+* **familiarity** - exits the agent already knows score higher.
 
-Blocked exits never reach the engine: the assembly phase filters them out of
-``offered_exit_ids`` before building the context, and ``route_blocked`` is
-surfaced so the engine can wait with the right reason when nothing is usable.
-
-The engine is pure and deterministic (no randomness), so a run is fully
-reproducible and requires no LLM, embedder, or network.
+Delays are drawn from per-agent random streams derived from the run seed, so
+runs are reproducible.
 """
 
 from __future__ import annotations
 
+import math
+import random
+from dataclasses import dataclass, field
 from typing import Any
 
 from evacusim.core.decision_engine import (
@@ -29,18 +46,51 @@ from evacusim.core.decision_engine import (
     DecisionResult,
     ExitOption,
 )
+from evacusim.utils.seeding import derive_seed
 
-# Non-wait actions must declare a pace from this set (see
-# DecisionProcessor._validate_decision_payload).
 _DEFAULT_PACE = "normal_pace"
 
 # Goal keywords that indicate the agent is trying to board a train / reach a
 # platform rather than leave the station.
 _TRAIN_GOAL_KEYWORDS = ("train", "platform", "board")
 
+UNAWARE, AWARE, EVACUATING = "unaware", "aware", "evacuating"
+
+
+@dataclass
+class _AgentState:
+    """One agent's progress through the stages."""
+
+    rng: random.Random
+    stage: str = UNAWARE
+    stage_since: float = 0.0
+    cues_seen: int = 0
+    evacuate_at: float = math.inf
+    instruction: str = "none"
+    social_cued: bool = False
+    triggers: list[str] = field(default_factory=list)
+
 
 class RuleBasedDecisionEngine(DecisionEngine):
-    """Route by weighting distance, visibility, busyness, and familiarity."""
+    """Cue-driven stages (unaware, aware, evacuating) with weighted exit routing.
+
+    Args:
+        w_proximity, w_busyness, w_familiarity, w_visibility: Exit-scoring weights.
+        crowd_radius_m: Radius for counting the crowd at an exit.
+        pace: Pace for journey movement.
+        response_median_s: Median delay (s) from a cue to evacuating, by
+            strength (``weak``, ``medium``, ``strong``).
+        response_sigma: Lognormal shape of those delays (0: always the median).
+        social_enabled: Treat "enough neighbours evacuating" as a cue.
+        social_radius_m: Who counts as a neighbour.
+        social_threshold: Fraction of neighbours evacuating that is a cue.
+        social_min_neighbours: Fewer neighbours than this never make a cue.
+        social_strength: Strength of the social cue.
+        evacuation_pace: Pace once evacuating.
+        leave_prefer_tags / leave_avoid_tags: Exit tags (``station.exit_semantic_tags``)
+            preferred and avoided when leaving the station.
+        seed: Run seed (for the per-agent delay draws).
+    """
 
     def __init__(
         self,
@@ -50,6 +100,17 @@ class RuleBasedDecisionEngine(DecisionEngine):
         w_visibility: float = 0.0,
         crowd_radius_m: float = 5.0,
         pace: str = _DEFAULT_PACE,
+        response_median_s: dict[str, float] | None = None,
+        response_sigma: float = 0.6,
+        social_enabled: bool = True,
+        social_radius_m: float = 5.0,
+        social_threshold: float = 0.5,
+        social_min_neighbours: int = 2,
+        social_strength: str = "medium",
+        evacuation_pace: str = _DEFAULT_PACE,
+        leave_prefer_tags: tuple[str, ...] = ("outside_station", "to_street", "to_concourse"),
+        leave_avoid_tags: tuple[str, ...] = ("to_platform", "to_train"),
+        seed: int = 0,
     ) -> None:
         self.w_proximity = float(w_proximity)
         self.w_busyness = float(w_busyness)
@@ -57,21 +118,180 @@ class RuleBasedDecisionEngine(DecisionEngine):
         self.w_visibility = float(w_visibility)
         self.crowd_radius_m = float(crowd_radius_m)
         self.pace = pace
+        self.response_median_s = dict(
+            response_median_s or {"weak": 450.0, "medium": 75.0, "strong": 40.0}
+        )
+        self.response_sigma = float(response_sigma)
+        self.social_enabled = social_enabled
+        self.neighbour_radius_m = float(social_radius_m)
+        self.social_threshold = float(social_threshold)
+        self.social_min_neighbours = int(social_min_neighbours)
+        self.social_strength = social_strength
+        self.evacuation_pace = evacuation_pace
+        self.leave_prefer_tags = set(leave_prefer_tags)
+        self.leave_avoid_tags = set(leave_avoid_tags)
+        self.seed = int(seed)
+        self._agents: dict[str, _AgentState] = {}
 
     # ------------------------------------------------------------------ #
-    # DecisionEngine protocol
+    # DecisionEngine interface
     # ------------------------------------------------------------------ #
     async def decide(self, ctx: DecisionContext) -> DecisionResult:
-        payload = self._decide_payload(ctx)
+        state = self._update_stage(ctx)
+        if state.stage == EVACUATING:
+            payload = self._evacuation_payload(ctx, state)
+        elif state.stage == AWARE:
+            payload = self._investigation_payload(ctx, state)
+        else:
+            payload = self._decide_payload(ctx)
         return DecisionResult(
             payload=payload,
-            action_json=None,  # orchestrator serialises via _decision_payload_to_json
             llm_was_called=False,
             repair_status="rule_based",
+            stage=state.stage,
         )
 
+    def stage_of(self, agent_id: str) -> str:
+        """The agent's current stage (``unaware`` if it has never decided)."""
+        state = self._agents.get(agent_id)
+        return state.stage if state else UNAWARE
+
     # ------------------------------------------------------------------ #
-    # Core policy
+    # Stages
+    # ------------------------------------------------------------------ #
+    def _state(self, agent_id: str) -> _AgentState:
+        if agent_id not in self._agents:
+            rng = random.Random(derive_seed(self.seed, f"rule_engine:{agent_id}"))
+            self._agents[agent_id] = _AgentState(rng=rng)
+        return self._agents[agent_id]
+
+    def _update_stage(self, ctx: DecisionContext) -> _AgentState:
+        """Take in new cues and move the agent on through the stages."""
+        state = self._state(ctx.agent_id)
+        now = ctx.current_sim_time
+        # Agents spawned during the run (calibration) record when they arrived;
+        # everyone else has been present from the start.
+        arrived = float(ctx.agent_cfg.get("spawn_time_s") or -math.inf)
+
+        new_cues = list(ctx.warnings[state.cues_seen :])
+        state.cues_seen = len(ctx.warnings)
+        social = self._social_cue(ctx, state)
+        if social is not None:
+            new_cues.append(social)
+
+        for cue in new_cues:
+            # A cue heard before the agent arrived starts when the agent arrives.
+            start = max(float(cue["time"]), arrived)
+            delay = self._draw_delay(state.rng, cue["strength"])
+            state.evacuate_at = min(state.evacuate_at, start + delay)
+            if cue.get("instruction", "none") != "none":
+                state.instruction = cue["instruction"]
+            state.triggers.append(f"{cue['source']}:{cue['strength']}@{start:.0f}s")
+            if state.stage == UNAWARE:
+                state.stage, state.stage_since = AWARE, start
+
+        if state.stage == AWARE and now >= state.evacuate_at:
+            state.stage, state.stage_since = EVACUATING, now
+        return state
+
+    def _draw_delay(self, rng: random.Random, strength: str) -> float:
+        median = self.response_median_s[strength]
+        if self.response_sigma <= 0:
+            return median
+        return rng.lognormvariate(math.log(median), self.response_sigma)
+
+    def _social_cue(self, ctx: DecisionContext, state: _AgentState) -> dict[str, Any] | None:
+        """A cue when enough neighbours were already evacuating (once per agent)."""
+        if not self.social_enabled or state.social_cued or state.stage == EVACUATING:
+            return None
+        neighbours = ctx.nearby_agent_ids
+        if len(neighbours) < self.social_min_neighbours:
+            return None
+        now = ctx.current_sim_time
+        # Only those who began evacuating before now: independent of the order
+        # in which agents decide within a cycle.
+        evacuating = sum(
+            1
+            for n in neighbours
+            if n in self._agents
+            and self._agents[n].stage == EVACUATING
+            and self._agents[n].stage_since < now
+        )
+        if evacuating / len(neighbours) < self.social_threshold:
+            return None
+        state.social_cued = True
+        return {"time": now, "source": "social", "strength": self.social_strength}
+
+    def _investigation_payload(self, ctx: DecisionContext, state: _AgentState) -> dict[str, Any]:
+        """AWARE: look for information, or wait for it."""
+        reason = (
+            f"Warning perceived ({', '.join(state.triggers)}); investigating before acting "
+            f"(will act from t={state.evacuate_at:.0f}s unless a stronger cue arrives)."
+        )
+        if "seek_information" in ctx.offered_actions_set:
+            return {
+                "action": "seek_information",
+                "wait_reason": None,
+                "exit_id": None,
+                "pace": self.pace,
+                "reassess_when": "next_interval",
+                "assessment": self._assessment(reason, ctx),
+            }
+        payload = self._wait_payload(ctx, prefer="awaiting_information")
+        payload["assessment"] = self._assessment(reason, ctx)
+        return payload
+
+    def _evacuation_payload(self, ctx: DecisionContext, state: _AgentState) -> dict[str, Any]:
+        """EVACUATING: follow the instruction, else leave the station by the best route."""
+        actions = ctx.offered_actions_set
+        candidates = [ctx.exit_options[e] for e in ctx.offered_exit_ids if e in ctx.exit_options]
+
+        if state.instruction == "board_train":
+            if "leave_by_train" in actions:
+                return self._move_payload(
+                    "leave_by_train",
+                    None,
+                    "Instructed to board the train.",
+                    ctx,
+                    pace=self.evacuation_pace,
+                )
+            boardable = self._filter_by_tags(candidates, {"to_train"})
+            if "evacuate" in actions and boardable:
+                best, why = self._pick_best_exit(boardable)
+                return self._move_payload(
+                    "evacuate",
+                    best.exit_id,
+                    "Instructed to board the train: " + why,
+                    ctx,
+                    pace=self.evacuation_pace,
+                )
+
+        if "evacuate" in actions and candidates:
+            pool = self._apply_tag_preferences(
+                candidates, self.leave_prefer_tags, self.leave_avoid_tags
+            )
+            committed = next((o for o in pool if o.exit_id == ctx.committed_exit_id), None)
+            if committed is not None:
+                return self._move_payload(
+                    "evacuate",
+                    committed.exit_id,
+                    f"Evacuating; continuing toward {committed.display_name}.",
+                    ctx,
+                    pace=self.evacuation_pace,
+                )
+            best, why = self._pick_best_exit(pool)
+            return self._move_payload(
+                "evacuate", best.exit_id, "Evacuating: " + why, ctx, pace=self.evacuation_pace
+            )
+
+        if "wait" in actions:
+            return self._wait_payload(
+                ctx, prefer="route_blocked" if ctx.route_blocked else "awaiting_information"
+            )
+        return self._decide_payload(ctx)
+
+    # ------------------------------------------------------------------ #
+    # Journey routing (UNAWARE)
     # ------------------------------------------------------------------ #
     def _decide_payload(self, ctx: DecisionContext) -> dict[str, Any]:
         actions = ctx.offered_actions_set
@@ -296,13 +516,18 @@ class RuleBasedDecisionEngine(DecisionEngine):
     # Payload builders (schema-correct per _validate_decision_payload)
     # ------------------------------------------------------------------ #
     def _move_payload(
-        self, action: str, exit_id: str | None, reason: str, ctx: DecisionContext
+        self,
+        action: str,
+        exit_id: str | None,
+        reason: str,
+        ctx: DecisionContext,
+        pace: str | None = None,
     ) -> dict[str, Any]:
         return {
             "action": action,
             "wait_reason": None,
             "exit_id": exit_id,
-            "pace": self.pace,
+            "pace": pace or self.pace,
             "reassess_when": "next_interval",
             "assessment": self._assessment(reason, ctx),
         }

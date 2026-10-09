@@ -63,7 +63,9 @@ class SimulationRunnerFactory:
 
         # The LLM engine is the default; a rule-based (LLM-free) engine builds
         # no Concordia agents or embedder.
-        decision_engine = SimulationRunnerFactory._build_decision_engine(params.decision)
+        decision_engine = SimulationRunnerFactory._build_decision_engine(
+            params.decision, seed=derive_seed(params.seed, "decisions")
+        )
 
         # Calibration runs spawn passengers at runtime from usage and timetable
         # data (normal operations, no evacuation).
@@ -142,7 +144,7 @@ class SimulationRunnerFactory:
         return runner
 
     @staticmethod
-    def _build_decision_engine(decision: DecisionConfig):
+    def _build_decision_engine(decision: DecisionConfig, seed: int = 0):
         """Construct the decision engine selected by the ``decision`` section.
 
         Returns ``None`` for the LLM engine (the DecisionProcessor then builds
@@ -162,6 +164,15 @@ class SimulationRunnerFactory:
             w_familiarity=weights.familiarity,
             w_visibility=weights.visibility,
             crowd_radius_m=decision.crowd_radius_m,
+            response_median_s=as_dict(decision.response_median_s),
+            response_sigma=decision.response_sigma,
+            social_enabled=decision.social.enabled,
+            social_radius_m=decision.social.radius_m,
+            social_threshold=decision.social.threshold,
+            social_min_neighbours=decision.social.min_neighbours,
+            social_strength=decision.social.strength,
+            evacuation_pace=decision.evacuation_pace,
+            seed=seed,
         )
 
     @staticmethod

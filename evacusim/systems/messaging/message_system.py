@@ -26,6 +26,38 @@ class MessageSystem:
         self.agent_messages: dict[str, list[dict[str, Any]]] = {}  # agent_id -> received messages
         self.message_history: list[dict[str, Any]] = []  # every message delivered
         self.conversation_tracker = ConversationTracker()
+        # Warning cues (for the rule-based engine), kept for the whole run:
+        # station-wide ones (the alarm) and those each agent received.
+        self._broadcast_cues: list[dict[str, Any]] = []
+        self._agent_cues: dict[str, list[dict[str, Any]]] = {}
+
+    def broadcast_cue(self, cue: dict[str, Any], source: str, current_sim_time: float) -> None:
+        """Record a warning everyone perceives from now on (e.g. the alarm)."""
+        self._broadcast_cues.append({"time": current_sim_time, "source": source, **cue})
+
+    def cues_for(self, agent_id: str) -> list[dict[str, Any]]:
+        """Every warning cue the agent has perceived, oldest first.
+
+        Each is ``{time, source, strength, instruction}``; ``source`` is
+        ``alarm``, ``pa`` or ``staff``.
+        """
+        cues = self._broadcast_cues + self._agent_cues.get(agent_id, [])
+        return sorted(cues, key=lambda c: c["time"])
+
+    def _record_cue(
+        self,
+        agent_id: str,
+        source: str,
+        current_sim_time: float,
+        cue: dict[str, Any] | None,
+        cues_by_zone: dict[str, dict[str, Any]] | None,
+        zone: str | None,
+    ) -> None:
+        chosen = (cues_by_zone or {}).get(zone or "") or cue
+        if chosen:
+            self._agent_cues.setdefault(agent_id, []).append(
+                {"time": current_sim_time, "source": source, **chosen}
+            )
 
     def deliver_directive(  # noqa: PLR0913
         self,
@@ -38,6 +70,8 @@ class MessageSystem:
         radius: float | None = None,
         messages_by_zone: dict[str, str] | None = None,
         zone_id_for_agent_fn: Any | None = None,
+        cue: dict[str, Any] | None = None,
+        cues_by_zone: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """Deliver a rule-based directive from a director agent to nearby agents.
 
@@ -76,13 +110,15 @@ class MessageSystem:
         for recipient_id in recipient_ids:
             # Resolve per-zone message override
             text = message_text
-            if messages_by_zone and zone_id_for_agent_fn is not None:
+            zone = None
+            if (messages_by_zone or cues_by_zone) and zone_id_for_agent_fn is not None:
                 zone = zone_id_for_agent_fn(recipient_id)
-                if zone and zone in messages_by_zone:
-                    text = messages_by_zone[zone]
+            if messages_by_zone and zone and zone in messages_by_zone:
+                text = messages_by_zone[zone]
 
             if not text:
                 continue
+            self._record_cue(recipient_id, "staff", current_sim_time, cue, cues_by_zone, zone)
 
             if recipient_id not in self.agent_messages:
                 self.agent_messages[recipient_id] = []
@@ -115,6 +151,8 @@ class MessageSystem:
         exited_agents: set[str],
         messages_by_zone: dict[str, str] | None = None,
         zone_id_for_agent_fn: Any | None = None,
+        cue: dict[str, Any] | None = None,
+        cues_by_zone: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """Deliver a station-wide PA announcement to all agents.
 
@@ -136,14 +174,17 @@ class MessageSystem:
             if agent_id in exited_agents:
                 continue
             text = message_text
-            if messages_by_zone and zone_id_for_agent_fn is not None:
+            zone = None
+            if (messages_by_zone or cues_by_zone) and zone_id_for_agent_fn is not None:
                 zone = zone_id_for_agent_fn(agent_id)
+            if messages_by_zone:
                 if zone and zone in messages_by_zone:
                     text = messages_by_zone[zone]
                 elif not zone and "default" in messages_by_zone:
                     text = messages_by_zone["default"]
             if not text:
                 continue
+            self._record_cue(agent_id, "pa", current_sim_time, cue, cues_by_zone, zone)
             if agent_id not in self.agent_messages:
                 self.agent_messages[agent_id] = []
             self.agent_messages[agent_id].append(
