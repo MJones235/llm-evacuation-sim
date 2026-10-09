@@ -192,7 +192,9 @@ class AgentsConfig(Section):
         None, description="Save the sampled population to this snapshot."
     )
     spawn_min_separation: float = Field(
-        0.35, gt=0, description="Minimum distance between spawned agents (m)."
+        0.5,
+        gt=0,
+        description="Minimum distance between spawned agents (m); JuPedSim rejects closer pairs.",
     )
     knowledge_profiles: dict[str, float] = Field(
         min_length=1,

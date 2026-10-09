@@ -92,7 +92,7 @@ Per-escalator overrides: any subset of :class:`EscalatorParams`.
 | `count` | int | **required** | Number of agents in the initial population. (≥ 0) |
 | `snapshot_load_path` | str \| null | null | Load the population from this snapshot instead of sampling it. |
 | `snapshot_save_path` | str \| null | null | Save the sampled population to this snapshot. |
-| `spawn_min_separation` | float | `0.35` | Minimum distance between spawned agents (m). (> 0) |
+| `spawn_min_separation` | float | `0.5` | Minimum distance between spawned agents (m); JuPedSim rejects closer pairs. (> 0) |
 | `knowledge_profiles` | map[str → float] | **required** | Relative weights of station-knowledge profiles; keys must exist in ``station.knowledge.profiles``. |
 | `personalities` | map[`"N"` \| `"O"` \| `"C"` → map[`"high"` \| `"medium"` \| `"low"` → float]] | `{}` | OCEAN level weights per dimension (Neuroticism, Openness, Conscientiousness); a missing dimension is sampled uniformly. |
 | `age` | AgeRange | *(see below)* | Uniform age range (years). |

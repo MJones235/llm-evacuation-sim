@@ -23,6 +23,9 @@ from evacusim.utils.walking_speed import sample_walking_speed
 
 logger = get_logger(__name__)
 
+SPAWN_OVERSAMPLE = 1.25
+"""Candidate spawn positions generated per agent requested (spares for filtering)."""
+
 
 class AgentManager:
     """Handles complete agent lifecycle management."""
@@ -80,9 +83,10 @@ class AgentManager:
         num_agents = agents.count
         population_seed = derive_seed(params.seed, "population")
 
-        # Generate spawn positions
+        # Generate candidate positions, with spares: some are removed below
+        # for being too close to staff or to each other.
         spawn_positions = SpawnManager.generate_spawn_positions(
-            jps_sim, num_agents, seed=population_seed
+            jps_sim, math.ceil(num_agents * SPAWN_OVERSAMPLE) + 2, seed=population_seed
         )
 
         # Remove any candidate position that falls too close to a pre-spawned
@@ -123,6 +127,10 @@ class AgentManager:
                 f"Filtered {removed_sep} spawn position(s) below {spawn_min_sep:.2f} m "
                 "minimum separation."
             )
+
+        # Pick the agents' positions from the remaining candidates.
+        random.Random(population_seed).shuffle(spawn_positions)
+        spawn_positions = spawn_positions[:num_agents]
 
         # Warn and cap if fewer positions were generated than requested
         # (e.g. some rejected because they fell inside escalator corridors).
