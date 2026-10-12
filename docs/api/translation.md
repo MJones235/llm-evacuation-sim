@@ -1,0 +1,3 @@
+# `evacusim.translation`
+
+::: evacusim.translation

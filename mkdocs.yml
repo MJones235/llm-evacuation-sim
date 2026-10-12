@@ -1,0 +1,90 @@
+site_name: evacusim
+site_description: Pedestrian evacuation simulation with LLM or rule-based decision-making
+repo_url: https://github.com/MJones235/llm-evacuation-sim
+edit_uri: edit/main/docs/
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: {icon: material/brightness-7, name: Dark mode}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: {icon: material/brightness-4, name: Light mode}
+
+markdown_extensions:
+  - admonition
+  - footnotes
+  - tables
+  - toc: {permalink: true}
+  - pymdownx.details
+  - pymdownx.snippets: {base_path: ["."], check_paths: true}
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            docstring_options:
+              warn_missing_types: false
+            show_submodules: true
+            show_source: false
+            members_order: source
+            show_root_heading: false
+            show_signature_annotations: true
+            separate_signature: true
+            filters: ["!^_"]
+            heading_level: 2
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Concepts:
+      - How a run works: concepts/how-a-run-works.md
+      - Decision engines: concepts/decision-engines.md
+      - Escalators: concepts/escalators.md
+      - Events, cues and staff: concepts/events-and-staff.md
+      - Reproducibility: concepts/reproducibility.md
+  - Reference:
+      - Parameters: parameters.md
+      - Outputs: outputs.md
+      - Conventions and glossary: conventions.md
+  - Design decisions:
+      - adr/index.md
+      - 1 Conveyor escalators: adr/0001-conveyor-escalators.md
+      - 2 Typed configuration: adr/0002-typed-configuration.md
+      - 3 The decision seam: adr/0003-decision-seam.md
+      - 4 Decide all, then apply: adr/0004-decide-then-apply.md
+      - 5 Progress watchdog: adr/0005-progress-watchdog.md
+  - API:
+      - config: api/config.md
+      - core: api/core.md
+      - coordination: api/coordination.md
+      - decision: api/decision.md
+      - escalators: api/escalators.md
+      - jps: api/jps.md
+      - systems: api/systems.md
+      - setup: api/setup.md
+      - metrics: api/metrics.md
+      - translation: api/translation.md
+      - calibration: api/calibration.md
+      - concordia: api/concordia.md
+      - visualization: api/visualization.md
+      - utils: api/utils.md
+      - testing: api/testing.md
+      - conventions: api/conventions.md
+  - Changelog: changelog.md

@@ -1,0 +1,3 @@
+# `evacusim.conventions`
+
+::: evacusim.conventions

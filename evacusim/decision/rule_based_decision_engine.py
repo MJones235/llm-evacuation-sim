@@ -75,7 +75,10 @@ class RuleBasedDecisionEngine(DecisionEngine):
     """Cue-driven stages (unaware, aware, evacuating) with weighted exit routing.
 
     Args:
-        w_proximity, w_busyness, w_familiarity, w_visibility: Exit-scoring weights.
+        w_proximity: Exit-scoring weight of a short route.
+        w_busyness: Exit-scoring weight of a quiet exit.
+        w_familiarity: Exit-scoring weight of an exit the agent knows.
+        w_visibility: Exit-scoring weight of an exit in sight.
         crowd_radius_m: Radius for counting the crowd at an exit.
         pace: Pace for journey movement.
         response_median_s: Median delay (s) from a cue to evacuating, by
@@ -87,8 +90,9 @@ class RuleBasedDecisionEngine(DecisionEngine):
         social_min_neighbours: Fewer neighbours than this never make a cue.
         social_strength: Strength of the social cue.
         evacuation_pace: Pace once evacuating.
-        leave_prefer_tags / leave_avoid_tags: Exit tags (``station.exit_semantic_tags``)
-            preferred and avoided when leaving the station.
+        leave_prefer_tags: Exit tags (``station.exit_semantic_tags``) preferred
+            when leaving the station.
+        leave_avoid_tags: Exit tags avoided when leaving the station.
         seed: Run seed (for the per-agent delay draws).
     """
 

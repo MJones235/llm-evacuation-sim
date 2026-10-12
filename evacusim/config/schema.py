@@ -240,7 +240,7 @@ class Cue(Section):
 
     The LLM engine reads the message text; the rule-based engine reads this
     annotation instead. ``strength`` sets how quickly people respond (see
-    ``decision.response``); ``instruction`` is what they are told to do.
+    ``decision.response_median_s``); ``instruction`` is what they are told to do.
     """
 
     strength: Literal["weak", "medium", "strong"]

@@ -1,0 +1,3 @@
+# `evacusim.decision`
+
+::: evacusim.decision
