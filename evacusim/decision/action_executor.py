@@ -239,6 +239,9 @@ class ActionExecutor:
         current_position = self.state_queries.get_agent_position(agent_id)
         if current_position is None:
             return
+        # The waypoint replaces any exit journey; forget the exit too, or a later
+        # choice of the same exit is skipped as 'already routing' (see wait).
+        self.agent_destinations.pop(agent_id, None)
 
         zone_id = self._identify_zone(current_position)
         source = self._resolve_information_source(agent_id, zone_id)

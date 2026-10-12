@@ -424,8 +424,9 @@ class MultiLevelJuPedSimulation:
         * it has **explicitly committed** to this train — its
           ``agent_destinations`` entry equals *exit_name*; or
         * it is a **waiting boarder** — its id is in *eligible_ids*, the set of
-          agents whose goal is to board a train and who are not actively routing
-          away (computed by the caller from agent goals/destinations).
+          agents whose goal is to board a train at this platform and who are not
+          actively routing away (computed by the caller from agent goals,
+          targets and destinations).
 
         Agents actively routing away (a non-train destination such as an
         escalator or street exit) and agents whose goal is to *leave* the

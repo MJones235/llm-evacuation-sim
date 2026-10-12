@@ -13,6 +13,7 @@ Key features:
 """
 
 import contextlib
+import math
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -28,10 +29,16 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from shapely.geometry import Point
 
 from evacusim.concordia.agent_builder import AgentBuilder
-from evacusim.conventions import is_train_exit
+from evacusim.conventions import is_platform_zone, is_train_exit, platform_zone
 from evacusim.coordination.observation_coordinator import ObservationCoordinator
+from evacusim.coordination.progress_watchdog import (
+    REDECIDE_AFTER_S,
+    ProgressWatchdog,
+    sidestep_candidates,
+)
 from evacusim.coordination.simulation_state_queries import SimulationStateQueries
 from evacusim.decision.action_executor import ActionExecutor
 from evacusim.decision.decision_processor import DecisionProcessor
@@ -438,6 +445,12 @@ class HybridSimulationRunner:
         # before their group's turn fires.
         self._pending_immediate_decisions: set[str] = set()
 
+        # People wedged in place by a physics deadlock are sent a step aside,
+        # then decide again (coordination/progress_watchdog.py).
+        self.progress_watchdog = ProgressWatchdog()
+        self._sidestepping: dict[str, float] = {}  # agent -> when to re-decide
+        self._last_watchdog_check_s = -math.inf
+
         # Bootstrap: run a full all-agent decision cycle at the configured start
         # time so every agent has a destination before physics starts.
         self._bootstrap_initial_decisions_enabled = bool(
@@ -753,6 +766,7 @@ class HybridSimulationRunner:
         # 4. Agents whose situation changed and who must re-decide now.
         force_immediate_cycle = self._queue_transferred_agents()
         force_immediate_cycle = self._queue_bounced_agents() or force_immediate_cycle
+        force_immediate_cycle = self._free_stuck_agents() or force_immediate_cycle
 
         # 5. Staff move and give directives (every step, so directive timing is exact).
         self._step_systems(self.current_sim_time)
@@ -798,12 +812,17 @@ class HybridSimulationRunner:
         return "stop"
 
     def _board_trains(self) -> None:
-        """Board waiting passengers onto trains dwelling at their platform.
+        """Board passengers onto trains dwelling at their platform.
 
-        Eligible are agents whose goal is a train and who are not routing away
-        (no destination, or a train exit). Alighters (goal: leave the station)
-        are never re-boarded onto the train they just left. Boarded agents are
-        added to ``exited_agents`` so the exit tracker does not count them again.
+        Someone who chose this train (destination ``train_platform_N``) boards
+        it. So does a waiting passenger: whose goal is a train, who has not
+        chosen to leave by another exit, and who stands on the platform of the
+        train's arrival — their own target platform, if they have one. Before
+        the alarm that is ordinary boarding; after it, a passenger who chose to
+        wait rather than leave catches the next train, as they still have
+        somewhere to be. Alighters (goal: leave the station) are never
+        re-boarded onto the train they just left. Boarded agents are added to
+        ``exited_agents`` so the exit tracker does not count them again.
         """
         if not (
             hasattr(self.jps_sim, "board_agents_on_platform")
@@ -821,10 +840,13 @@ class HybridSimulationRunner:
             )
         }
         for exit_name in sorted(self.event_manager.active_train_exits):
+            platform = platform_zone(exit_name)
             for cid in self.jps_sim.board_agents_on_platform(
                 exit_name,
                 agent_destinations=self.agent_destinations,
-                eligible_ids=boarder_ids,
+                eligible_ids={
+                    aid for aid in boarder_ids if self._waits_for_platform(aid, platform)
+                },
             ):
                 if cid in self.exited_agents:
                     continue
@@ -844,6 +866,11 @@ class HybridSimulationRunner:
                         "validated": True,
                     }
                 )
+
+    def _waits_for_platform(self, agent_id: str, platform: str) -> bool:
+        """True unless the agent's target is a different platform."""
+        target = platform_zone(self.decision_processor.agent_target(agent_id))
+        return not is_platform_zone(target) or target == platform
 
     def _forget_route(self, agent_id: str) -> None:
         """Clear an agent's route commitment so its next decision is fresh."""
@@ -892,6 +919,80 @@ class HybridSimulationRunner:
             self._forget_route(agent_id)
             self._pending_immediate_decisions.add(agent_id)
         return True
+
+    def _free_stuck_agents(self) -> bool:
+        """Step wedged people aside; queue those who stepped aside to re-decide.
+
+        Returns True if anyone is due to re-decide now.
+        """
+        now = self.current_sim_time
+        due = [a for a, t in self._sidestepping.items() if now >= t]
+        for agent_id in due:
+            del self._sidestepping[agent_id]
+            if agent_id not in self.exited_agents:
+                self._pending_immediate_decisions.add(agent_id)
+
+        if now - self._last_watchdog_check_s >= 1.0:
+            self._last_watchdog_check_s = now
+            positions = self.jps_sim.get_all_agent_positions()
+            moving = {
+                a: self._current_target(a)
+                for a in positions
+                if a in self.agents
+                and a not in self.exited_agents
+                and self.agent_action.get(a) == "moving"
+            }
+            escalators = getattr(self.jps_sim, "escalator_system", None)
+            # Waiting at the platform edge for a train is standing still on purpose.
+            exempt = set(self._sidestepping) | {
+                a for a in moving if is_train_exit(self.agent_destinations.get(a, ""))
+            }
+            if escalators is not None:
+                exempt |= {a for a in moving if escalators.is_committed(a)}
+            for agent_id in self.progress_watchdog.stuck(now, positions, moving, exempt):
+                self._sidestep(agent_id, positions, moving.get(agent_id))
+        return bool(due)
+
+    def _current_target(self, agent_id: str) -> tuple[float, float] | None:
+        level_sim = self._level_sim(agent_id)
+        tracker = getattr(level_sim, "agent_tracker", None)
+        return tracker.agent_targets.get(agent_id) if tracker is not None else None
+
+    def _level_sim(self, agent_id: str):
+        sims = getattr(self.jps_sim, "simulations", None)
+        if sims is None:
+            return self.jps_sim
+        level = self.jps_sim.get_agent_level(agent_id)
+        return sims.get(level) if level is not None else None
+
+    def _sidestep(self, agent_id, positions, target) -> None:
+        """Send a wedged agent to free space beside them; they re-decide shortly."""
+        level_sim = self._level_sim(agent_id)
+        if level_sim is None:
+            return
+        pos = positions[agent_id]
+        floor = level_sim.geometry_manager._combined_geometry.buffer(-0.3)
+        others = [p for a, p in positions.items() if a != agent_id]
+        spot = next(
+            (
+                c
+                for c in sidestep_candidates(pos, target)
+                if floor.contains(Point(c)) and all(math.dist(c, p) >= 0.5 for p in others)
+            ),
+            None,
+        )
+        if spot is None:
+            logger.info(f"[WATCHDOG] {agent_id} stuck at {pos} with no free space beside them")
+            return
+        logger.info(f"[WATCHDOG] {agent_id} stuck at {pos}; stepping aside to {spot}")
+        self._forget_route(agent_id)
+        # Someone wedged on the way from an escalator to its egress point or
+        # their platform will not get there now: let them re-decide, or their
+        # decisions are deferred until they arrive, i.e. for ever.
+        for name in ("transfer_escape_waypoints", "transfer_platform_waypoints"):
+            getattr(self.jps_sim, name, {}).pop(agent_id, None)
+        self.jps_sim.set_agent_target(agent_id, spot)
+        self._sidestepping[agent_id] = self.current_sim_time + REDECIDE_AFTER_S
 
     def _fire_events(self) -> tuple[bool, bool, set[str]]:
         """Fire due events and handle departed trains.

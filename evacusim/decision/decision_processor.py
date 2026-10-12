@@ -169,6 +169,10 @@ class DecisionProcessor:
         """Add a runtime-spawned agent's record (the runner adds its entity)."""
         self._agent_cfg[cfg["id"]] = cfg
 
+    def agent_target(self, agent_id: str) -> Any:
+        """The agent's ``target`` (e.g. its platform), or None if it has none."""
+        return self._agent_cfg.get(agent_id, {}).get("target")
+
     def clear_goal_for_redecision(self, agent_id: str) -> None:
         """Let a non-evacuation goal be re-derived, e.g. after changing level."""
         self.situation.goals.clear_for_redecision(agent_id)

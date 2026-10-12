@@ -14,6 +14,8 @@ def test_platform_zone_of_a_target():
     assert platform_zone("train_platform_3") == "platform_3"
     assert platform_zone("Platform_3") == "platform_3"
     assert platform_zone("grey_street") == "grey_street"
+    assert platform_zone(3) == "platform_3"
+    assert platform_zone(" 3 ") == "platform_3"
     assert platform_zone(None) == ""
 
 
