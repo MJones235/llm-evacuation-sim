@@ -7,6 +7,8 @@ Changes that affect what a run does or produces. Pull requests are on
 
 - Documentation site (MkDocs Material, API generated from docstrings),
   replacing the outdated `docs/evacusim/` pages; architecture decision records.
+- `video.title`: the video's title is configurable (it said "Monument
+  Station Evacuation" for every venue).
 
 ## 2026-10-12: Nobody lost or wedged; decisions drive all movement (#16)
 

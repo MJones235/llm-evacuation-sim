@@ -44,6 +44,7 @@ class VideoGenerator:
         geometry: dict | None = None,
         fps: int = 20,
         speedup: float = 1.0,
+        title: str = "Evacuation",
     ):
         """
         Initialize video generator.
@@ -53,11 +54,13 @@ class VideoGenerator:
             geometry: Station geometry dict (or None to load from data)
             fps: Frames per second for output video
             speedup: Speed multiplier (1.0 = real-time, 2.0 = 2x speed)
+            title: Shown above the clock (e.g. the venue).
         """
         self.output_file = output_file
         self.geometry = geometry
         self.fps = fps
         self.speedup = speedup
+        self.title = title
 
         # Load simulation data
         self.data = self._load_data()
@@ -247,7 +250,7 @@ class VideoGenerator:
             )
             ax_escalators = None
 
-        title_text = fig.suptitle("Monument Station Evacuation | Time: 00:00:00", fontsize=14)
+        title_text = fig.suptitle(f"{self.title} | Time: 00:00:00", fontsize=14)
 
         # Setup Level 0 axes
         ax_level_0.set_title("Level 0 - Concourse", fontsize=12, fontweight="bold")
@@ -548,7 +551,7 @@ class VideoGenerator:
 
         # Update title
         time_val = frame_data["time"]
-        title_text.set_text(f"Monument Station Evacuation | Time: {_fmt_clock(time_val)}")
+        title_text.set_text(f"{self.title} | Time: {_fmt_clock(time_val)}")
 
         # Draw blocked exits (if multi-level geometry, show on appropriate level)
         blocked_exits = frame_data.get("blocked_exits", [])
@@ -727,6 +730,7 @@ def generate_video_from_output(
     fps: int = 20,
     speedup: float = 1.0,
     dpi: int = 100,
+    title: str = "Evacuation",
 ) -> bool:
     """
     Generate video from simulation output file.
@@ -738,6 +742,7 @@ def generate_video_from_output(
         fps: Frames per second
         speedup: Speed multiplier
         dpi: Resolution
+        title: Shown above the clock.
 
     Returns:
         True if successful
@@ -745,5 +750,5 @@ def generate_video_from_output(
     if video_path is None:
         video_path = output_file.parent / f"{output_file.stem}_video.mp4"
 
-    generator = VideoGenerator(output_file, geometry, fps, speedup)
+    generator = VideoGenerator(output_file, geometry, fps, speedup, title)
     return generator.generate(video_path, dpi)

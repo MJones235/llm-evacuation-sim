@@ -628,6 +628,7 @@ class VideoConfig(Section):
     enabled: bool = False
     fps: int = Field(20, ge=1)
     speedup: float = Field(1.0, gt=0)
+    title: str = Field("Evacuation", description="Title shown above the video's clock.")
 
 
 class PromptsConfig(Section):

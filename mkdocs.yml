@@ -63,6 +63,7 @@ nav:
       - Parameters: parameters.md
       - Outputs: outputs.md
       - Conventions and glossary: conventions.md
+      - Known limitations: limitations.md
   - Design decisions:
       - adr/index.md
       - 1 Conveyor escalators: adr/0001-conveyor-escalators.md
