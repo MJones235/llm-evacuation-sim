@@ -18,6 +18,9 @@ class _DummySim:
     def set_agent_target(self, agent_id, target):
         self.targets.append((agent_id, target))
 
+    def set_agent_destination_exit(self, agent_id, exit_name):
+        self.targets.append((agent_id, exit_name))
+
 
 class ActionExecutorPaceTests(unittest.TestCase):
     def setUp(self):
@@ -106,3 +109,28 @@ class ActionExecutorPaceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SeekInformationTests(unittest.TestCase):
+    def test_choosing_an_exit_again_after_seeking_information_reroutes(self):
+        """Seeking information replaces the exit journey, so re-choosing that exit must apply."""
+        executor = ActionExecutorPaceTests()._build_executor(
+            agent_destinations={"agent_1": "escalator_b_up"}
+        )
+        executor._resolve_information_source = lambda agent_id, zone: {
+            "id": "firefighter_0",
+            "position": (1.0, 1.0),
+        }
+        executor._safe_follow_target = lambda agent_id, pos, target: target
+        executor._identify_zone = lambda pos: None
+        executor._handle_seek_information_action("agent_1", {})
+        self.assertEqual(executor.jps_sim.targets[-1], ("agent_1", (1.0, 1.0)))
+
+        move = {
+            "action_type": "move",
+            "target": (9.0, 9.0),
+            "target_type": "exit",
+            "resolved_exit_id": "escalator_b_up",
+        }
+        executor._handle_move_action("agent_1", move, (9.0, 9.0))
+        self.assertEqual(executor.jps_sim.targets[-1], ("agent_1", "escalator_b_up"))

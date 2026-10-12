@@ -431,6 +431,12 @@ class EscalatorSystem:
         entry = self.escalators[exit_name]
         q = self.queue[exit_name].pop(agent_id, None)
         self.queued_on.pop(agent_id, None)
+        if entry.conveyor.closed:
+            # Reached the strip as the escalator closed (or was matched to it
+            # while standing at its landing). A closed belt never admits
+            # anyone, so holding them at the comb would lose them for good.
+            self._return_to_landing(entry, agent_id)
+            return
         lane = q.lane if q is not None else self.lane_for(agent_id, exit_name)
         walking = self.admitted_walking[exit_name]
         if walking.get(lane) == agent_id:
@@ -451,6 +457,41 @@ class EscalatorSystem:
             # Admitted while there was room, but the lane filled or the belt
             # paused before they stepped on: they wait at the comb.
             self.boarding_hold[exit_name].append((agent_id, lane, time_s))
+
+    def _return_to_landing(self, entry: _Entry, agent_id: str) -> None:
+        """Put an agent who reached a closed escalator back on its floor to re-decide."""
+        level = entry.spec.from_level
+        level_sim = self.ml.simulations[level]
+        floor = level_sim.geometry_manager._combined_geometry.buffer(-0.25)
+        occupied = list(level_sim.agent_tracker.get_all_positions().values())
+        lx, ly = entry.landing_point
+        candidates = [(lx, ly)] + [
+            (lx + r * math.cos(a), ly + r * math.sin(a))
+            for r in (0.6, 1.2, 1.8, 2.4, 3.0)
+            for a in (k * math.pi / 6 for k in range(12))
+        ]
+        spot = next(
+            (
+                c
+                for c in candidates
+                if floor.contains(Point(c))
+                and all(math.dist(c, p) >= MIN_AGENT_SEP for p in occupied)
+            ),
+            None,
+        )
+        if spot is None:
+            logger.warning(
+                f"[ESCALATOR] {agent_id} reached closed {entry.spec.exit_name}; "
+                "no free spot to return them to"
+            )
+            return
+        base = self.ml.agent_base_speed.get(agent_id, 1.34)
+        level_sim.add_agent(agent_id, spot, walking_speed=base, assign_default_destination=False)
+        self.ml.agent_levels[agent_id] = level
+        self.ml.agents_needing_redecision.add(agent_id)
+        logger.info(
+            f"[ESCALATOR] {agent_id} reached closed {entry.spec.exit_name}; returned to {spot}"
+        )
 
     def step(self, dt: float, time_s: float) -> None:
         positions = {

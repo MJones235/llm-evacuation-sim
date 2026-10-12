@@ -161,6 +161,19 @@ def test_closing_escalator_releases_queue_and_riders_finish():
     assert late in ml.agents_needing_redecision and late not in es.discovering
 
 
+def test_reaching_a_closed_escalator_returns_the_agent_to_the_floor():
+    """Removed at the strip as it closes: back on the floor to re-decide, not lost."""
+    ml = make_sim()
+    es = ml.escalator_system
+    ml.block_escalator("escalator_f_up")
+    ml.agents_needing_redecision.clear()
+    es.board("late", "escalator_f_up", 15.0)  # what check_exits does on removal
+    assert ml.agent_levels.get("late") == "-1"
+    assert ml.get_agent_position("late") is not None
+    assert "late" in ml.agents_needing_redecision
+    assert not es.boarding_hold["escalator_f_up"] and "late" not in es.riding
+
+
 def test_pre_blocked_escalator_is_not_offered():
     ml = make_sim(initially_blocked_exits={"escalator_f_up"})
     assert "escalator_f_up" not in ml.simulations["-1"].exit_manager.evacuation_exits

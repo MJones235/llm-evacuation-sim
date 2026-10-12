@@ -13,6 +13,8 @@ import math
 import random
 from typing import Any
 
+from shapely.geometry import Point
+
 from evacusim.config.schema import AgentRole, RunConfig
 from evacusim.jps.simulation_interface import PedestrianSimulation
 from evacusim.setup.agent_factory import AgentFactory
@@ -25,6 +27,8 @@ logger = get_logger(__name__)
 
 SPAWN_OVERSAMPLE = 1.25
 """Candidate spawn positions generated per agent requested (spares for filtering)."""
+EXIT_SPAWN_CLEARANCE_M = 1.0
+"""How far from a street exit passengers may start."""
 
 
 class AgentManager:
@@ -113,6 +117,16 @@ class AgentManager:
                     f"pre-placed director agents (min separation {_MIN_SEP} m)."
                 )
 
+        # Nobody starts inside a street exit: JuPedSim would remove them in the
+        # first step, before the exit log is kept, as if they had never been there.
+        before_exits = len(spawn_positions)
+        spawn_positions = AgentManager._filter_positions_off_exits(jps_sim, spawn_positions)
+        if before_exits - len(spawn_positions):
+            logger.info(
+                f"Filtered {before_exits - len(spawn_positions)} spawn position(s) "
+                "inside or next to a street exit."
+            )
+
         # Enforce inter-passenger spawn spacing to avoid JuPedSim insertion
         # failures from near-overlapping sampled points.
         spawn_min_sep = agents.spawn_min_separation
@@ -161,6 +175,26 @@ class AgentManager:
             save_snapshot(agents_config, snapshot_save_path)
 
         return agents_config
+
+    @staticmethod
+    def _filter_positions_off_exits(
+        jps_sim: Any, positions: list[tuple], clearance: float = EXIT_SPAWN_CLEARANCE_M
+    ) -> list[tuple]:
+        """Drop positions inside, or within ``clearance`` of, a street exit on their level."""
+        levels = getattr(jps_sim, "simulations", None) or {None: jps_sim}
+        exits = {
+            level_id: [
+                poly.buffer(clearance) for poly in sim.geometry_manager.entrance_areas.values()
+            ]
+            for level_id, sim in levels.items()
+        }
+        kept = []
+        for pos in positions:
+            level_id = str(pos[2]) if len(pos) == 3 else None
+            areas = exits.get(level_id, exits.get(None, []))
+            if not any(area.contains(Point(pos[0], pos[1])) for area in areas):
+                kept.append(pos)
+        return kept
 
     @staticmethod
     def _filter_positions_by_min_separation(
