@@ -18,6 +18,12 @@ from evacusim.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+FRAMES_FILENAME = "frames.jsonl"
+"""Position frames in a run directory (one JSON object per line, every 0.5 s)."""
+
+LEGACY_FRAMES_FILENAMES = ("agent_decisions_history.jsonl", "agent_decisions_history.json")
+"""Names the frames file had in runs made before October 2026."""
+
 
 class PositionHistoryTracker:
     """

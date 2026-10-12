@@ -198,3 +198,18 @@ class EventTests(SchemaTests):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OverlayTests(unittest.TestCase):
+    def test_overlays_merge_on_top_in_order(self):
+        import tempfile
+        from pathlib import Path
+
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base, engine = Path(tmp) / "scenario.yaml", Path(tmp) / "engine.yaml"
+            base.write_text(yaml.safe_dump(MINIMAL))
+            engine.write_text(yaml.safe_dump({"decision": {"engine": "rule_based"}}))
+            run = ConfigLoader.load_run_config(str(base), overlays=[str(engine)])
+        self.assertEqual(run.decision.engine, "rule_based")

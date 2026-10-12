@@ -37,6 +37,7 @@ class ConfigLoader:
         max_steps: int | None = None,
         output_dir: str | None = None,
         start_time_s: float | None = None,
+        overlays: list[str] | tuple[str, ...] = (),
     ) -> RunConfig:
         """Load a config file, apply command-line overrides and validate it.
 
@@ -46,6 +47,8 @@ class ConfigLoader:
             max_steps: Overrides ``simulation.max_iterations``.
             output_dir: Overrides ``output.directory``.
             start_time_s: Overrides ``simulation.start_time_s``.
+            overlays: Further config files merged on top, in order (e.g. the
+                decision engine for a scenario).
 
         Returns:
             The run's typed parameters, with every default filled in.
@@ -55,6 +58,8 @@ class ConfigLoader:
             ConfigError: The configuration does not match the schema.
         """
         config = ConfigLoader.load_config(config_path)
+        for overlay in overlays:
+            config = ConfigLoader._deep_merge(config, ConfigLoader.load_config(overlay))
         config = ConfigLoader.apply_cli_overrides(
             config, agents, max_steps, output_dir, start_time_s
         )

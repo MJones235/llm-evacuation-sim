@@ -47,7 +47,7 @@ from evacusim.systems.messaging import MessageSystem
 from evacusim.translation import ActionTranslator, ObservationGenerator
 from evacusim.utils.logger import get_logger
 from evacusim.utils.performance_monitor import PerformanceTimer
-from evacusim.visualization.position_history import PositionHistoryTracker
+from evacusim.visualization.position_history import FRAMES_FILENAME, PositionHistoryTracker
 
 logger = get_logger(__name__)
 
@@ -378,7 +378,7 @@ class HybridSimulationRunner:
             # frames are written immediately instead of accumulating in memory.
             streaming_path = None
             if output_file is not None:
-                streaming_path = output_file.parent / f"{output_file.stem}_history.jsonl"
+                streaming_path = output_file.parent / FRAMES_FILENAME
             self.position_tracker = PositionHistoryTracker(
                 save_interval=0.5, streaming_path=streaming_path
             )
@@ -1127,7 +1127,7 @@ class HybridSimulationRunner:
                 logger.error(f"Failed to write calibration report: {e}", exc_info=True)
 
         if self.position_tracker and self.output_file:
-            history_file = self.output_file.parent / f"{self.output_file.stem}_history.jsonl"
+            history_file = self.output_file.parent / FRAMES_FILENAME
             self.position_tracker.save_to_file(history_file)
             results["position_history_file"] = str(history_file)
 
@@ -1137,7 +1137,7 @@ class HybridSimulationRunner:
 
         # Save position history if available
         if self.position_tracker and self.output_file:
-            history_file = self.output_file.parent / f"{self.output_file.stem}_history.jsonl"
+            history_file = self.output_file.parent / FRAMES_FILENAME
             self.position_tracker.save_to_file(history_file)
             logger.info(f"Position history saved to {history_file}")
 
