@@ -32,7 +32,7 @@ from rich.progress import (
 from shapely.geometry import Point
 
 from evacusim.concordia.agent_builder import AgentBuilder
-from evacusim.conventions import is_train_exit
+from evacusim.conventions import is_platform_zone, is_train_exit, platform_zone
 from evacusim.coordination.observation_coordinator import ObservationCoordinator
 from evacusim.coordination.progress_watchdog import (
     REDECIDE_AFTER_S,
@@ -812,12 +812,17 @@ class HybridSimulationRunner:
         return "stop"
 
     def _board_trains(self) -> None:
-        """Board waiting passengers onto trains dwelling at their platform.
+        """Board passengers onto trains dwelling at their platform.
 
-        Eligible are agents whose goal is a train and who are not routing away
-        (no destination, or a train exit). Alighters (goal: leave the station)
-        are never re-boarded onto the train they just left. Boarded agents are
-        added to ``exited_agents`` so the exit tracker does not count them again.
+        Someone who chose this train (destination ``train_platform_N``) boards
+        it. So does a waiting passenger: whose goal is a train, who has not
+        chosen to leave by another exit, and who stands on the platform of the
+        train's arrival — their own target platform, if they have one. Before
+        the alarm that is ordinary boarding; after it, a passenger who chose to
+        wait rather than leave catches the next train, as they still have
+        somewhere to be. Alighters (goal: leave the station) are never
+        re-boarded onto the train they just left. Boarded agents are added to
+        ``exited_agents`` so the exit tracker does not count them again.
         """
         if not (
             hasattr(self.jps_sim, "board_agents_on_platform")
@@ -835,10 +840,13 @@ class HybridSimulationRunner:
             )
         }
         for exit_name in sorted(self.event_manager.active_train_exits):
+            platform = platform_zone(exit_name)
             for cid in self.jps_sim.board_agents_on_platform(
                 exit_name,
                 agent_destinations=self.agent_destinations,
-                eligible_ids=boarder_ids,
+                eligible_ids={
+                    aid for aid in boarder_ids if self._waits_for_platform(aid, platform)
+                },
             ):
                 if cid in self.exited_agents:
                     continue
@@ -858,6 +866,11 @@ class HybridSimulationRunner:
                         "validated": True,
                     }
                 )
+
+    def _waits_for_platform(self, agent_id: str, platform: str) -> bool:
+        """True unless the agent's target is a different platform."""
+        target = platform_zone(self.decision_processor.agent_target(agent_id))
+        return not is_platform_zone(target) or target == platform
 
     def _forget_route(self, agent_id: str) -> None:
         """Clear an agent's route commitment so its next decision is fresh."""
@@ -973,6 +986,11 @@ class HybridSimulationRunner:
             return
         logger.info(f"[WATCHDOG] {agent_id} stuck at {pos}; stepping aside to {spot}")
         self._forget_route(agent_id)
+        # Someone wedged on the way from an escalator to its egress point or
+        # their platform will not get there now: let them re-decide, or their
+        # decisions are deferred until they arrive, i.e. for ever.
+        for name in ("transfer_escape_waypoints", "transfer_platform_waypoints"):
+            getattr(self.jps_sim, name, {}).pop(agent_id, None)
         self.jps_sim.set_agent_target(agent_id, spot)
         self._sidestepping[agent_id] = self.current_sim_time + REDECIDE_AFTER_S
 

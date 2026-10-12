@@ -117,6 +117,7 @@ A behavioural role assigned to agents by spawn zone.
 | `goal` | str | `"Continue your planned journey."` | Goal template. |
 | `memories` | list[str] | `[]` | Initial memory templates. |
 | `target` | list[str \| int] | `[]` | Values sampled for the ``{target}`` placeholder. |
+| `target_from_zone` | bool | `false` | Agents spawned on a platform zone (``platform_N``) get ``N`` as their target instead of a sampled one, e.g. passengers waiting for that platform's train. |
 | `decision_prompt_extra` | str | `""` | Extra decision-prompt text for this role (LLM engine). |
 
 ## `events[]` — MessageEvent

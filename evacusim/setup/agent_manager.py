@@ -16,6 +16,7 @@ from typing import Any
 from shapely.geometry import Point
 
 from evacusim.config.schema import AgentRole, RunConfig
+from evacusim.conventions import PLATFORM_ZONE_PREFIX, is_platform_zone
 from evacusim.jps.simulation_interface import PedestrianSimulation
 from evacusim.setup.agent_factory import AgentFactory
 from evacusim.setup.spawn_manager import SpawnManager
@@ -293,6 +294,10 @@ class AgentManager:
             role = roles.get(agent_cfg["agent_role"]) or AgentRole()
             if role.target:
                 agent_cfg["target"] = random.choice(role.target)
+            # Someone waiting on a platform waits for that platform's train.
+            # Drawn above regardless, so the seeded sequence is the same either way.
+            if role.target_from_zone and is_platform_zone(initial_zone):
+                agent_cfg["target"] = int(initial_zone[len(PLATFORM_ZONE_PREFIX) :])
 
             # Format goal and memory templates now that role, target, and purpose are known.
             subs = {
@@ -315,7 +320,10 @@ class AgentManager:
             agent_cfg["walking_speed"] = walking_speed
 
             # Add agent with level_id for multi-level simulations.
-            # Agents should always have an active JuPedSim destination journey at spawn.
+            # Agents hold at their spawn point until a decision gives them
+            # somewhere to go: a default exit journey would walk them out of the
+            # station with no decision behind it. (Escalator dismounts are kept
+            # moving by PostTransferRouting, not by a default journey.)
             if hasattr(jps_sim, "simulations"):
                 # Multi-level simulation
                 jps_sim.add_agent(
@@ -323,7 +331,7 @@ class AgentManager:
                     start_pos,
                     walking_speed=walking_speed,
                     level_id=level_id,
-                    assign_default_destination=True,
+                    assign_default_destination=False,
                 )
             else:
                 # Single-level simulation
@@ -331,7 +339,7 @@ class AgentManager:
                     agent_id,
                     start_pos,
                     walking_speed=walking_speed,
-                    assign_default_destination=True,
+                    assign_default_destination=False,
                 )
 
     @staticmethod
@@ -345,8 +353,7 @@ class AgentManager:
 
         All agent attributes (position, speed, level) are taken directly from the
         saved agent-config dicts, so no spawn generation or zone inference is
-        performed. Agents are spawned with a default JuPedSim destination journey
-        exactly as in the normal path.
+        performed. Agents hold at their spawn point exactly as in the normal path.
 
         Args:
             jps_sim: Freshly initialised simulation (single- or multi-level).
@@ -364,14 +371,14 @@ class AgentManager:
                     start_pos,
                     walking_speed=walking_speed,
                     level_id=level_id,
-                    assign_default_destination=True,
+                    assign_default_destination=False,
                 )
             else:
                 jps_sim.add_agent(
                     agent_id,
                     start_pos,
                     walking_speed=walking_speed,
-                    assign_default_destination=True,
+                    assign_default_destination=False,
                 )
 
     @staticmethod

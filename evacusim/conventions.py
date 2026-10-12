@@ -44,10 +44,13 @@ def is_train_exit(exit_id: str | None) -> bool:
 def platform_zone(target: str | None) -> str:
     """The platform zone an agent's target refers to.
 
-    ``train_platform_3`` and ``platform_3`` both give ``platform_3``; other
-    targets are returned lower-cased and unchanged.
+    ``train_platform_3``, ``platform_3`` and a bare platform number (``3``,
+    as role targets give it) all give ``platform_3``; other targets are
+    returned lower-cased and unchanged.
     """
-    t = str(target or "").strip().lower()
+    t = str(target if target is not None else "").strip().lower()
+    if t.isdigit():
+        return f"{PLATFORM_ZONE_PREFIX}{t}"
     return t[len("train_") :] if t.startswith(TRAIN_EXIT_PREFIX) else t
 
 

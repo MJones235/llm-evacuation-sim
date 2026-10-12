@@ -45,6 +45,31 @@ def test_reaching_egress_distributes_agents_across_assigned_platform():
     assert simulation.transfer_escape_waypoints == {}
 
 
+def test_boarder_who_rode_up_is_not_sent_to_a_platform_below():
+    """A passenger with a train goal who evacuated up clears the landing and decides."""
+    platform = Point(-50.0, 35.0).buffer(5.0)
+    simulation = SimpleNamespace(
+        transfer_escape_waypoints={"evacuee": (45.0, 38.17)},
+        transfer_platform_waypoints={},
+        target=None,
+        simulations={},
+        platform_level="-1",
+    )
+    simulation.set_agent_target = lambda agent_id, target: setattr(simulation, "target", target)
+    simulation.get_agent_level = lambda agent_id: "0"
+    routing = _routing(
+        simulation,
+        {"evacuee": {"target": 3}},
+        {"platform_3": platform},
+        goals={"evacuee": "Wait on Platform 3 and board your train when it arrives."},
+    )
+
+    assert routing.should_defer("evacuee", (42.6, 36.34))  # still clearing the landing
+    assert simulation.transfer_platform_waypoints == {}
+    assert simulation.target is None
+    assert not routing.should_defer("evacuee", (45.0, 38.0))  # at the egress point
+
+
 def test_concourse_transfer_requests_exit_choice_without_stopping():
     simulation = SimpleNamespace(
         transfer_escape_waypoints={"alighter": (42.2, 38.42)},

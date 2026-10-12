@@ -108,9 +108,21 @@ class PostTransferRouting:
     def _platform_approach_waypoint(
         self, agent_id: str, position: tuple[float, float]
     ) -> tuple[float, float] | None:
-        """A stable per-agent random point on the agent's target platform, if it has one."""
+        """A stable per-agent random point on the agent's target platform, if it has one.
+
+        None unless the agent is on the platform level: a passenger with a
+        train goal who rode up (e.g. evacuating) cannot walk to a point on a
+        platform below, and would never arrive and so never decide again.
+        """
         zone = platform_zone(self._agent_cfg.get(agent_id, {}).get("target", ""))
         if not is_platform_zone(zone):
+            return None
+
+        level_id = self._jps_sim.get_agent_level(agent_id)
+        platform_level = getattr(self._jps_sim, "platform_level", None)
+        if platform_level is not None and level_id != platform_level:
+            return None
+        if platform_level is None and level_id == self._street_level:
             return None
 
         polygon = self._zones_polygons.get(zone)
@@ -120,7 +132,6 @@ class PostTransferRouting:
         if safe_polygon.is_empty:
             safe_polygon = polygon
 
-        level_id = self._jps_sim.get_agent_level(agent_id)
         level_sim = getattr(self._jps_sim, "simulations", {}).get(level_id)
         combined = getattr(getattr(level_sim, "geometry_manager", None), "_combined_geometry", None)
         if combined is not None and not combined.is_empty:

@@ -173,6 +173,14 @@ class AgentRole(Section):
     target: list[str | int] = Field(
         default_factory=list, description="Values sampled for the ``{target}`` placeholder."
     )
+    target_from_zone: bool = Field(
+        False,
+        description=(
+            "Agents spawned on a platform zone (``platform_N``) get ``N`` as their"
+            " target instead of a sampled one, e.g. passengers waiting for that"
+            " platform's train."
+        ),
+    )
     decision_prompt_extra: str = Field(
         "", description="Extra decision-prompt text for this role (LLM engine)."
     )
