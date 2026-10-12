@@ -1,5 +1,6 @@
-"""
-Core abstractions: Scenario base class, typed event definitions, agent role registry.
+"""The decision-engine interface shared by every engine.
 
-Venue-specific scenarios subclass Scenario and register their roles and events here.
+:mod:`evacusim.core.decision_engine` defines what an engine is given
+(:class:`DecisionContext`, with :class:`ExitOption` per offered exit) and what
+it returns (:class:`DecisionResult`), and the :class:`DecisionEngine` base class.
 """

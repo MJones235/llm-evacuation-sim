@@ -1,0 +1,3 @@
+# `evacusim.coordination`
+
+::: evacusim.coordination

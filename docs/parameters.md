@@ -481,6 +481,7 @@ Normal operations: passengers arrive over time from observed usage data.
 | `enabled` | bool | `false` |  |
 | `fps` | int | `20` | (≥ 1) |
 | `speedup` | float | `1.0` | (> 0) |
+| `title` | str | `"Evacuation"` | Title shown above the video's clock. |
 
 ## `prompts` — PromptsConfig
 

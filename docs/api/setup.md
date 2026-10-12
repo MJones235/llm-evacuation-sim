@@ -1,0 +1,3 @@
+# `evacusim.setup`
+
+::: evacusim.setup

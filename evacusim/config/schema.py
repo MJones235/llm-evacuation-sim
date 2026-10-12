@@ -240,7 +240,7 @@ class Cue(Section):
 
     The LLM engine reads the message text; the rule-based engine reads this
     annotation instead. ``strength`` sets how quickly people respond (see
-    ``decision.response``); ``instruction`` is what they are told to do.
+    ``decision.response_median_s``); ``instruction`` is what they are told to do.
     """
 
     strength: Literal["weak", "medium", "strong"]
@@ -628,6 +628,7 @@ class VideoConfig(Section):
     enabled: bool = False
     fps: int = Field(20, ge=1)
     speedup: float = Field(1.0, gt=0)
+    title: str = Field("Evacuation", description="Title shown above the video's clock.")
 
 
 class PromptsConfig(Section):

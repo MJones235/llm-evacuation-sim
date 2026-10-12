@@ -1,0 +1,3 @@
+# `evacusim.metrics`
+
+::: evacusim.metrics

@@ -1,8 +1,8 @@
-"""
-Metrics and reporting.
+"""Run outputs and measurement.
 
-Provides:
-- PopulationMonitor: records zone occupancy snapshots at configurable intervals
-- LLMCostReporter: tracks and reports LLM token usage and estimated cost (GBP)
-- RegressionHarness: compares baseline and candidate runs on quality KPIs
+- :mod:`~evacusim.metrics.manifest`: ``manifest.json``, what produced a run.
+- :class:`ResultsWriter` and :class:`RunRecord`: every output file.
+- :class:`PopulationMonitor`: zone occupancy over time.
+- :class:`LLMCostReporter`: LLM token use and estimated cost (GBP).
+- :mod:`~evacusim.metrics.regression_harness`: compare two runs on quality KPIs.
 """

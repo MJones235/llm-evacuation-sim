@@ -255,6 +255,7 @@ class VideoGenerationHelper:
         network_path: Path,
         fps: int = 20,
         speedup: float = 1.0,
+        title: str = "Evacuation",
     ) -> bool:
         """
         Generate video from simulation output.
@@ -265,6 +266,7 @@ class VideoGenerationHelper:
             network_path: Path to station network directory
             fps: Frames per second
             speedup: Speed multiplier
+            title: Shown above the clock (e.g. the venue).
 
         Returns:
             True if video was generated successfully
@@ -307,6 +309,7 @@ class VideoGenerationHelper:
                 geometry=geometry,
                 fps=fps,
                 speedup=speedup,
+                title=title,
             )
 
             if video_success:

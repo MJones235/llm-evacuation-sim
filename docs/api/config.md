@@ -1,0 +1,3 @@
+# `evacusim.config`
+
+::: evacusim.config

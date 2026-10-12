@@ -29,3 +29,14 @@ jobs:
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e '.[dev]'
       - run: pytest -q --cov=evacusim --cov-report=term-missing:skip-covered
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The API pages are read from the source, so evacusim need not be installed.
+      - run: pip install "mkdocs-material>=9.5" "mkdocstrings[python]>=0.26"
+      - run: mkdocs build --strict

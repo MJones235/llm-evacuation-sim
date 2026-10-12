@@ -1,0 +1,3 @@
+# `evacusim.core`
+
+::: evacusim.core
