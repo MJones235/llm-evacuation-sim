@@ -43,7 +43,7 @@ class VideoGenerator:
         output_file: Path,
         geometry: dict | None = None,
         fps: int = 20,
-        speedup: float = 1.0,
+        speedup: float = 10.0,
         title: str = "Evacuation",
     ):
         """
@@ -52,8 +52,8 @@ class VideoGenerator:
         Args:
             output_file: Path to agent decisions JSON file
             geometry: Station geometry dict (or None to load from data)
-            fps: Frames per second for output video
-            speedup: Speed multiplier (1.0 = real-time, 2.0 = 2x speed)
+            fps: Maximum frames per second of the video
+            speedup: Playback speed (1.0 = real time, 10.0 = ten times faster)
             title: Shown above the clock (e.g. the venue).
         """
         self.output_file = output_file
@@ -704,13 +704,14 @@ class VideoGenerator:
             # Setup figure
             fig, axes_dict, title_text = self._setup_figure()
 
-            # Setup video writer
-            writer = FFMpegWriter(fps=self.fps, metadata={"artist": "NewcastleSim"})
+            stride, fps = frame_plan(
+                [f.get("time", 0.0) for f in self.time_series], self.fps, self.speedup
+            )
+            logger.info(f"Writing every {stride} frame(s) at {fps:.2f} fps")
+            writer = FFMpegWriter(fps=fps, metadata={"artist": "evacusim"})
 
             with writer.saving(fig, str(output_path), dpi=dpi):
-                # For now, we only have one frame (final state)
-                # In a proper implementation, we'd iterate through time series
-                for frame_data in self.time_series:
+                for frame_data in self.time_series[::stride]:
                     self._draw_frame(axes_dict, frame_data, title_text)
                     writer.grab_frame()
 
@@ -723,12 +724,31 @@ class VideoGenerator:
             return False
 
 
+def frame_plan(times: list[float], max_fps: int, speedup: float) -> tuple[int, float]:
+    """Which frames to write, and at what rate, to play at ``speedup`` x real time.
+
+    Frames are saved every ``dt`` simulated seconds (0.5 s). Showing every frame
+    at ``speedup`` needs ``speedup / dt`` frames per second; above ``max_fps``,
+    every ``stride``-th frame is written instead.
+
+    Returns:
+        ``(stride, fps)``: write ``frames[::stride]`` at ``fps``.
+    """
+    gaps = sorted(b - a for a, b in zip(times, times[1:], strict=False) if b > a)
+    dt = gaps[len(gaps) // 2] if gaps else 0.5
+    wanted = speedup / dt
+    if wanted <= max_fps:
+        return 1, wanted
+    stride = max(1, round(wanted / max_fps))
+    return stride, speedup / (dt * stride)
+
+
 def generate_video_from_output(
     output_file: Path,
     video_path: Path | None = None,
     geometry: dict | None = None,
     fps: int = 20,
-    speedup: float = 1.0,
+    speedup: float = 10.0,
     dpi: int = 100,
     title: str = "Evacuation",
 ) -> bool:

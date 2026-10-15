@@ -626,8 +626,10 @@ class OutputConfig(Section):
 
 class VideoConfig(Section):
     enabled: bool = False
-    fps: int = Field(20, ge=1)
-    speedup: float = Field(1.0, gt=0)
+    fps: int = Field(20, ge=1, description="Maximum frames per second of the video.")
+    speedup: float = Field(
+        10.0, gt=0, description="Playback speed: 1 = real time, 10 = a 15-minute run in 90 s."
+    )
     title: str = Field("Evacuation", description="Title shown above the video's clock.")
 
 

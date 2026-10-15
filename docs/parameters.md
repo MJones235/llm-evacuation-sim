@@ -479,8 +479,8 @@ Normal operations: passengers arrive over time from observed usage data.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `enabled` | bool | `false` |  |
-| `fps` | int | `20` | (≥ 1) |
-| `speedup` | float | `1.0` | (> 0) |
+| `fps` | int | `20` | Maximum frames per second of the video. (≥ 1) |
+| `speedup` | float | `10.0` | Playback speed: 1 = real time, 10 = a 15-minute run in 90 s. (> 0) |
 | `title` | str | `"Evacuation"` | Title shown above the video's clock. |
 
 ## `prompts` — PromptsConfig

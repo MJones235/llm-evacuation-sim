@@ -254,7 +254,7 @@ class VideoGenerationHelper:
         run_id: str,
         network_path: Path,
         fps: int = 20,
-        speedup: float = 1.0,
+        speedup: float = 10.0,
         title: str = "Evacuation",
     ) -> bool:
         """
